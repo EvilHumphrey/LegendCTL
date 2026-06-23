@@ -1,0 +1,32 @@
+# Dependabot — keeps dependencies and CI actions patched against known CVEs.
+# Destination in the public repo: .github/dependabot.yml
+#
+# Pairs with the pip-audit job in ci.yml: pip-audit catches a CVE at PR/run time;
+# Dependabot proactively opens the bump PRs (which CI then gates).
+
+version: 2
+updates:
+  # Python runtime + build deps (requirements.txt, requirements-build.txt at root).
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    commit-message:
+      prefix: deps
+
+  # GitHub Actions pinned in the CI workflow (actions/checkout, setup-python, …).
+  # Keeps action versions current; complements (or lets you later move to)
+  # full-SHA pinning for supply-chain hardening.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: ci

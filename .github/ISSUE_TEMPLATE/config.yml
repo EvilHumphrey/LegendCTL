@@ -1,0 +1,9 @@
+# Force questions toward Discussions; only the Bug report form remains for Issues.
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & general help
+    url: https://github.com/EvilHumphrey/LegendCTL/discussions
+    about: "Ask questions, \"how do I…\", and \"is this expected?\" here instead of opening an issue."
+  - name: Security report
+    url: https://github.com/EvilHumphrey/LegendCTL/security/policy
+    about: Found a security issue? Report it privately — see SECURITY.md, not a public issue.

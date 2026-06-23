@@ -1,0 +1,54 @@
+# Virtual environments
+.venv*/
+venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+build/
+dist/
+
+# Local installed copy of the app (mirrored from dist\ by tools\install_local.ps1
+# so Desktop/Start Menu shortcuts have a stable target). Not source; regenerable.
+local-install/
+
+# Local tooling / editor dirs
+.claude/
+
+# Smoke/diagnostic scratch
+tools/.smoke_tmp/
+tools/.console_herder.log
+
+# Runtime user data (created by the app at runtime)
+zd_data/
+sessions/
+exports/
+
+# Local log scratch
+logs/*.stderr.txt
+logs/*.stdout.txt
+logs/write_test*.bin
+
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+secrets/
+credentials.json
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+tools/symbols/

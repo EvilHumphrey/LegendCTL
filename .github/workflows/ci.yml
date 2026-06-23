@@ -1,0 +1,115 @@
+name: CI
+
+# Runs the LegendCTL test suite — INCLUDING the constraint-architecture gates
+# (forbidden-phrase, field-registry drift, i18n parity, shipped-source hygiene)
+# documented in docs/ARCHITECTURE.md. Those gates are what make the project's
+# "no drivers / no input injection / no network / verified writes / no maintainer
+# username in shipped source" claims *enforced* rather than aspirational. A red
+# check here means a security/honesty constraint regressed — treat it as blocking.
+#
+# Destination in the public repo: .github/workflows/ci.yml
+# Default branch assumed to be `main`; adjust the `branches:` filters if different.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Least-privilege token. PR CI only needs to read the checked-out tree. Never
+# escalate to `write` here — this workflow runs untrusted code from fork PRs.
+# (We use `pull_request`, NOT `pull_request_target`, so fork code never sees
+# repo secrets.)
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test suite (Windows · Python 3.12)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run test suite (constraint gates included)
+        shell: pwsh
+        run: |
+          # tests/__init__.py installs a shared Dear PyGui context shim so
+          # `unittest discover` runs clean in a single process. Historically a
+          # DPG teardown segfault could still surface as process exit code 139
+          # AFTER every test passed and the summary printed. So we decide
+          # pass/fail from the unittest *summary line*, not the raw exit code —
+          # the project's own rule (docs/ARCHITECTURE.md, "Test architecture":
+          # "exit code 139 on teardown is a known DPG segfault artifact, not a
+          # failure"). unittest writes its output to stderr, hence 2>&1.
+          $ErrorActionPreference = 'Continue'
+          python -m unittest discover -s tests 2>&1 | Tee-Object -FilePath test_output.txt
+          $code = $LASTEXITCODE
+          $log  = Get-Content test_output.txt -Raw
+
+          if ($log -match '(?m)^FAILED \(') {
+            Write-Host "::error::unittest reported FAILED — see summary above."
+            exit 1
+          }
+          elseif ($log -match '(?m)^OK\b') {
+            Write-Host "Suite PASSED. (process exit code = $code; 139 = known DPG teardown artifact, ignored)"
+            exit 0
+          }
+          else {
+            Write-Host "::error::No unittest 'OK' summary found (exit code $code). Likely a crash/segfault BEFORE the summary — investigate; do not treat as green."
+            exit 1
+          }
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-output
+          path: test_output.txt
+          retention-days: 14
+
+  audit:
+    name: Dependency CVE audit (pip-audit)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps + pip-audit
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          pip install -r requirements.txt -r requirements-build.txt
+
+      - name: Audit installed environment for known CVEs
+        # requirements-build.txt itself asks for this before tagging a release;
+        # this makes it continuous. Dependabot (see .github/dependabot.yml) keeps
+        # the pins fresh between audits.
+        #
+        # Triage pattern: if a finding is not applicable to the shipped app
+        # (e.g. a PyInstaller advisory scoped to the build host, not the bundled
+        # exe), SUPPRESS it with a written reason rather than dropping the gate:
+        #   run: pip-audit --ignore-vuln GHSA-xxxx-xxxx-xxxx  # why it doesn't apply
+        # Tip: in branch protection, keep `test` required but leave this `audit`
+        # job non-required until the baseline is clean, so a day-one transitive
+        # advisory doesn't block merges while you add the justified ignore.
+        run: pip-audit

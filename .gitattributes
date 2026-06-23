@@ -1,0 +1,14 @@
+# Normalize all text files to LF in the index; working trees follow
+# core.autocrlf / platform settings. The index was verified all-LF on
+# 2026-06-11 (git ls-files --eol: zero i/crlf, zero i/mixed) — this pins
+# that convention repo-side so clones with other local configs can't
+# commit CRLF into history.
+* text=auto
+
+# Unambiguous binaries — auto-detection catches these anyway; explicit
+# for documentation.
+*.png binary
+*.jpg binary
+*.webp binary
+*.ttf binary
+*.otf binary

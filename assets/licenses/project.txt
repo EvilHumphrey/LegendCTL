@@ -1,0 +1,11 @@
+ZD Ultimate Legend Wrapper
+==========================
+
+License: MIT (c) 2026 EvilHumphrey. Full text in the repository LICENSE file.
+
+This wrapper is local-device tooling for reading and applying supported
+ZD Ultimate Legend controller settings. The wrapper itself is distributed
+under the MIT License; see the repository LICENSE file for the full text.
+
+The third-party components bundled with this wrapper retain their
+original licenses, listed in the sections below.

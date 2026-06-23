@@ -1,0 +1,82 @@
+name: Bug report
+description: Report a reproducible bug or crash in LegendCTL.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. LegendCTL is an unofficial,
+        best-effort hobby project — please read **SUPPORT.md** first. Fill in
+        everything you can; reports missing the version, device signature, or log
+        are much harder to act on, and unsupported-device reports without that
+        data will be closed.
+
+        **Do not** paste anything you consider private. The in-app Diagnostic
+        Bundle already strips local paths for you.
+  - type: checkboxes
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing Issues and Discussions and didn't find this.
+          required: true
+        - label: This is a reproducible bug, not a general question (questions go to Discussions).
+          required: true
+  - type: input
+    id: app-version
+    attributes:
+      label: LegendCTL / app version
+      description: From **About → Version** in the app.
+      placeholder: e.g. v2.0.0
+    validations:
+      required: true
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      placeholder: e.g. Windows 11 23H2 (build 22631)
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Controller VID/PID + variant + firmware
+      description: USB VID/PID, which Ultimate Legend variant, and firmware version if you know it.
+      placeholder: e.g. VID_413D&PID_2104, variant X, firmware v1.18
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Exact steps, plus what you expected to happen and what actually happened.
+      placeholder: |
+        1. Open the … tab
+        2. Set … to …
+        3. Click Apply
+        Expected: …
+        Actual: …
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log file / Diagnostic Bundle
+      description: |
+        Attach the log from `%APPDATA%\ZDUltimateLegend\logs\zd_wrapper.log`, or a
+        Diagnostic Bundle exported from the in-app **Diagnostics** screen. Drag the
+        file into this box to attach it.
+    validations:
+      required: true
+  - type: textarea
+    id: av-evidence
+    attributes:
+      label: "SmartScreen / antivirus / install issues only"
+      description: |
+        If this is about a SmartScreen prompt, an antivirus detection, or an install
+        failure, attach a screenshot of the warning and paste the **SHA-256** of the
+        file you downloaded:
+        `Get-FileHash ".\ZDUltimateLegend-v<version>-windows.zip" -Algorithm SHA256`.
+        Leave blank otherwise.
+    validations:
+      required: false

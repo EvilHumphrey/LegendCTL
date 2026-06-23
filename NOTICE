@@ -1,0 +1,39 @@
+LegendCTL — Unofficial Windows configurator for ZD Ultimate Legend controllers
+Copyright (c) 2026 EvilHumphrey
+Licensed under the MIT License — see the LICENSE file for the full text.
+
+(The application window and executable currently still carry the legacy name
+"ZD Ultimate Legend Wrapper" / "ZD Ultimate Legend.exe"; LegendCTL is the
+project name. They are the same program.)
+
+UNOFFICIAL / NOT AFFILIATED
+===========================
+LegendCTL is an independent, unofficial tool. It is not developed, endorsed,
+sponsored by, or affiliated with ZD Gaming. "ZD Gaming" and "ZD
+Ultimate Legend" refer to the controller and its vendor for identification and
+compatibility purposes only; all trademarks are the property of their
+respective owners. Use at your own risk — see the in-app About screen and
+SECURITY.md for details.
+
+THIRD-PARTY COMPONENTS
+======================
+This product bundles or depends on third-party components, each retaining its
+own license. Their license texts (or, where a component publishes only a
+summary, an official license reference) are distributed with the application
+and can be viewed in two places:
+
+  - In the running app: About -> Licenses
+  - On disk: the assets/licenses/ directory (also bundled into the released
+    build under _internal/assets/licenses/)
+
+Bundled / referenced components and their licenses:
+
+  - Python                         PSF License Agreement (PSF-2.0)
+  - Dear PyGui                     MIT License
+  - Inter (font)                   SIL Open Font License 1.1 (OFL-1.1)
+  - JetBrains Mono (font)          SIL Open Font License 1.1 (OFL-1.1)
+  - Noto Sans SC (font)            SIL Open Font License 1.1 (OFL-1.1)
+
+See assets/licenses/ for each component's license text. The Python entry there
+provides a summary of the PSF License Agreement plus the official URL for the
+full text; the other components include their full, verbatim license text.
