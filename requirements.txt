@@ -1,4 +1,4 @@
-dearpygui==2.3
+dearpygui==2.3.1
 
 # Optional: enables the opt-in StandaloneTrigger (dual-mode) HID path. The
 # default app does not import it (guarded), so it is not required to run.
