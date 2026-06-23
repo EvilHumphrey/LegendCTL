@@ -89,7 +89,7 @@ Two distribution options — pick whichever fits your workflow.
 
 ### Installer (recommended)
 
-Download `ZDUltimateLegend-v<version>-Setup.exe` from Releases (URL pending).
+Download `ZDUltimateLegend-v<version>-Setup.exe` from the [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest).
 
 The installer:
 - Installs to `%ProgramFiles%\ZDUltimateLegend\` (requires admin — you'll see a UAC prompt). Installing under Program Files means only administrators can modify the app files, which prevents tampering / DLL planting.
@@ -99,7 +99,7 @@ The installer:
 
 ### Portable ZIP
 
-Download `ZDUltimateLegend-v<version>-windows.zip` from Releases (URL pending).
+Download `ZDUltimateLegend-v<version>-windows.zip` from the [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest).
 
 Extract anywhere and run `ZD Ultimate Legend.exe`. Settings persist in
 `%APPDATA%\ZDUltimateLegend\` regardless of where the wrapper folder
