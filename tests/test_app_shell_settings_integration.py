@@ -255,6 +255,14 @@ def _ok_profile_write_results(settings_service: MagicMock) -> None:
         outcome=SetStepSizeOutcome.OK,
         error_code=None,
     )
+    # The APPLY path drives step_size through the verified setter (write +
+    # read-back); the live slider path writes plainly. Delegate the verified
+    # setter to the plain set_step_size so apply-path set_step_size assertions
+    # keep verifying the value reaches the write layer -- mirrors production,
+    # where set_step_size_verified calls set_step_size internally.
+    settings_service.set_step_size_verified.side_effect = (
+        lambda value, *a, **k: settings_service.set_step_size(value)
+    )
     settings_service.set_vibration.return_value = SimpleNamespace(
         outcome=SetVibrationOutcome.OK,
         error_code=None,
@@ -2883,7 +2891,49 @@ class StepSizeAndPollingReadMissGuardTests(unittest.TestCase):
 
         shell.apply_step_size(200)
 
+        # The live slider path writes plainly -- the value reaches set_step_size.
         settings_service.set_step_size.assert_called_once_with(200)
+
+    def test_step_size_live_write_uses_plain_setter(self) -> None:
+        # Crash-regression fix: the live slider path was wired to
+        # the VERIFIED setter, whose per-move read-back timed out on real
+        # hardware and crashed the app mid-drag. The live path must write PLAINLY
+        # -- set_step_size, never set_step_size_verified. (Verification is kept
+        # only on the deliberate Apply trailer; see the apply-coordinator tests.)
+        settings_service = MagicMock()
+        settings_service.set_step_size.return_value = SimpleNamespace(
+            outcome=SetStepSizeOutcome.OK,
+            error_code=None,
+        )
+        shell = _make_shell(settings_service)
+        shell._step_size_hydrated = True
+
+        shell.apply_step_size(200)
+
+        settings_service.set_step_size.assert_called_once_with(200)
+        settings_service.set_step_size_verified.assert_not_called()
+
+    def test_step_size_live_write_device_failure_surfaces_failure(self) -> None:
+        # The live path's failure handling is preserved with the plain setter: a
+        # write-layer failure (e.g. WRITE_FAILED / device gone) must record a
+        # FAILURE so the status line shows the error rather than a false success.
+        settings_service = MagicMock()
+        settings_service.set_step_size.return_value = SimpleNamespace(
+            outcome=SetStepSizeOutcome.WRITE_FAILED,
+            error_code=None,
+        )
+        shell = _make_shell(settings_service)
+        shell._step_size_hydrated = True
+
+        recorded: dict = {}
+        shell._record_settings_apply_result = (
+            lambda success, message, **k: recorded.update(success=success, message=message)
+        )
+
+        shell.apply_step_size(200)
+
+        self.assertIs(recorded["success"], False)
+        settings_service.set_step_size_verified.assert_not_called()
 
     def test_step_size_read_miss_then_no_interaction_never_writes(self) -> None:
         # The operator's exact repro: a missed startup read must leave the
@@ -3404,6 +3454,11 @@ class SliderWriteThrottleTests(unittest.TestCase):
             outcome=SetStepSizeOutcome.OK,
             error_code=None,
         )
+        # Live slider path now routes through the verified setter; delegate it to
+        # set_step_size so the throttle assertions keep checking that path.
+        settings_service.set_step_size_verified.side_effect = (
+            lambda value, *a, **k: settings_service.set_step_size(value)
+        )
         settings_service.set_polling_rate.return_value = SimpleNamespace(
             outcome=SetPollingRateOutcome.OK,
             error_code=None,
@@ -3867,6 +3922,221 @@ class GeometryLoggingTests(unittest.TestCase):
                 shell._log_geometry("startup")  # no content_region built
         finally:
             dpg.destroy_context()
+
+
+class DeviceConfirmBodyShowsValuesTests(unittest.TestCase):
+    """Fix A (2026-06-24): the "Apply device settings?" confirm must list the
+    ACTUAL device values it will write — not a generic blurb — so applying a
+    profile saved with step_size 1 can no longer silently clobber a manually
+    set 73 without the user seeing it coming.
+    """
+
+    def test_body_shows_step_size_current_to_new(self) -> None:
+        shell = _make_shell(MagicMock(), MagicMock())
+        shell.last_controller_snapshot = _full_snapshot(step_size=73)
+        profile = WrapperProfile(name="Apex", snapshot=_full_snapshot(step_size=1))
+
+        body = shell._apply_device_confirm_body(profile)
+
+        # The exact change the user needs to see — current -> new.
+        self.assertIn("step size: 73 -> 1", body)
+        # And NOT the old generic copy that hid the values.
+        self.assertNotIn("polling rate, step-size", body)
+
+    def test_body_shows_polling_current_to_new(self) -> None:
+        shell = _make_shell(MagicMock(), MagicMock())
+        shell.last_controller_snapshot = _full_snapshot(polling_rate=PollingRate.HZ_1000)
+        profile = WrapperProfile(
+            name="Apex", snapshot=_full_snapshot(polling_rate=PollingRate.HZ_8000)
+        )
+
+        body = shell._apply_device_confirm_body(profile)
+
+        self.assertIn("polling rate: 1000Hz -> 8000Hz", body)
+
+    def test_body_uses_new_only_form_when_current_unknown(self) -> None:
+        shell = _make_shell(MagicMock(), MagicMock())
+        shell.last_controller_snapshot = None  # never read the controller yet
+        profile = WrapperProfile(
+            name="Apex",
+            snapshot=_full_snapshot(step_size=42, polling_rate=PollingRate.HZ_4000),
+        )
+
+        body = shell._apply_device_confirm_body(profile)
+
+        self.assertIn("step size -> 42", body)
+        self.assertIn("polling rate -> 4000Hz", body)
+
+    def test_body_omits_step_size_row_for_polling_only_profile(self) -> None:
+        shell = _make_shell(MagicMock(), MagicMock())
+        shell.last_controller_snapshot = _full_snapshot(
+            step_size=10, polling_rate=PollingRate.HZ_1000
+        )
+        # Legacy profile: polling set, step_size never serialized.
+        profile = WrapperProfile(
+            name="Old",
+            snapshot=_full_snapshot(step_size=None, polling_rate=PollingRate.HZ_8000),
+        )
+
+        body = shell._apply_device_confirm_body(profile)
+
+        self.assertNotIn("step size", body.lower())
+        self.assertNotIn("None", body)  # never render a missing value
+        self.assertIn("polling rate: 1000Hz -> 8000Hz", body)
+
+    def test_open_confirm_modal_renders_actual_values(self) -> None:
+        # Proves the modal itself uses the value-bearing body (not just that the
+        # helper exists): capture the add_text the modal builds.
+        shell = _make_shell(MagicMock(), MagicMock())
+        shell._dpg_context_ready = True
+        shell.last_controller_snapshot = _full_snapshot(step_size=73)
+        profile = WrapperProfile(name="Apex", snapshot=_full_snapshot(step_size=1))
+        texts: list[str] = []
+
+        def add_text(text, **kwargs):
+            texts.append(text)
+            return MagicMock()
+
+        with patch("zd_app.ui.app_shell.dpg.does_item_exist", return_value=False), \
+             patch("zd_app.ui.app_shell.dpg.window", side_effect=lambda **k: MagicMock()), \
+             patch("zd_app.ui.app_shell.dpg.group"), \
+             patch("zd_app.ui.app_shell.dpg.add_text", side_effect=add_text), \
+             patch("zd_app.ui.app_shell.dpg.add_spacer"), \
+             patch("zd_app.ui.app_shell.dpg.add_button"):
+            shell._open_apply_device_confirm("Apex", profile)
+
+        self.assertTrue(any("step size: 73 -> 1" in tx for tx in texts))
+
+
+class StepSizeSaveToProfileNudgeTests(unittest.TestCase):
+    """Fix B (2026-06-24): after a successful live step_size change that diverges
+    from the active profile's stored value, offer a one-click "save into that
+    profile" affordance — never on every change, never with no profile loaded.
+
+    The live path writes via the plain set_step_size (the crash-regression fix
+    reverted it off the verified setter), so these wire set_step_size's result.
+    """
+
+    @staticmethod
+    def _ok() -> SimpleNamespace:
+        return SimpleNamespace(outcome=SetStepSizeOutcome.OK, error_code=None)
+
+    @staticmethod
+    def _write_failed() -> SimpleNamespace:
+        return SimpleNamespace(outcome=SetStepSizeOutcome.WRITE_FAILED, error_code=None)
+
+    def _shell_with_active_profile(self, stored_step_size, result):
+        settings_service = MagicMock()
+        settings_service.set_step_size.return_value = result
+        store = MagicMock()
+        store.load.return_value = WrapperProfile(
+            name="Apex", snapshot=_full_snapshot(step_size=stored_step_size)
+        )
+        shell = _make_shell(settings_service, store)
+        shell._active_wrapper_profile_name = "Apex"
+        return shell, store
+
+    def test_nudge_offered_when_committed_value_differs(self) -> None:
+        shell, _store = self._shell_with_active_profile(1, self._ok())
+
+        shell._do_write_step_size(73)
+
+        self.assertTrue(shell.step_size_save_nudge_offered())
+        self.assertEqual(shell._pending_step_size_save, ("Apex", 73))
+
+    def test_nudge_absent_when_no_active_profile(self) -> None:
+        settings_service = MagicMock()
+        settings_service.set_step_size.return_value = self._ok()
+        store = MagicMock()
+        shell = _make_shell(settings_service, store)
+        shell._active_wrapper_profile_name = None
+
+        shell._do_write_step_size(73)
+
+        self.assertFalse(shell.step_size_save_nudge_offered())
+        store.load.assert_not_called()  # no profile to compare against
+
+    def test_nudge_absent_when_value_matches_stored(self) -> None:
+        shell, _store = self._shell_with_active_profile(73, self._ok())
+
+        shell._do_write_step_size(73)
+
+        self.assertFalse(shell.step_size_save_nudge_offered())
+
+    def test_nudge_absent_when_profile_has_no_stored_step_size(self) -> None:
+        # A profile-only profile carries no step_size — applying it never touches
+        # step_size, so there is nothing to keep in sync.
+        shell, _store = self._shell_with_active_profile(None, self._ok())
+
+        shell._do_write_step_size(73)
+
+        self.assertFalse(shell.step_size_save_nudge_offered())
+
+    def test_nudge_not_offered_when_write_fails(self) -> None:
+        # A failed live write (device gone / write error) changed nothing
+        # on-device, so the save-to-profile nudge must not be offered.
+        shell, _store = self._shell_with_active_profile(1, self._write_failed())
+
+        shell._do_write_step_size(73)
+
+        self.assertFalse(shell.step_size_save_nudge_offered())
+
+    def test_taking_nudge_saves_new_step_size_via_store_save(self) -> None:
+        store = MagicMock()
+        loaded = WrapperProfile(name="Apex", snapshot=_full_snapshot(step_size=1))
+        store.load.return_value = loaded
+        shell = _make_shell(MagicMock(), store)
+        shell._active_wrapper_profile_name = "Apex"
+        shell._pending_step_size_save = ("Apex", 73)
+
+        shell.save_step_size_to_active_profile()
+
+        saved = store.save.call_args.args[0]
+        self.assertEqual(saved.name, "Apex")
+        self.assertEqual(saved.snapshot.step_size, 73)  # the changed value sticks
+        # Surgical: the profile's other settings are untouched.
+        self.assertEqual(saved.snapshot.polling_rate, loaded.snapshot.polling_rate)
+        self.assertEqual(saved.snapshot.vibration, loaded.snapshot.vibration)
+        # Stored == committed now, so the affordance withdraws itself.
+        self.assertFalse(shell.step_size_save_nudge_offered())
+
+    def test_save_includes_device_settings_in_persisted_snapshot(self) -> None:
+        # The persisted snapshot must carry device fields (this is the
+        # device-inclusive save path) — step_size is not dropped.
+        store = MagicMock()
+        store.load.return_value = WrapperProfile(
+            name="Apex", snapshot=_full_snapshot(step_size=1, polling_rate=PollingRate.HZ_8000)
+        )
+        shell = _make_shell(MagicMock(), store)
+        shell._pending_step_size_save = ("Apex", 200)
+
+        shell.save_step_size_to_active_profile()
+
+        saved = store.save.call_args.args[0]
+        self.assertEqual(saved.snapshot.step_size, 200)
+        self.assertIsNotNone(saved.snapshot.polling_rate)
+
+    def test_dismiss_withdraws_nudge_without_saving(self) -> None:
+        store = MagicMock()
+        shell = _make_shell(MagicMock(), store)
+        shell._pending_step_size_save = ("Apex", 73)
+
+        shell.dismiss_step_size_save_nudge()
+
+        self.assertFalse(shell.step_size_save_nudge_offered())
+        store.save.assert_not_called()
+
+    def test_applying_a_profile_sets_active_name_and_clears_stale_nudge(self) -> None:
+        settings_service = MagicMock()
+        _ok_profile_write_results(settings_service)
+        shell = _make_shell(settings_service, MagicMock())
+        shell.refresh_from_controller = MagicMock()
+        shell._pending_step_size_save = ("Old", 99)  # left over from a prior profile
+
+        shell._apply_wrapper_profile_snapshot("Apex", _full_snapshot(), include_device=True)
+
+        self.assertEqual(shell._active_wrapper_profile_name, "Apex")
+        self.assertFalse(shell.step_size_save_nudge_offered())
 
 
 if __name__ == "__main__":

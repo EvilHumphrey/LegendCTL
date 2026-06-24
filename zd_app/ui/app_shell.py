@@ -24,6 +24,7 @@ from zd_app.models import (
     StickSettings,
     TriggerSettings,
     WrapperProfile,
+    utc_now_iso,
 )
 from zd_app.services.device_service import DeviceService, LogEntry, render_log_message
 from zd_app.services.diagnostics_service import DiagnosticsService
@@ -132,6 +133,12 @@ from zd_app.version import __app_name__, __build_commit__, __version__
 # Device-settings widget/modal tags.
 SAVE_AS_INCLUDE_DEVICE_CHECKBOX = "wrapper_profile_include_device_checkbox"
 APPLY_DEVICE_CONFIRM_MODAL = "apply_device_confirm_modal"
+
+# Fix B (2026-06-24): the dismissible "save changed step_size into the active
+# profile" nudge rendered under the step-size slider row.
+STEP_SIZE_SAVE_NUDGE_GROUP = "step_size_save_nudge_group"
+STEP_SIZE_SAVE_NUDGE_BUTTON = "step_size_save_nudge_button"
+STEP_SIZE_SAVE_NUDGE_DISMISS = "step_size_save_nudge_dismiss"
 
 
 # Restore-Points debounce window for the
@@ -981,6 +988,16 @@ class AppShell:
         # These flags gate the live-write callbacks against a read-miss clobber.
         self._step_size_hydrated = False
         self._polling_rate_hydrated = False
+        # Fix B (2026-06-24): one-click persist of a manually-changed step_size
+        # into the active wrapper profile. ``_active_wrapper_profile_name`` is the
+        # last named wrapper profile APPLIED (the "loaded" profile, the one whose
+        # stored step_size an apply would overwrite); ``_pending_step_size_save``
+        # is the (profile_name, value) the save-to-profile nudge currently offers,
+        # or None when nothing is offered. The nudge appears only after a live
+        # step_size write whose committed value DIFFERS from that profile's stored
+        # step_size — never on every change, never when no profile is loaded.
+        self._active_wrapper_profile_name: str | None = None
+        self._pending_step_size_save: tuple[str, int] | None = None
         # App-scoped XInput poll worker for the live Diagnostics panel.
         # Lazy: constructed on first access (the live-verify panel's build)
         # so headless / non-panel sessions never load the XInput DLL or spawn
@@ -3099,6 +3116,12 @@ class AppShell:
             snapshot.polling_rate,
         )
 
+        # This named profile is now the "loaded"/active one — the profile whose
+        # stored step_size a later live-write would diverge from (Fix B nudge
+        # target). Applying a different profile clears any stale save nudge.
+        self._active_wrapper_profile_name = name
+        self._clear_step_size_save_nudge()
+
         def job() -> ApplyResult:
             apply_result = self._apply_snapshot_to_controller(snapshot)
             # Phase 2: persist what was just sent (best-effort, never affects
@@ -3165,6 +3188,67 @@ class AppShell:
 
         self._run_hid_job(job, on_done)
 
+    def _apply_device_confirm_body(self, profile: WrapperProfile) -> str:
+        """Build the Device-confirm modal body listing the ACTUAL device values
+        the "profile + device settings" apply will WRITE.
+
+        Lists step_size and polling_rate (whichever the profile carries) as
+        ``current -> new`` when the live device value is known, otherwise
+        ``-> new``, so the user can SEE which controller-global values change
+        before consenting. The pre-2026-06-24 body was generic and hid the
+        values, so applying a profile saved with step_size 1 silently clobbered
+        a manually-set 73 with no indication — this surfaces exactly that.
+        """
+
+        snapshot = profile.snapshot
+        current = self.last_controller_snapshot
+        rows: list[str] = []
+
+        new_step = getattr(snapshot, "step_size", None)
+        if new_step is not None:
+            cur_step = getattr(current, "step_size", None) if current is not None else None
+            if cur_step is not None:
+                rows.append(
+                    t(
+                        "apply.profile.device_confirm.row_step_size",
+                        current=cur_step,
+                        new=new_step,
+                    )
+                )
+            else:
+                rows.append(
+                    t("apply.profile.device_confirm.row_step_size_new_only", new=new_step)
+                )
+
+        new_poll = getattr(snapshot, "polling_rate", None)
+        if new_poll is not None:
+            new_poll_label = POLLING_RATE_LABEL_BY_ENUM.get(
+                new_poll, t("shell.polling_rate.unknown")
+            )
+            cur_poll = getattr(current, "polling_rate", None) if current is not None else None
+            if cur_poll is not None:
+                rows.append(
+                    t(
+                        "apply.profile.device_confirm.row_polling",
+                        current=POLLING_RATE_LABEL_BY_ENUM.get(
+                            cur_poll, t("shell.polling_rate.unknown")
+                        ),
+                        new=new_poll_label,
+                    )
+                )
+            else:
+                rows.append(
+                    t(
+                        "apply.profile.device_confirm.row_polling_new_only",
+                        new=new_poll_label,
+                    )
+                )
+
+        intro = t("apply.profile.device_confirm.body_intro")
+        outro = t("apply.profile.device_confirm.body_outro")
+        bullets = "\n".join(f"  - {row}" for row in rows)
+        return f"{intro}\n\n{bullets}\n\n{outro}"
+
     def _open_apply_device_confirm(self, name: str, profile: WrapperProfile) -> None:
         if not self._dpg_context_ready:
             return
@@ -3178,9 +3262,9 @@ class AppShell:
             no_close=False,
             no_resize=True,
             width=520,
-            height=210,
+            height=240,
         ):
-            dpg.add_text(t("apply.profile.device_confirm.body"), wrap=480)
+            dpg.add_text(self._apply_device_confirm_body(profile), wrap=480)
             dpg.add_spacer(height=10)
             with dpg.group(horizontal=True):
                 dpg.add_button(
@@ -3605,35 +3689,50 @@ class AppShell:
             self.refresh_shell()
             return
 
-        if dpg.does_item_exist("wrapper_profile_delete_popup"):
-            dpg.delete_item("wrapper_profile_delete_popup")
-
         def delete_callback(_sender, _app_data, user_data):
             self._delete_wrapper_profile_confirmed(user_data)
 
-        with dpg.window(
-            label=t("footer.delete_confirm.title"),
-            modal=True,
-            no_close=False,
-            no_resize=True,
-            width=380,
-            height=140,
-            tag="wrapper_profile_delete_popup",
-        ):
-            dpg.add_text(t("footer.delete_confirm.body", name=name), wrap=350)
-            dpg.add_spacer(height=8)
-            with dpg.group(horizontal=True):
-                dpg.add_button(
-                    label=t("actions.cancel"),
-                    width=100,
-                    callback=lambda: dpg.delete_item("wrapper_profile_delete_popup"),
-                )
-                dpg.add_button(
-                    label=t("footer.delete_confirm.confirm"),
-                    width=100,
-                    user_data=name,
-                    callback=delete_callback,
-                )
+        # Modal-swap hop: the delete-confirm popup is frequently opened right
+        # after another modal was up (e.g. a Save + Apply confirm/result), and a
+        # modal created in the same render pass another modal was showing/torn
+        # down exists but never becomes interactive (benched DPG modal law,
+        # 2026-06-11 — tools/diag_dpg_modal_thread_visibility.py). Inline
+        # creation here left the Confirm button dead and the delete callback
+        # never fired. Route the create through _defer_modal_swap so any stale
+        # popup drains in one pass and the fresh one is created a frame later,
+        # guaranteeing the rendered frame between teardown and create. Modeled on
+        # the Safe-Import confirm swap (safe_import_request_apply_to_controller).
+        def open_fn() -> None:
+            with dpg.window(
+                label=t("footer.delete_confirm.title"),
+                modal=True,
+                no_close=False,
+                no_resize=True,
+                width=380,
+                height=140,
+                tag="wrapper_profile_delete_popup",
+            ):
+                dpg.add_text(t("footer.delete_confirm.body", name=name), wrap=350)
+                dpg.add_spacer(height=8)
+                with dpg.group(horizontal=True):
+                    dpg.add_button(
+                        label=t("actions.cancel"),
+                        width=100,
+                        callback=lambda: dpg.delete_item("wrapper_profile_delete_popup"),
+                    )
+                    dpg.add_button(
+                        label=t("footer.delete_confirm.confirm"),
+                        width=100,
+                        user_data=name,
+                        callback=delete_callback,
+                        tag="wrapper_profile_delete_confirm_button",
+                    )
+
+        self._defer_modal_swap(
+            open_fn,
+            delete_tags=("wrapper_profile_delete_popup",),
+            key="wrapper_profile_delete",
+        )
 
     def _open_save_as_modal(self) -> None:
         if dpg.does_item_exist("wrapper_profile_save_as_modal"):
@@ -4371,6 +4470,16 @@ class AppShell:
         return self._do_write_step_size(int(value))
 
     def _do_write_step_size(self, value: int):
+        # Live slider path: a PLAIN write. This fires rapidly during a drag (the
+        # slider callback plus the trailing-edge throttle flush), and a per-move
+        # verified read-back is both slow and timeout-prone -- on real hardware
+        # the read-back's HID timeout raised straight through the verified setter
+        # and crashed the app mid-drag. The live path never needed verification:
+        # the original revert-to-floor concern was a profile clobber, not a
+        # failed live write. The deliberate Apply still confirms a single
+        # committed step_size via the apply-coordinator's verified trailer (where
+        # the in-burst-rejection quirk actually bites), so nothing is lost by
+        # writing plainly here.
         result = self.settings_service.set_step_size(value)
         success = _settings_outcome_is_success(result.outcome)
         if success:
@@ -4379,8 +4488,164 @@ class AppShell:
             message = _make_result_log_entry("apply.step_size.failed", result, value=value)
 
         self._record_settings_apply_result(success, message)
+        # Fix B: after a successful live change, offer to persist it into the
+        # active profile when it diverges from that profile's stored step_size.
+        # A failed write (device gone / write error) changed nothing on-device,
+        # so there is nothing new to save — clear any stale nudge instead.
+        if success:
+            self._maybe_offer_save_step_size_to_profile(value)
+        else:
+            self._clear_step_size_save_nudge()
         self.refresh_shell()
         return result
+
+    # -- Fix B: save a changed step_size into the active profile -------------
+
+    def _step_size_save_nudge_target(self, value: int) -> str | None:
+        """Return the active profile name to offer a step_size save for, or None.
+
+        Offers only when ALL of the following hold:
+
+        * a named wrapper profile is loaded/active (one was applied this
+          session), AND
+        * that profile carries a *stored* step_size — a device-settings profile.
+          A profile-only profile has none, so applying it never touches
+          step_size and there is nothing to keep in sync; nudging there would
+          also silently convert it into a device-settings profile, AND
+        * the just-committed ``value`` DIFFERS from that stored step_size.
+
+        Returns ``None`` on any miss, on a profile-load failure, or when the
+        value already matches — so the caller offers nothing.
+        """
+
+        name = self._active_wrapper_profile_name
+        if not name:
+            return None
+        store = getattr(self, "wrapper_profile_store", None)
+        if store is None:
+            return None
+        try:
+            profile = store.load(name)
+        except WrapperProfileError:
+            return None
+        except Exception:  # noqa: BLE001 - a nudge must never crash the write path
+            logger.exception(
+                "step_size save-nudge: could not load active profile %r", name
+            )
+            return None
+        stored = getattr(getattr(profile, "snapshot", None), "step_size", None)
+        if stored is None or stored == value:
+            return None
+        return name
+
+    def step_size_save_nudge_offered(self) -> bool:
+        """True when the save-to-profile affordance is currently offered."""
+
+        return self._pending_step_size_save is not None
+
+    def _maybe_offer_save_step_size_to_profile(self, value: int) -> None:
+        """Offer (or withdraw) the save-to-profile nudge for a committed value."""
+
+        target = self._step_size_save_nudge_target(value)
+        if target is None:
+            self._clear_step_size_save_nudge()
+            return
+        self._pending_step_size_save = (target, value)
+        self._render_step_size_save_nudge()
+
+    def _clear_step_size_save_nudge(self) -> None:
+        self._pending_step_size_save = None
+        self._render_step_size_save_nudge()
+
+    def dismiss_step_size_save_nudge(self) -> None:
+        """Dismiss the nudge without saving (the affordance's × / Dismiss)."""
+
+        self._clear_step_size_save_nudge()
+
+    def _render_step_size_save_nudge(self) -> None:
+        """Sync the nudge widget to ``_pending_step_size_save``.
+
+        Idempotent and safe to call on every screen build (the controller
+        Sticks tab calls it after laying out the row) so the affordance
+        survives a ``rebuild_current_screen`` without re-deciding. A no-op until
+        a DPG context exists.
+        """
+
+        if not self._dpg_context_ready:
+            return
+        pending = self._pending_step_size_save
+        if pending is None:
+            self._set_widget_shown(STEP_SIZE_SAVE_NUDGE_GROUP, False)
+            return
+        name, value = pending
+        if dpg.does_item_exist(STEP_SIZE_SAVE_NUDGE_BUTTON):
+            dpg.configure_item(
+                STEP_SIZE_SAVE_NUDGE_BUTTON,
+                label=t(
+                    "controller.sticks.step_size.save_to_profile",
+                    value=value,
+                    name=name,
+                ),
+            )
+        self._set_widget_shown(STEP_SIZE_SAVE_NUDGE_GROUP, True)
+
+    def save_step_size_to_active_profile(self) -> None:
+        """Persist the pending step_size into the active profile (one click).
+
+        Reuses the device-inclusive wrapper-profile save path: the changed
+        step_size is folded into the active profile's stored snapshot (device
+        fields included) and re-saved through ``wrapper_profile_store.save`` —
+        the same store write ``save_current_as_named_wrapper_profile`` uses with
+        the Save-As "include device" checkbox on. Writing into the loaded
+        profile's own snapshot (rather than re-snapshotting the whole
+        controller) keeps the edit surgical: only step_size changes, the
+        profile's other settings are untouched, and it does not depend on the
+        global ``last_controller_snapshot`` being refreshed after the live
+        write. No-op (with a cleared nudge) if the offer went stale.
+        """
+
+        pending = self._pending_step_size_save
+        if pending is None:
+            return
+        name, value = pending
+        store = getattr(self, "wrapper_profile_store", None)
+        if store is None:
+            self._clear_step_size_save_nudge()
+            return
+        try:
+            profile = store.load(name)
+        except WrapperProfileError as exc:
+            self._record_settings_apply_result(
+                False,
+                t("apply.step_size.save_to_profile_failed", name=name, reason=exc),
+            )
+            self._clear_step_size_save_nudge()
+            self.refresh_shell()
+            return
+
+        updated = replace(
+            profile,
+            snapshot=replace(profile.snapshot, step_size=value),
+            last_modified_at=utc_now_iso(),
+        )
+        try:
+            store.save(updated)
+        except WrapperProfileError as exc:
+            self._record_settings_apply_result(
+                False,
+                t("apply.step_size.save_to_profile_failed", name=name, reason=exc),
+            )
+            self._clear_step_size_save_nudge()
+            self.refresh_shell()
+            return
+
+        self._record_settings_apply_result(
+            True,
+            t("apply.step_size.saved_to_profile", value=value, name=name),
+        )
+        # Stored == committed now, so the nudge withdraws itself.
+        self._clear_step_size_save_nudge()
+        self.refresh_shell()
 
     def _flush_slider_throttle(self) -> None:
         """Fire any drag-storm-throttled writes whose quiet window has elapsed.

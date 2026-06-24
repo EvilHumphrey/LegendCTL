@@ -68,6 +68,8 @@ def result_error_text(result) -> str:
     label = outcome_label(outcome)
     if label == "write_failed":
         message = t("apply.error.write_failed")
+    elif label == "verify_failed":
+        message = t("apply.error.verify_failed")
     elif label == "device_not_found":
         message = t("apply.error.device_not_found")
     elif label == "open_failed":
@@ -338,9 +340,19 @@ class SettingsApplyCoordinator:
         if snapshot.step_size is not None:
             if self._step_size_trailer_delay_s > 0:
                 time.sleep(self._step_size_trailer_delay_s)
+            # Verified write: the firmware silently rejects a fraction of
+            # step_size writes (WriteFile OK, device never commits), and this is
+            # the LAST write of the apply -- it follows the full vibration /
+            # deadzone / axis-inv / sensitivity / trigger / 16-button / lighting
+            # burst, the noisiest moment for the in-burst-rejection quirk. A
+            # single un-verified write here is exactly where the revert-to-1 bug
+            # bites, so read back and re-write on mismatch; a real reject now
+            # surfaces as a failed apply row instead of a silent revert. The
+            # default verify settle (100 ms) matches the hardware-validated
+            # step_size envelope.
             write(
                 "step_size",
-                lambda: settings_service.set_step_size(snapshot.step_size),
+                lambda: settings_service.set_step_size_verified(snapshot.step_size),
             )
 
         _safe_invoke(self._on_apply_finished, result, _name="on_apply_finished")

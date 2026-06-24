@@ -15,7 +15,7 @@ import logging
 import threading
 import time
 from ctypes import wintypes as w
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import partial
 from typing import Callable, Optional, TypeVar
@@ -67,6 +67,15 @@ STEP_SIZE_VALUE_MIN = 1
 STEP_SIZE_VALUE_MAX = 255
 # fw-1.24 vendor/device default; scale is 1:1 raw 1-255, confirmed 2026-05-30.
 STEP_SIZE_VALUE_DEFAULT = 73
+# step_size (cat 0x0d) is the field that most often silently rejects its write:
+# WriteFile returns OK but the device never commits, so a later read paints the
+# floor (1) onto the UI. A single un-verified write can still be rejected even
+# behind the apply trailer's settle, so set_step_size_verified writes, settles,
+# reads back, and re-writes on mismatch up to this many attempts before
+# surfacing VERIFY_FAILED. The settle rides the injected self._sleep seam, so
+# tests stub it to a no-op (no real sleep in the suite).
+STEP_SIZE_VERIFY_ATTEMPTS = 3
+STEP_SIZE_VERIFY_SETTLE_S = 0.1
 CATEGORY_BUTTON_BINDING = 0x02
 BUTTON_BINDING_SUBCOMMAND = 0x00
 # The 16 sequential per-slot button-binding reads intermittently drop or
@@ -511,6 +520,11 @@ class WriteOutcome(Enum):
     DEVICE_NOT_FOUND = "device_not_found"
     OPEN_FAILED = "open_failed"
     WRITE_FAILED = "write_failed"
+    # The write seam reported OK (WriteFile succeeded) but a post-write read-back
+    # showed the device never committed the value -- the firmware silently
+    # rejected the write. Used only by the verify-and-retry setters (step_size)
+    # where a read-back channel exists to detect the silent reject.
+    VERIFY_FAILED = "verify_failed"
 
 
 # Backwards-compatible aliases — each feature writer historically declared a
@@ -1787,6 +1801,136 @@ class SettingsService:
             context=f"step_size:{value}",
             make_result=partial(SetStepSizeResult, value=value),
         )
+
+    def set_step_size_verified(
+        self,
+        value: int,
+        attempts: int = STEP_SIZE_VERIFY_ATTEMPTS,
+        settle_s: float = STEP_SIZE_VERIFY_SETTLE_S,
+    ) -> SetStepSizeResult:
+        """Write step_size and confirm the device actually committed it.
+
+        The firmware silently rejects a fraction of cat-0x0d step_size writes:
+        ``WriteFile`` returns OK but the device never commits, so a later read
+        paints the floor (1) onto the UI. ``set_step_size`` alone cannot tell a
+        committed write from a silently-rejected one. This setter writes via
+        ``set_step_size``, settles, reads back with ``get_step_size``, and
+        re-writes on a mismatch up to ``attempts`` times. It returns the
+        verified-success ``SetStepSizeResult`` (outcome ``OK`` / ``OK_WITH_RETRY``
+        from the committing write) or, once the budget is exhausted, the last
+        write result re-stamped with ``WriteOutcome.VERIFY_FAILED`` so the apply /
+        live-write plumbing surfaces "not committed" instead of a false success.
+
+        The read-back itself can FAIL on real hardware -- a HID read timeout
+        (``TimeoutError``) or a raw ``ReadFile`` ``OSError``. That is never
+        allowed to escape (it once crashed the app from the live slider path),
+        and it is NOT treated as a failed verify: the write succeeded, the read
+        just could not be read. Such an attempt logs a warning and retries; if
+        the whole budget is exhausted with ONLY read-back failures (the device
+        never once read back a *different* value), the setter DEGRADES to the
+        underlying write's ``OK`` / ``OK_WITH_RETRY`` result so a verified write
+        is never worse than a plain one. ``VERIFY_FAILED`` is reserved for a
+        CONFIRMED mismatch -- a successful read that returned a different value.
+
+        Mirrors the read-side retry precedent in ``get_button_binding`` and the
+        write-side ``_write_payload_with_retry``: the verify loop only costs a
+        re-write when the readback disagrees. A write-layer failure (device gone,
+        open/write error) is returned immediately and unwrapped -- there is
+        nothing to verify, and it carries its own actionable outcome.
+        """
+
+        attempts = max(1, int(attempts))
+        last_result: Optional[SetStepSizeResult] = None
+        saw_confirmed_mismatch = False
+        for attempt in range(attempts):
+            result = self.set_step_size(value)
+            last_result = result
+            # A write-layer failure (DEVICE_NOT_FOUND / OPEN_FAILED /
+            # WRITE_FAILED) is terminal for this attempt's purpose: there is no
+            # committed-vs-rejected ambiguity to resolve, so surface it as-is.
+            if result.outcome not in (WriteOutcome.OK, WriteOutcome.OK_WITH_RETRY):
+                return result
+
+            # Settle so the firmware leaves its post-write quiet window before we
+            # read back; rides the injected sleep seam (no real sleep in tests).
+            self._sleep(settle_s)
+
+            # The read-back can RAISE on real hardware -- a HID read timeout
+            # (``TimeoutError``, raised by the bounded reader at the ReadFile
+            # seam) or a raw ``ReadFile`` ``OSError`` -- and that exception used
+            # to escape this setter and crash the app from the live slider path.
+            # ``get_step_size`` already swallows ``SettingsServiceError`` into
+            # ``None`` internally; catch the remaining escapes here. A read-back
+            # that could not be read is NOT a committed-wrong-value mismatch: the
+            # write itself succeeded, we just could not confirm it. Treat it as
+            # "couldn't verify" and retry within budget. (``TimeoutError``
+            # subclasses ``OSError``, so the ``OSError`` arm covers it.)
+            try:
+                readback = self.get_step_size()
+            except (SettingsServiceError, OSError) as exc:
+                logger.warning(
+                    "step_size verify read-back failed (attempt %d/%d): %s; "
+                    "write succeeded -- will degrade to unverified if unresolved",
+                    attempt + 1,
+                    attempts,
+                    exc,
+                )
+                continue
+
+            if readback == value:
+                # Committed. Preserve the real write outcome (OK / OK_WITH_RETRY).
+                return result
+            if readback is None:
+                # The read produced no usable value (a graceful read failure that
+                # collapsed to ``None``, or an out-of-range byte). Inconclusive --
+                # NOT a confirmed wrong value -- so treat it like a read-back
+                # failure and degrade rather than paint a false VERIFY_FAILED.
+                logger.warning(
+                    "step_size verify read-back inconclusive (attempt %d/%d): "
+                    "get_step_size returned None; write succeeded",
+                    attempt + 1,
+                    attempts,
+                )
+                continue
+
+            # CONFIRMED mismatch: the read SUCCEEDED and returned a different,
+            # in-range value -- the silent-reject signature (device painted the
+            # floor). Real evidence the write did not commit; retry, and if it
+            # persists, surface VERIFY_FAILED.
+            saw_confirmed_mismatch = True
+            logger.warning(
+                "step_size verify mismatch (attempt %d/%d): wrote %d, device read %r",
+                attempt + 1,
+                attempts,
+                value,
+                readback,
+            )
+
+        # Budget exhausted. ``last_result`` is always set (attempts >= 1) and its
+        # outcome was a write success on the final pass.
+        if saw_confirmed_mismatch:
+            # The device read back a different value at least once: a real
+            # silent-reject. Re-stamp VERIFY_FAILED so the UI shows "not
+            # committed" instead of a false success.
+            logger.error(
+                "step_size %d never committed after %d verified write attempts",
+                value,
+                attempts,
+            )
+            return replace(last_result, outcome=WriteOutcome.VERIFY_FAILED)
+
+        # Only read-back failures (raises / None) -- never a confirmed wrong
+        # value. The write layer reported success on every attempt; we simply
+        # could not read it back. Degrade to that unverified write result so a
+        # verified write is never worse than a plain one.
+        logger.warning(
+            "step_size %d written but could not be read back to verify after %d "
+            "attempt(s); returning the unverified write result (%s)",
+            value,
+            attempts,
+            getattr(last_result.outcome, "name", last_result.outcome),
+        )
+        return last_result
 
     def get_step_size(self) -> Optional[int]:
         """Read the controller's current joystick step-size byte (1-255)."""

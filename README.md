@@ -39,7 +39,7 @@ how releases are (will be) signed.
 
 ## Status
 
-v2.0.0 — feature-complete for normal use.
+v2.0.1 — feature-complete for normal use.
 
 Controller settings (all written as standard HID feature reports; a normal Apply
 reports each field's write outcome and refreshes the on-screen state from the
@@ -82,6 +82,12 @@ behavior yourself in a couple of minutes — see
 
 Profile sharing ("Safe Import") exists in the codebase but is dev-gated and parked —
 the Import button is hidden unless the Developer toggle is enabled.
+
+## Demo
+
+![LegendCTL Live Verify: sweeping both analog sticks while each stick's circularity readout traces its real XInput output and settles to a percentage.](docs/media/legendctl-liveverify-demo.gif)
+
+**Live Verify** reads both sticks straight from XInput. Start a stick test and sweep — each stick's trace fills its circle, sweep-coverage climbs, and the per-stick circularity settles to a percentage, so you can see how round your sticks really are and catch a flat spot or off-center rest. Everything runs locally; no network, no telemetry.
 
 ## Download
 

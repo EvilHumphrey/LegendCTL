@@ -1,5 +1,27 @@
 # Changelog
 
+## v2.0.1 — 2026-06-24
+
+Post-release bug-fix update. Four fixes found while smoke-testing v2.0.0 on hardware.
+No change to the set of settings the wrapper writes; same test discipline (full suite
+green on Python 3.12 / DearPyGui 2.3).
+
+- **Profile delete now works reliably.** The delete-confirmation popup was built outside
+  the modal-swap seam, so its Confirm button could be dead after a prior Save+Apply (a
+  consequence of DearPyGui's modal-rendering law) and the profile was never deleted. The
+  popup now routes through the seam, covered by a live-DearPyGui regression test.
+- **Joystick step-size writes are verified.** Applying a profile that changes the
+  step-size now writes, settles, reads back, and retries on a confirmed mismatch, and
+  reports a real failure instead of silently leaving the device at its floor value.
+- **The "Apply device settings?" confirmation now shows what it will write.** It lists
+  the actual current → new device values (step size, polling rate), so applying a profile
+  can no longer silently overwrite a step-size you just set; after a step-size change, a
+  dismissible "Save to profile" prompt lets you persist it in one click.
+- **Fixed a crash when dragging the Live Verify step-size slider.** The verified-write
+  read-back could raise on real hardware (HID read timeout) and propagate to a crash; the
+  verify path is now exception-safe and the live slider uses a plain write (verification
+  stays on the deliberate Apply path).
+
 ## v2.0.0 — 2026-06-12
 
 First feature-complete release of the wrapper. ~2,370 tests passing on Python 3.12 /

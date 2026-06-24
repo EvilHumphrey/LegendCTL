@@ -230,6 +230,11 @@ class _StubSettingsService:
             ),
         )
 
+    def set_step_size_verified(self, value: int, attempts: int = 3, settle_s: float = 0.1) -> SetStepSizeResult:
+        # The apply pipeline calls the verified setter; this fake stands in for
+        # the whole write+read-back op via its scripted set_step_size outcome.
+        return self.set_step_size(value)
+
     def set_vibration(self, settings: VibrationSettings) -> SetVibrationResult:
         return self._result_for(
             "vibration",

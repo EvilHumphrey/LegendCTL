@@ -85,6 +85,12 @@ def _make_shell_with_recording_rp_service():
     settings_service.set_step_size.return_value = SimpleNamespace(
         outcome="success",
     )
+    # The live slider path writes via the plain set_step_size; the apply path
+    # uses the verified setter. Delegate verified -> set_step_size so either path
+    # records through the same return value the RP-hook tests expect.
+    settings_service.set_step_size_verified.side_effect = (
+        lambda value, *a, **k: settings_service.set_step_size(value)
+    )
     rp_service = _RecordingService()
     shell = make_shell(settings_service=settings_service, restore_point_service=rp_service)
     shell._polling_rate_hydrated = True

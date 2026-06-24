@@ -54,6 +54,9 @@ class TestWriteOutcomeAliases(unittest.TestCase):
                 "DEVICE_NOT_FOUND": "device_not_found",
                 "OPEN_FAILED": "open_failed",
                 "WRITE_FAILED": "write_failed",
+                # Added for the step_size verify-and-retry setter (revert-to-1
+                # fix): a write the seam accepted but the device never committed.
+                "VERIFY_FAILED": "verify_failed",
             },
         )
 

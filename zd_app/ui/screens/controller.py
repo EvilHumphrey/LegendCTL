@@ -372,6 +372,31 @@ def _render_sticks_tab(shell) -> None:
         show=False,
     )
     dpg.add_text(t("controller.sticks.step_size.helper"), color=shell.COLORS["muted"], wrap=520)
+    # Fix B (2026-06-24): dismissible nudge to persist a manually-changed
+    # step_size into the active profile ("73 is one click from sticking").
+    # Built hidden every screen rebuild; the shell re-syncs visibility + the
+    # button label from its pending-save state via _render_step_size_save_nudge,
+    # which only shows it after a live write diverges from the active profile's
+    # stored step_size. Tags mirror app_shell.STEP_SIZE_SAVE_NUDGE_* (kept as
+    # literals here to avoid a screen->app_shell import cycle).
+    with dpg.group(tag="step_size_save_nudge_group", show=False):
+        with dpg.group(horizontal=True):
+            dpg.add_button(
+                label=t("controller.sticks.step_size.save_to_profile", value=0, name=""),
+                tag="step_size_save_nudge_button",
+                callback=lambda: shell.save_step_size_to_active_profile(),
+            )
+            dpg.add_button(
+                label=t("controller.sticks.step_size.save_to_profile_dismiss"),
+                tag="step_size_save_nudge_dismiss",
+                callback=lambda: shell.dismiss_step_size_save_nudge(),
+            )
+        dpg.add_text(
+            t("controller.sticks.step_size.save_to_profile_hint"),
+            color=shell.COLORS["muted"],
+            wrap=520,
+        )
+    shell._render_step_size_save_nudge()
     dpg.add_spacer(height=16)
     section_title(t("controller.sticks.deadzones"))
     for tag, label_key in (

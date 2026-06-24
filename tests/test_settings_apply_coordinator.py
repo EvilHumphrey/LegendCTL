@@ -33,6 +33,7 @@ from zd_app.services.settings_service import (
     SetPollingRateResult,
     SetStepSizeOutcome,
     SetStepSizeResult,
+    SettingsService,
     StickDeadzones,
     TriggerMode,
     TriggerSettings,
@@ -453,6 +454,36 @@ def _step_size_result(outcome: SetStepSizeOutcome = SetStepSizeOutcome.OK, value
     )
 
 
+def _real_service_with_raising_readback() -> SettingsService:
+    """A real SettingsService whose every HID read-back RAISES a TimeoutError.
+
+    Drives the REAL set_step_size_verified through the coordinator so the test
+    exercises the exception-safe read-back path (the crash fix) end-to-end, not
+    a mock. Writes succeed; only reads raise -- the on-hardware failure mode.
+    """
+    handle = 0x1234
+
+    def _read_file(_handle: int, _length: int, timeout_ms: int) -> bytes:
+        raise TimeoutError(f"HID read timed out after {timeout_ms}ms")
+
+    clock = {"t": 0.0}
+
+    def _clock() -> float:
+        clock["t"] += 0.001
+        return clock["t"]
+
+    return SettingsService(
+        enumerate_paths=lambda: ["fake-hid-path"],
+        open_write_handle=lambda _p: (handle, 0),
+        open_read_write_handle=lambda _p: (handle, 0),
+        write_file=lambda _h, payload: (True, 0, len(payload)),
+        read_file=_read_file,
+        close_handle=lambda _h: True,
+        clock=_clock,
+        sleep=lambda _s: None,
+    )
+
+
 class CoordinatorStepSizeTrailerTests(unittest.TestCase):
     """The step_size write is deferred to AFTER the rest of the burst.
 
@@ -467,7 +498,7 @@ class CoordinatorStepSizeTrailerTests(unittest.TestCase):
         settings_service.set_polling_rate.return_value = _polling_result(SetPollingRateOutcome.OK)
         settings_service.set_all_deadzones.return_value = _polling_result(SetPollingRateOutcome.OK)
         settings_service.set_button_binding.return_value = _polling_result(SetPollingRateOutcome.OK)
-        settings_service.set_step_size.return_value = _step_size_result()
+        settings_service.set_step_size_verified.return_value = _step_size_result()
 
         coordinator = SettingsApplyCoordinator(
             settings_service,
@@ -485,9 +516,10 @@ class CoordinatorStepSizeTrailerTests(unittest.TestCase):
         # All four writes happened.
         self.assertEqual(result.total_attempted, 4)
         self.assertEqual(result.succeeded, 4)
-        # Call-order assertion: step_size is the LAST setter invoked.
+        # Call-order assertion: step_size is the LAST setter invoked. It now goes
+        # through the verified setter (write + read-back) per the revert-to-1 fix.
         method_calls = [c[0] for c in settings_service.method_calls]
-        self.assertEqual(method_calls[-1], "set_step_size")
+        self.assertEqual(method_calls[-1], "set_step_size_verified")
         # And the earlier writes precede it.
         self.assertIn("set_polling_rate", method_calls[:-1])
         self.assertIn("set_all_deadzones", method_calls[:-1])
@@ -496,7 +528,7 @@ class CoordinatorStepSizeTrailerTests(unittest.TestCase):
     def test_step_size_trailer_sleeps_before_write_when_delay_positive(self) -> None:
         """A positive trailer delay must invoke time.sleep before the step_size write."""
         settings_service = mock.Mock()
-        settings_service.set_step_size.return_value = _step_size_result()
+        settings_service.set_step_size_verified.return_value = _step_size_result()
 
         coordinator = SettingsApplyCoordinator(
             settings_service,
@@ -510,12 +542,12 @@ class CoordinatorStepSizeTrailerTests(unittest.TestCase):
         self.assertEqual(result.total_attempted, 1)
         self.assertEqual(result.succeeded, 1)
         sleep.assert_called_once_with(0.123)
-        settings_service.set_step_size.assert_called_once_with(131)
+        settings_service.set_step_size_verified.assert_called_once_with(131)
 
     def test_step_size_trailer_skips_sleep_when_delay_zero(self) -> None:
         """A zero (or negative) trailer delay must NOT invoke time.sleep."""
         settings_service = mock.Mock()
-        settings_service.set_step_size.return_value = _step_size_result()
+        settings_service.set_step_size_verified.return_value = _step_size_result()
 
         coordinator = SettingsApplyCoordinator(
             settings_service,
@@ -527,7 +559,7 @@ class CoordinatorStepSizeTrailerTests(unittest.TestCase):
             coordinator.apply_snapshot(snapshot)
 
         sleep.assert_not_called()
-        settings_service.set_step_size.assert_called_once_with(131)
+        settings_service.set_step_size_verified.assert_called_once_with(131)
 
     def test_step_size_trailer_skipped_when_snapshot_step_size_is_none(self) -> None:
         """No trailer write (and no sleep) when snapshot.step_size is None."""
@@ -546,12 +578,12 @@ class CoordinatorStepSizeTrailerTests(unittest.TestCase):
 
         self.assertEqual(result.total_attempted, 1)
         sleep.assert_not_called()
-        settings_service.set_step_size.assert_not_called()
+        settings_service.set_step_size_verified.assert_not_called()
 
     def test_step_size_trailer_records_failure_into_apply_result(self) -> None:
         """A failing step_size trailer write must surface as an ApplyFailure."""
         settings_service = mock.Mock()
-        settings_service.set_step_size.return_value = _step_size_result(
+        settings_service.set_step_size_verified.return_value = _step_size_result(
             outcome=SetStepSizeOutcome.WRITE_FAILED,
             value=131,
         )
@@ -576,6 +608,83 @@ class CoordinatorStepSizeTrailerTests(unittest.TestCase):
         """Default trailer delay matches the 100ms hardware-validated commit threshold."""
         coordinator = SettingsApplyCoordinator(mock.Mock())
         self.assertAlmostEqual(coordinator._step_size_trailer_delay_s, 0.1)
+
+    def test_step_size_trailer_uses_verified_setter(self) -> None:
+        """The apply trailer must drive step_size through set_step_size_verified.
+
+        Revert-to-1 fix (2026-06-23): a plain set_step_size could be silently
+        rejected by the firmware with nothing detecting it. The apply path must
+        call the verify-and-retry setter and never the unverified one.
+        """
+        settings_service = mock.Mock()
+        settings_service.set_step_size_verified.return_value = _step_size_result()
+
+        coordinator = SettingsApplyCoordinator(
+            settings_service,
+            step_size_trailer_delay_s=0.0,
+        )
+        coordinator.apply_snapshot(_empty_snapshot(step_size=131))
+
+        settings_service.set_step_size_verified.assert_called_once_with(131)
+        settings_service.set_step_size.assert_not_called()
+
+    def test_step_size_trailer_survives_readback_timeout_no_crash(self) -> None:
+        """The verified trailer must survive a read-back that RAISES (no crash).
+
+        Crash regression: the verify read-back can raise a
+        TimeoutError on real hardware. Driven through the REAL verified setter
+        (not a mock), the apply must complete without the exception escaping, and
+        the step_size row must DEGRADE to success -- the write itself committed at
+        the seam, only the read-back failed -- rather than a false failure. Proves
+        fix 1 (exception-safe set_step_size_verified) composes with the trailer
+        that fix 2 deliberately left on the verified setter.
+        """
+        service = _real_service_with_raising_readback()
+        # Spy that still runs the REAL method, so we prove the trailer used it.
+        service.set_step_size_verified = mock.Mock(wraps=service.set_step_size_verified)
+
+        coordinator = SettingsApplyCoordinator(
+            service,
+            step_size_trailer_delay_s=0.0,  # no real sleep in tests
+        )
+
+        # Must NOT raise (the crash). On base, the read-back TimeoutError escapes
+        # the verified setter; the coordinator's write-wrapper catches it and
+        # records a FAILURE, so succeeded==0 there instead of the degraded 1.
+        result = coordinator.apply_snapshot(_empty_snapshot(step_size=146))
+
+        service.set_step_size_verified.assert_called_once_with(146)
+        self.assertEqual(result.succeeded, 1)
+        self.assertEqual(result.failed, [])
+
+    def test_step_size_verify_failure_surfaces_as_apply_failure(self) -> None:
+        """A VERIFY_FAILED step_size outcome must land as an ApplyFailure row.
+
+        This is the "device silently reverted to 1" case: the write seam said OK
+        but the read-back never matched, so the verified setter returns
+        VERIFY_FAILED. The apply result must show it failed (not a false success)
+        and it must NOT be flagged transient (it already exhausted its retries).
+        """
+        settings_service = mock.Mock()
+        settings_service.set_step_size_verified.return_value = _step_size_result(
+            outcome=SetStepSizeOutcome.VERIFY_FAILED,
+            value=131,
+        )
+
+        coordinator = SettingsApplyCoordinator(
+            settings_service,
+            step_size_trailer_delay_s=0.0,
+        )
+        result = coordinator.apply_snapshot(_empty_snapshot(step_size=131))
+
+        self.assertEqual(result.succeeded, 0)
+        self.assertEqual(len(result.failed), 1)
+        failure = result.failed[0]
+        self.assertEqual(failure.setting_label, "step_size")
+        self.assertFalse(
+            failure.is_transient,
+            "VERIFY_FAILED already retried internally -- not transient",
+        )
 
 
 # Helpers for building vulnerable-field deltas used by CoordinatorFieldTrailerTests.
@@ -690,7 +799,7 @@ class CoordinatorFieldTrailerTests(unittest.TestCase):
             "set_back_paddle_binding",
         ):
             getattr(settings_service, name).return_value = ok
-        settings_service.set_step_size.return_value = _step_size_result()
+        settings_service.set_step_size_verified.return_value = _step_size_result()
         coordinator = SettingsApplyCoordinator(
             settings_service,
             step_size_trailer_delay_s=kwargs.pop("step_size_trailer_delay_s", 0.0),
@@ -710,9 +819,9 @@ class CoordinatorFieldTrailerTests(unittest.TestCase):
         coordinator.apply_snapshot(snapshot)
 
         method_calls = [c[0] for c in settings_service.method_calls]
-        # polling first, step_size last
+        # polling first, step_size last (now via the verified setter)
         self.assertEqual(method_calls[0], "set_polling_rate")
-        self.assertEqual(method_calls[-1], "set_step_size")
+        self.assertEqual(method_calls[-1], "set_step_size_verified")
         # Every vulnerable setter appears strictly between polling (index 0)
         # and step_size (index -1).
         for setter_name in _VULNERABLE_SETTER_NAMES:

@@ -1930,6 +1930,189 @@ class TestGetStepSize(unittest.TestCase):
         self.assertIn("step_size byte out of range: 0x00", "\n".join(logs.output))
 
 
+class TestSetStepSizeVerified(unittest.TestCase):
+    """The verify-and-retry step_size setter (revert-to-1 fix, 2026-06-23).
+
+    The firmware silently rejects a fraction of cat-0x0d step_size writes
+    (WriteFile OK, device never commits). ``set_step_size_verified`` writes,
+    settles, reads back via ``get_step_size``, and re-writes on a mismatch up to
+    ``attempts`` times -- surfacing ``VERIFY_FAILED`` only when the device never
+    commits. The device read-back is mocked here via the recorder's scripted
+    ``read_results``; true firmware commit can only be confirmed on real
+    hardware (operator smoke: set step_size=73, Apply with device settings,
+    confirm it holds and never reverts to 1).
+    """
+
+    @staticmethod
+    def _step_size_set_writes(rec: _Recorder, value: int) -> int:
+        """Count the step_size *set* writes (excludes read-query writes)."""
+
+        target = build_step_size_payload(value)
+        return sum(
+            1
+            for event in rec.events
+            if event[0] == "write_file" and event[2] == target
+        )
+
+    def test_first_write_not_committed_then_retries_and_commits(self) -> None:
+        # (a) First readback shows the floor (1, not committed) -> one retry ->
+        # second readback shows the written value -> verified success.
+        value = STEP_SIZE_VALUE_DEFAULT  # 73 (a valid, non-floor value)
+        rec = _Recorder(
+            read_results=[
+                _make_read_response(category=CATEGORY_STEP_SIZE, value=STEP_SIZE_VALUE_MIN),
+                _make_read_response(category=CATEGORY_STEP_SIZE, value=value),
+            ]
+        )
+        service = _make_service(rec)
+
+        result = service.set_step_size_verified(value)
+
+        self.assertEqual(result.outcome, SetStepSizeOutcome.OK)
+        self.assertEqual(result.value, value)
+        # Exactly two device writes of the value: the rejected one + the retry.
+        self.assertEqual(self._step_size_set_writes(rec, value), 2)
+        # The settle seam ran between write and read-back.
+        self.assertIn(("sleep", 0.1), rec.events)
+
+    def test_never_commits_returns_verify_failed_after_attempts(self) -> None:
+        # (b) The device never commits across the full attempt budget -> the
+        # write layer reports OK each time, but the read-back keeps showing the
+        # floor -> the setter surfaces VERIFY_FAILED (not a false success).
+        value = STEP_SIZE_VALUE_DEFAULT
+        attempts = 3
+        rec = _Recorder(
+            read_results=[
+                _make_read_response(category=CATEGORY_STEP_SIZE, value=STEP_SIZE_VALUE_MIN)
+                for _ in range(attempts)
+            ]
+        )
+        service = _make_service(rec)
+
+        with self.assertLogs("zd_app.services.settings_service", level="WARNING"):
+            result = service.set_step_size_verified(value, attempts=attempts)
+
+        self.assertEqual(result.outcome, SetStepSizeOutcome.VERIFY_FAILED)
+        self.assertEqual(result.value, value)
+        # One device write per attempt -- all rejected.
+        self.assertEqual(self._step_size_set_writes(rec, value), attempts)
+
+    def test_commits_first_try_issues_single_write(self) -> None:
+        # (c) The first readback already matches -> one write, no retry, success.
+        value = 200
+        rec = _Recorder(
+            read_results=[_make_read_response(category=CATEGORY_STEP_SIZE, value=value)]
+        )
+        service = _make_service(rec)
+
+        result = service.set_step_size_verified(value)
+
+        self.assertEqual(result.outcome, SetStepSizeOutcome.OK)
+        self.assertEqual(result.value, value)
+        self.assertEqual(self._step_size_set_writes(rec, value), 1)
+
+    def test_write_layer_failure_returns_immediately_unwrapped(self) -> None:
+        # A write-layer failure (no device) has no commit ambiguity to resolve:
+        # it is returned as-is, with no read-back attempted.
+        rec = _Recorder(paths=[])
+        service = _make_service(rec)
+
+        result = service.set_step_size_verified(100)
+
+        self.assertEqual(result.outcome, SetStepSizeOutcome.DEVICE_NOT_FOUND)
+        self.assertEqual(result.value, 100)
+        # No read-back issued on a write-layer failure.
+        self.assertNotIn("read_file", [event[0] for event in rec.events])
+
+    def test_readback_timeout_degrades_to_unverified_write_no_crash(self) -> None:
+        # CRASH REGRESSION: the verify read-back can RAISE a
+        # TimeoutError on real hardware (HID read timed out after 1000ms). It
+        # used to propagate out of set_step_size_verified to the excepthook and
+        # crash the app from the live slider path. The setter must now CATCH it,
+        # retry within budget, and -- when every attempt only ever failed to
+        # READ (never read back a different value) -- DEGRADE to the write's OK
+        # result. A verified write must never be worse than a plain one.
+        value = STEP_SIZE_VALUE_DEFAULT
+        attempts = 3
+        rec = _Recorder(
+            read_results=[
+                TimeoutError("HID read timed out after 1000ms") for _ in range(attempts)
+            ]
+        )
+        service = _make_service(rec)
+
+        with self.assertLogs("zd_app.services.settings_service", level="WARNING"):
+            # Must NOT raise (the crash). On base, the TimeoutError escapes here.
+            result = service.set_step_size_verified(value, attempts=attempts)
+
+        # Degraded to the underlying write's success, NOT a false VERIFY_FAILED.
+        self.assertEqual(result.outcome, SetStepSizeOutcome.OK)
+        self.assertEqual(result.value, value)
+        # One device set-write per attempt, each followed by a read-back raise.
+        self.assertEqual(self._step_size_set_writes(rec, value), attempts)
+
+    def test_readback_oserror_degrades_to_unverified_write_no_crash(self) -> None:
+        # Sibling of the TimeoutError case for the raw ReadFile OSError the HID
+        # layer can also raise. The setter catches OSError (which also covers
+        # TimeoutError) and degrades rather than crashing or false-failing.
+        value = 200
+        attempts = 2
+        rec = _Recorder(
+            read_results=[OSError("ReadFile device error") for _ in range(attempts)]
+        )
+        service = _make_service(rec)
+
+        with self.assertLogs("zd_app.services.settings_service", level="WARNING"):
+            result = service.set_step_size_verified(value, attempts=attempts)
+
+        self.assertEqual(result.outcome, SetStepSizeOutcome.OK)
+        self.assertEqual(result.value, value)
+        self.assertEqual(self._step_size_set_writes(rec, value), attempts)
+
+    def test_readback_none_degrades_not_verify_failed(self) -> None:
+        # get_step_size returns None when the read fails gracefully (a
+        # SettingsServiceError it swallows) or yields an out-of-range byte. None
+        # means "could not read it back", NOT a confirmed wrong value, so it must
+        # degrade to the write result -- never a false VERIFY_FAILED. (On base,
+        # None was treated as a mismatch and surfaced VERIFY_FAILED.)
+        value = STEP_SIZE_VALUE_DEFAULT
+        attempts = 2
+        rec = _Recorder(
+            read_results=[
+                SettingsServiceError("synthetic read failure") for _ in range(attempts)
+            ]
+        )
+        service = _make_service(rec)
+
+        with self.assertLogs("zd_app.services.settings_service", level="WARNING"):
+            result = service.set_step_size_verified(value, attempts=attempts)
+
+        self.assertEqual(result.outcome, SetStepSizeOutcome.OK)
+        self.assertEqual(result.value, value)
+
+    def test_confirmed_mismatch_then_readback_raise_still_verify_failed(self) -> None:
+        # A CONFIRMED mismatch (read SUCCEEDED, showed the floor) on one attempt
+        # is real evidence the device rejected the write; a later read-back that
+        # raises must not erase it. With at least one confirmed mismatch in the
+        # run, the budget-exhausted result is VERIFY_FAILED, not a degraded OK.
+        value = STEP_SIZE_VALUE_DEFAULT
+        rec = _Recorder(
+            read_results=[
+                # attempt 1: read succeeds, device painted the floor -> mismatch
+                _make_read_response(category=CATEGORY_STEP_SIZE, value=STEP_SIZE_VALUE_MIN),
+                # attempt 2: read-back raises (couldn't verify)
+                TimeoutError("HID read timed out after 1000ms"),
+            ]
+        )
+        service = _make_service(rec)
+
+        with self.assertLogs("zd_app.services.settings_service", level="WARNING"):
+            result = service.set_step_size_verified(value, attempts=2)
+
+        self.assertEqual(result.outcome, SetStepSizeOutcome.VERIFY_FAILED)
+        self.assertEqual(result.value, value)
+
+
 class TestGetVibration(unittest.TestCase):
     def test_get_vibration_parses_response_payload(self) -> None:
         rec = _Recorder(read_results=[_make_read_response(

@@ -187,6 +187,12 @@ class _RecordingService:
     def set_step_size(self, value):
         return self._record("set_step_size")
 
+    def set_step_size_verified(self, value, attempts=3, settle_s=0.1):
+        # The apply path uses the verified setter; the live slider path uses the
+        # plain set_step_size. Delegate to the recorded set_step_size so the
+        # busy-guard write counts are unchanged regardless of which path runs.
+        return self.set_step_size(value)
+
     def set_vibration(self, settings):
         return self._record("set_vibration")
 
