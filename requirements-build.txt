@@ -1,5 +1,5 @@
 -r requirements.txt
-pyinstaller==6.20.0
+pyinstaller==6.21.0
 
 # Before tagging a release, run `pip-audit` against the resolved environment
 # (these pins) to catch known CVEs in the shipped dependency set.
