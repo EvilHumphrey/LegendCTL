@@ -2,40 +2,71 @@
 
 *Unofficial Windows configurator for ZD Ultimate Legend controllers.*
 
+[![Latest release](https://img.shields.io/github/v/release/EvilHumphrey/LegendCTL)](https://github.com/EvilHumphrey/LegendCTL/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/EvilHumphrey/LegendCTL)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/EvilHumphrey/LegendCTL/ci.yml?branch=main&label=CI)](https://github.com/EvilHumphrey/LegendCTL/actions/workflows/ci.yml)
+![Windows 10/11](https://img.shields.io/badge/Windows-10%2F11-0078D6)
+
+LegendCTL is a free, open-source Windows app for reading and applying ZD Ultimate
+Legend controller settings. It runs **standalone** — it talks directly to the
+controller over USB-HID, so the official ZD app is **not required** to use it (and
+it coexists cleanly with the official app if you keep that installed). It is
+lightweight, fully local, and preserves your configuration across sessions. It
+configures the controller's supported settings — it is not a firmware updater.
+
 > **Independent third-party project. Not developed by, affiliated with, or
 > endorsed by ZD Gaming.** "ZD Gaming" and "ZD Ultimate Legend" are used only
 > to identify the controller this tool is compatible with; all trademarks are
 > the property of their respective owners.
 
-LegendCTL is a local Windows app for reading and applying supported ZD Ultimate
-Legend controller settings. It is lightweight, runs alongside the official ZD
-Gaming Zone app, and preserves your configuration across sessions.
+[**⬇ Download the latest release**](https://github.com/EvilHumphrey/LegendCTL/releases/latest) — Windows 10/11, portable ZIP or installer.
 
-> **A note on names.** The project is named **LegendCTL**. The application
-> window, Start Menu entry, and executable currently still carry the legacy
-> name *ZD Ultimate Legend Wrapper* / `ZD Ultimate Legend.exe` — they are the
-> same program, and the download artifacts below keep those legacy file names.
+> **First launch shows a SmartScreen prompt — that's expected.** Because the
+> build is currently unsigned, Windows may show "Windows protected your PC" the
+> first time you run it. That's normal for any new unsigned app, not a malware
+> warning — choose **More info → Run anyway**. You can
+> [verify the download's SHA-256](#distribution-safety) first if you like.
 
-## Disclaimer & risk
+## Why LegendCTL?
 
-ZD Gaming asked that this project carry the following disclaimer, which it
-reproduces verbatim:
+Whether or not you use the official ZD app, here's what this one gives you. The
+short version is **trust you can verify**:
 
-> This software is not developed or endorsed by ZD Gaming. Use at your own risk, and any controller issue caused by using this tool is not covered under the official warranty.
+- **Open source, MIT-licensed.** Every line is on GitHub — read it, build it
+  yourself, fork it. Nothing is hidden.
+- **Fully local — no network, no telemetry.** The LegendCTL process makes
+  **zero** network calls — no telemetry, no analytics, no auto-update. (The one
+  outbound action is the About screen's GitHub links, which hand a URL to your
+  browser; the app itself opens no socket.) Closed controller and peripheral
+  software often phones home and bundles analytics SDKs; this one doesn't — and
+  you don't have to take that on faith. You can
+  [confirm the no-network behavior yourself](docs/verifying-no-network.md) in a
+  couple of minutes.
+- **No drivers, no virtual devices, no background service.** Nothing installs a
+  driver or sits running in the background. Close the app and nothing of it is
+  left behind.
+- **Honest write reporting — no fake success.** A normal Apply reports each
+  field's real write outcome and refreshes the on-screen state from the device;
+  the Restore, Safe Import, and inline deadzone flows go further and verify by
+  reading the value back — so a write that didn't take is surfaced honestly
+  instead of flashing "success."
+- **No macros, turbo, or automation.** It configures your controller; it never
+  plays for you. That's a deliberate constraint enforced by tests, not a missing
+  feature.
+- **A safety net by default.** Device-touching changes — applying device
+  settings, deadzone tuning — capture a **Restore Point** first, wrapper events
+  are written to an append-only local ledger, and there is always a
+  [Recovery](#recovery--if-your-controller-feels-off) path back.
 
-Beyond that: LegendCTL is provided **"as is", without warranty of any kind**,
-express or implied, to the maximum extent permitted by applicable law. You
-assume all risk arising from its use. It writes settings to controller hardware
-over USB/HID and reports each field's write outcome; the Restore, Safe Import,
-and inline deadzone flows additionally verify by read-back, and the write-only
-back-paddle bindings are reported as sent. There is always a **Recovery** path
-(see below), but you are responsible for how you use it.
+That's the whole pitch: a small, auditable, no-surprises tool for your controller
+— open where closed software is opaque, local by design, and honest about what it
+can and can't do.
 
-See [SECURITY.md](SECURITY.md) for the security posture,
-[docs/verifying-no-network.md](docs/verifying-no-network.md) to confirm the
-"no network" claim yourself, [NOTICE](NOTICE) for affiliation and third-party
-license details, and the [code-signing policy](docs/code-signing-policy.md) for
-how releases are (will be) signed.
+## Demo
+
+![LegendCTL Live Verify: sweeping both analog sticks while each stick's circularity readout traces its real XInput output and settles to a percentage.](docs/media/legendctl-liveverify-demo.gif)
+
+**Live Verify** reads both sticks straight from XInput. Start a stick test and sweep — each stick's trace fills its circle, sweep-coverage climbs, and the per-stick circularity settles to a percentage, so you can see how round your sticks really are and catch a flat spot or off-center rest. Everything runs locally; no network, no telemetry.
 
 ## Status
 
@@ -83,17 +114,50 @@ behavior yourself in a couple of minutes — see
 Profile sharing ("Safe Import") exists in the codebase but is dev-gated and parked —
 the Import button is hidden unless the Developer toggle is enabled.
 
-## Demo
+## Disclaimer & risk
 
-![LegendCTL Live Verify: sweeping both analog sticks while each stick's circularity readout traces its real XInput output and settles to a percentage.](docs/media/legendctl-liveverify-demo.gif)
+ZD Gaming asked that this project carry the following disclaimer, which it
+reproduces verbatim:
 
-**Live Verify** reads both sticks straight from XInput. Start a stick test and sweep — each stick's trace fills its circle, sweep-coverage climbs, and the per-stick circularity settles to a percentage, so you can see how round your sticks really are and catch a flat spot or off-center rest. Everything runs locally; no network, no telemetry.
+> This software is not developed or endorsed by ZD Gaming. Use at your own risk, and any controller issue caused by using this tool is not covered under the official warranty.
+
+Beyond that: LegendCTL is provided **"as is", without warranty of any kind**,
+express or implied, to the maximum extent permitted by applicable law. You
+assume all risk arising from its use. It writes settings to controller hardware
+over USB/HID and reports each field's write outcome; the Restore, Safe Import,
+and inline deadzone flows additionally verify by read-back, and the write-only
+back-paddle bindings are reported as sent. There is always a **Recovery** path
+(see below), but you are responsible for how you use it.
+
+See [SECURITY.md](SECURITY.md) for the security posture,
+[docs/verifying-no-network.md](docs/verifying-no-network.md) to confirm the
+"no network" claim yourself, [NOTICE](NOTICE) for affiliation and third-party
+license details, and the [code-signing policy](docs/code-signing-policy.md) for
+how releases are (will be) signed.
 
 ## Download
 
-Two distribution options — pick whichever fits your workflow.
+Two ways to get it — the **portable ZIP is the simplest** and needs no admin
+rights; the installer adds Start-Menu/uninstaller integration if you prefer it.
+Both ship the exact same wrapper executable. (In the download names below,
+`<version>` is just the release number — e.g. `2.0.1` in the current release.)
 
-### Installer (recommended)
+> **A note on names.** The project is named **LegendCTL**, but the application
+> window, Start Menu entry, and executable still carry the legacy name *ZD
+> Ultimate Legend Wrapper* / `ZD Ultimate Legend.exe` — it is the same program,
+> and the download files below keep those legacy names too.
+
+### Portable ZIP (recommended)
+
+Download `ZDUltimateLegend-v<version>-windows.zip` from the [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest).
+
+Extract anywhere and run `ZD Ultimate Legend.exe` — no admin, no UAC prompt, no
+installer, and you uninstall by deleting the folder. Settings persist in
+`%APPDATA%\ZDUltimateLegend\` regardless of where the wrapper folder lives. This
+is the low-friction way to try it: run it from anywhere, including a thumb drive,
+even without admin rights.
+
+### Installer
 
 Download `ZDUltimateLegend-v<version>-Setup.exe` from the [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest).
 
@@ -103,18 +167,8 @@ The installer:
 - Registers an uninstaller in Windows Settings → Apps.
 - Optionally adds a desktop shortcut (unchecked by default).
 
-### Portable ZIP
-
-Download `ZDUltimateLegend-v<version>-windows.zip` from the [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest).
-
-Extract anywhere and run `ZD Ultimate Legend.exe`. Settings persist in
-`%APPDATA%\ZDUltimateLegend\` regardless of where the wrapper folder
-lives. Use this option if you prefer manual installs, run from a thumb
-drive, or don't have admin rights (the installer requires admin to write
-under Program Files).
-
-Both distributions ship the same wrapper executable; the only difference
-is the surrounding install/uninstall machinery.
+The only difference between the two is the surrounding install/uninstall
+machinery; the wrapper itself is identical.
 
 ### Distribution safety
 
@@ -147,10 +201,32 @@ so a couple of things are expected and normal:
 ## Quick start (released build)
 
 1. Plug a ZD Ultimate Legend controller into a USB port.
-2. Launch `ZD Ultimate Legend.exe` (from the Start Menu shortcut after
+2. Launch `ZD Ultimate Legend.exe` (from the Start Menu shortcut after an
    installer install, or by extracting the portable ZIP and double-clicking).
+   **On first launch,** because the build is currently unsigned, Windows
+   SmartScreen may show "Windows protected your PC." That's normal for any new
+   unsigned app and not a sign of malware — click **More info → Run anyway**
+   (you can [verify the download's SHA-256](#distribution-safety) first if you
+   like).
 3. The app auto-reads current controller state on connect.
 4. Adjust settings via the sidebar tabs; click Apply per-tab or in the footer to write.
+
+## Will it work on my controller?
+
+**If you have a ZD Ultimate Legend, the core settings very likely work.** The app
+was developed and bench-tested on a **single ZD Ultimate Legend unit**, on the
+firmware it ran — **known-working firmware: v1.18 (including 8K polling) and v1.24
+(including the 8-point sensitivity curves).**
+
+The ZD Ultimate Legend ships in **six controller variants** with different stick
+modules and firmware revisions. Other firmware versions, the other variants, and
+different stick modules are **best-effort**: the HID protocol this app relies on
+may differ, so some settings may read or write differently — or not at all — on
+hardware that wasn't on the bench. The important part is that the app is built to
+**report unsupported or unverified paths explicitly rather than pretend a write
+succeeded** — and there is always the [Recovery](#recovery--if-your-controller-feels-off)
+path if something looks off. If a setting misbehaves on your unit, please
+[report it](SUPPORT.md) with the requested signature data and logs.
 
 ## Recovery — if your controller feels off
 
@@ -170,20 +246,6 @@ this tool or any other), there is always a clear way back:
 
 Between the vendor's "Restore to default" and the wrapper's Restore Points, you
 always have an undo.
-
-## Tested hardware
-
-Developed and tested on a **single ZD Ultimate Legend unit**, on the specific
-firmware versions it ran (notably v1.18, and v1.24 for the 8K / 8-point
-sensitivity paths). The ZD Ultimate Legend ships in **six controller variants**
-with different stick modules and firmware revisions.
-
-Other firmware versions, the other variants, and different stick modules are
-**best-effort**: the HID protocol this app relies on may differ, so some
-settings may read or write differently — or not at all — on hardware that
-wasn't on the bench. The app is built to report unsupported or unverified paths
-explicitly rather than pretend a write succeeded, but if something looks wrong
-on your unit, use the Recovery steps above and please report it.
 
 ## Getting help
 
@@ -255,6 +317,21 @@ Project license: MIT (c) 2026 EvilHumphrey; see the repository `LICENSE` file
 for the full text. Bundled third-party components retain their original
 licenses; see **About → Licenses** in the running app for full text. License
 files also live under `assets/licenses/`.
+
+## Acknowledgments
+
+LegendCTL was built with substantial AI assistance, under human direction and
+review throughout. Much of the reverse-engineering, implementation, test-writing,
+and adversarial code review was done by AI agents — and every change was
+human-reviewed, hardware-tested on a real controller, and shipped by the
+maintainer.
+
+- **Claude** (Anthropic) — primary development, reverse-engineering research, and
+  code review, via Claude Code.
+- **Codex** (OpenAI) — independent second-perspective review and escalation.
+- **GPT-5.5 (via Hermes)** — cross-model review and strategy.
+
+This project's posture is honesty by design, so it says that plainly.
 
 ## Historical: lineage
 
