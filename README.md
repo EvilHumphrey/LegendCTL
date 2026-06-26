@@ -249,6 +249,10 @@ always have an undo.
 
 ## Getting help
 
+Start with the **[FAQ](docs/FAQ.md)** — it answers the common questions (is it
+safe? do I need the official app? why the SmartScreen warning? does it phone
+home? will it work on my controller?).
+
 Bug reports and questions are welcome through GitHub. Please read
 [SUPPORT.md](SUPPORT.md) first — it explains what belongs in an **Issue** (a
 reproducible bug, filed with the data the bug-report form asks for) versus a

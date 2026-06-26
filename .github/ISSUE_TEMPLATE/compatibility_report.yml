@@ -1,0 +1,108 @@
+name: Compatibility report
+description: Tell us how LegendCTL worked (or didn't) on your ZD controller, variant, or firmware.
+title: "[Compat]: "
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing LegendCTL on your hardware — **compatibility reports
+        are how breadth grows**, and both "it worked" and "it didn't" are useful.
+        LegendCTL was bench-tested on a single ZD Ultimate Legend unit, so reports
+        from other variants/firmware genuinely help.
+
+        Please include your device signature (VID/PID + variant + firmware) and a
+        log — without them a report can't really be acted on. **Don't** paste
+        anything private; the in-app Diagnostic Bundle strips local paths for you.
+
+        (Found a crash or a clear bug instead? Use the **Bug report** form. Just
+        have a question? Use **Discussions**.)
+  - type: checkboxes
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I searched existing compatibility reports / Discussions and didn't find my variant + firmware.
+          required: true
+        - label: This is a compatibility data point, not a crash/bug (those go to the Bug report form).
+          required: true
+  - type: input
+    id: app-version
+    attributes:
+      label: LegendCTL / app version
+      description: From **About → Version** in the app.
+      placeholder: e.g. v2.0.1
+    validations:
+      required: true
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+      placeholder: e.g. Windows 11 23H2 (build 22631)
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Controller VID/PID + variant + firmware
+      description: |
+        USB VID/PID, which Ultimate Legend variant (or other ZD model), and firmware
+        version if you know it. VID/PID is in Device Manager → your controller →
+        Details → "Hardware Ids".
+      placeholder: e.g. VID_413D&PID_2104, Ultimate Legend variant X, firmware v1.18
+    validations:
+      required: true
+  - type: dropdown
+    id: overall
+    attributes:
+      label: Overall result
+      options:
+        - Everything I tried worked
+        - Mostly worked — some settings didn't
+        - Live Verify (stick view) worked, but settings didn't
+        - The app didn't detect my controller at all
+        - Other (explain below)
+    validations:
+      required: true
+  - type: textarea
+    id: per-setting
+    attributes:
+      label: What did you test, and what happened?
+      description: |
+        List the settings you tried and whether each read/wrote correctly. The app
+        reports each field's outcome — note any that reported failure or behaved
+        oddly.
+      placeholder: |
+        - Deadzone: read OK, write OK (verified)
+        - Sensitivity curve: read OK, write reported VERIFY_FAILED
+        - Polling rate: worked
+        - Lighting: no visible change
+    validations:
+      required: true
+  - type: dropdown
+    id: live-verify
+    attributes:
+      label: Did Live Verify (the live stick / circularity view) work?
+      description: It reads from XInput, so it often works even when ZD-specific settings don't.
+      options:
+        - "Yes"
+        - "No"
+        - Didn't try
+    validations:
+      required: false
+  - type: textarea
+    id: log
+    attributes:
+      label: Log file / Diagnostic Bundle
+      description: |
+        Attach the log from `%APPDATA%\ZDUltimateLegend\logs\zd_wrapper.log`, and/or
+        a Diagnostic Bundle from the in-app **Diagnostics** screen. Drag the file
+        into this box to attach it. Required if anything didn't work.
+    validations:
+      required: false
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else?
+      description: Stick module if you know it, hot-swap modules used, observations, photos — anything that helps.
+    validations:
+      required: false
