@@ -48,6 +48,36 @@ not network sockets and will not show up in TCPView.
 > The LegendCTL process itself opens no socket; any traffic that follows belongs
 > to the browser process, not to the LegendCTL row you're watching here.
 
+## Quick check with PowerShell (built in — no download)
+
+Prefer not to download anything? Windows' built-in PowerShell shows the same
+result in a couple of commands. With LegendCTL running (and a controller
+connected, if you have one), list every network connection the process owns:
+
+```powershell
+# Find the LegendCTL process id (released build):
+Get-Process "ZD Ultimate Legend" | Select-Object Id, ProcessName
+
+# List the TCP connections + UDP endpoints it owns (replace 12345 with the Id):
+Get-NetTCPConnection -OwningProcess 12345 -ErrorAction SilentlyContinue
+Get-NetUDPEndpoint  -OwningProcess 12345 -ErrorAction SilentlyContinue
+```
+
+For the LegendCTL process both commands return **nothing** — no TCP connections,
+no UDP endpoints — even while you read controller state and apply settings:
+
+```
+Id    ProcessName
+--    -----------
+36276 ZD Ultimate Legend
+
+# Get-NetTCPConnection / Get-NetUDPEndpoint  ->  no output (zero connections)
+```
+
+Running from source instead? Use the `pythonw` / `python` process id. The HID
+handles LegendCTL uses to talk to the controller are not network sockets, so
+they never appear here.
+
 ## Going further
 
 - TCPView ships with a companion command-line tool, `tcpvcon`, if you prefer a
