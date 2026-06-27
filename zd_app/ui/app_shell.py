@@ -484,7 +484,7 @@ LIGHTING_MODE_LABEL_BY_ENUM = {v: k for k, v in LIGHTING_MODE_BY_LABEL.items()}
 
 logger = logging.getLogger(__name__)
 
-_DPG_SAFE_WINDOW_TITLE = "ZD Ultimate Legend"
+_DPG_SAFE_WINDOW_TITLE = "LegendCTL - ZD Ultimate Legend"
 _TOP_STATUS_BAR_HEIGHT = 40
 # Footer bar height bumped 48→56 (UI refresh) so the
 # Profile combo + Save As / Apply / Delete / Read buttons + status text get

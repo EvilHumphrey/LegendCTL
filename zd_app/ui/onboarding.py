@@ -44,7 +44,7 @@ def prompt_for_vendor_path(
         if hasattr(root, "withdraw"):
             root.withdraw()
         showinfo(
-            title="ZD Ultimate Legend Wrapper - First-Run Setup",
+            title="LegendCTL - First-Run Setup",
             message=(
                 "ZD Game Zone 3.7.exe was not found in any default install "
                 "location.\n\n"

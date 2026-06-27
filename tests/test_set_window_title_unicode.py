@@ -73,7 +73,7 @@ class SetWindowTitleUnicodeTests(unittest.TestCase):
             ) as set_viewport_title:
                 shell.update_language("zh-CN")
 
-            set_unicode.assert_called_with("ZD Ultimate Legend")
+            set_unicode.assert_called_with("LegendCTL - ZD Ultimate Legend")
             self.assertNotIn(
                 "ZD Ultimate Legend 控制中心",
                 [call.args[0] for call in set_viewport_title.call_args_list],
@@ -93,8 +93,8 @@ class SetWindowTitleUnicodeTests(unittest.TestCase):
             ) as set_unicode:
                 shell._set_window_title(shell.window_title())
 
-            set_unicode.assert_called_once_with("ZD Ultimate Legend")
-            self.assertEqual(shell.window_title(), "ZD Ultimate Legend")
+            set_unicode.assert_called_once_with("LegendCTL - ZD Ultimate Legend")
+            self.assertEqual(shell.window_title(), "LegendCTL - ZD Ultimate Legend")
         finally:
             set_locale("en")
 
@@ -106,7 +106,7 @@ class SetWindowTitleUnicodeTests(unittest.TestCase):
             shell._setup_theme()
             shell._build_ui()
 
-            self.assertEqual(dpg.get_item_label("main_window"), "ZD Ultimate Legend")
+            self.assertEqual(dpg.get_item_label("main_window"), "LegendCTL - ZD Ultimate Legend")
         finally:
             dpg.destroy_context()
             set_locale("en")
