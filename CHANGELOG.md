@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.0.3 — 2026-06-27
+
+LegendCTL rebrand plus a multi-slot live tester and a lighting-apply reliability fix. No new
+settings are written by the wrapper; same test discipline (full suite green on Python 3.12 /
+DearPyGui 2.3.1).
+
+- **New LegendCTL look.** The app accent is now the LegendCTL blue, the About screen shows a
+  radar mark drawn from the live deadzone visual, and the in-app display name reads
+  "LegendCTL" across the window title, status bar, About panel, and first-run dialog.
+- **Live Verify finds the pad on any XInput slot.** The tester scans player slots 0–3,
+  auto-selects the first connected pad and sticks to it, re-scans on disconnect, and adds an
+  Auto / Player 1–4 override with a live "Active: Player N" readout — so the ZD pad is found
+  even when it enumerates as player 2–4 on a multi-pad bench.
+- **Per-zone lighting applies reliably.** The apply path writes each lighting zone, reads it
+  back, and retries on a confirmed mismatch, fixing a silent-reject that could drop the
+  right-zone color on a profile apply.
+- **Packaging: winget manifest added** under `packaging/winget/` for Windows Package Manager
+  submission.
+
 ## v2.0.2 — 2026-06-26
 
 Read-only Live Verify widening. The live tester now works with any connected XInput
