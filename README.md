@@ -9,8 +9,9 @@
 
 LegendCTL is a free, open-source Windows app for reading and applying ZD Ultimate
 Legend controller settings. It runs **standalone** — it talks directly to the
-controller over USB-HID, so the official ZD app is **not required** to use it (and
-it coexists cleanly with the official app if you keep that installed). It is
+controller over USB-HID, so the official ZD app is **not required** to use it. (Keep
+the official app for firmware updates if you like — LegendCTL works independently and
+doesn't depend on it.) It is
 lightweight, fully local, and preserves your configuration across sessions. It
 configures the controller's supported settings — it is not a firmware updater.
 
@@ -26,6 +27,13 @@ configures the controller's supported settings — it is not a firmware updater.
 > first time you run it. That's normal for any new unsigned app, not a malware
 > warning — choose **More info → Run anyway**. You can
 > [verify the download's SHA-256](#distribution-safety) first if you like.
+
+**New here, or searching for something specific?** →
+[Official ZD app vs LegendCTL](docs/official-zd-app-vs-legendctl.md) ·
+[Deadzone & circularity tuning](docs/zd-ultimate-legend-deadzone-circularity.md) ·
+[Calibration after a stick-module swap](docs/zd-ultimate-legend-stick-swap-calibration.md) ·
+[SmartScreen & verifying your download](docs/legendctl-smartscreen-sha256-verification.md) ·
+[FAQ](docs/FAQ.md)
 
 ## Why LegendCTL?
 
@@ -216,7 +224,8 @@ so a couple of things are expected and normal:
 **If you have a ZD Ultimate Legend, the core settings very likely work.** The app
 was developed and bench-tested on a **single ZD Ultimate Legend unit**, on the
 firmware it ran — **known-working firmware: v1.18 (including 8K polling) and v1.24
-(including the 8-point sensitivity curves).**
+(including the 8-point sensitivity curves), verified through the latest v1.24 "0609"
+optimized-latency build.**
 
 The ZD Ultimate Legend ships in **six controller variants** with different stick
 modules and firmware revisions. Other firmware versions, the other variants, and

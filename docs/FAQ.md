@@ -62,8 +62,8 @@ against many engines. If you want zero packaged binaries, build from source.
 
 ### Do I need the official ZD app installed?
 No. LegendCTL runs **standalone** — it talks directly to the controller over
-USB-HID, so the official ZD app is not required. It does coexist cleanly with the
-official app if you keep that installed; it just doesn't depend on it.
+USB-HID, so the official ZD app is not required. Keep the official app for firmware
+updates if you like; LegendCTL works independently of it and doesn't depend on it.
 
 ### Installer or portable ZIP — which should I use?
 The **portable ZIP** is the simplest: no admin, no UAC, runs from any folder, and
@@ -75,7 +75,8 @@ entry and an entry in Windows' Apps list. Both ship the identical wrapper.
 ### Will it work on my controller?
 If you have a **ZD Ultimate Legend**, the core settings very likely work. It was
 developed and bench-tested on a single unit (known-working firmware **v1.18**,
-incl. 8K polling, and **v1.24**, incl. 8-point sensitivity curves). The controller
+incl. 8K polling, and **v1.24**, incl. 8-point sensitivity curves and the latest "0609"
+optimized-latency build). The controller
 ships in six variants with different stick modules/firmware; other variants and
 firmware are **best-effort** — the HID protocol may differ. The app is built to
 say so honestly rather than fake a successful write. If something's off on your
