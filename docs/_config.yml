@@ -1,0 +1,8 @@
+title: LegendCTL
+description: >-
+  Free, open-source, fully-local Windows configurator for the ZD Ultimate Legend
+  controller — deadzones, sensitivity, polling, triggers, vibration, lighting, and
+  profiles. Standalone; no official ZD app required.
+theme: jekyll-theme-cayman
+# GitHub Pages enables jekyll-relative-links by default, so [text](page.md) links
+# between these docs resolve correctly on the published site.

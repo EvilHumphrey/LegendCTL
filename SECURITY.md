@@ -31,10 +31,12 @@ not aspirational promises:
   or scheduled task. It only runs while you have its window open.
 - **No input injection, no game-process hooking, no automation** (no
   macros/turbo/scripting).
-- **HID-only, verified writes.** Controller settings are written as standard
-  USB/HID feature reports to the controller's onboard memory and verified by
-  read-back wherever the controller exposes the value; the write-only back-paddle
-  bindings are reported as sent, not verified.
+- **HID-only writes, honestly reported.** Controller settings are written as
+  standard USB/HID feature reports to the controller's onboard memory. A normal
+  Apply reports each field's write outcome and refreshes the on-screen state from
+  the device; Restore Points, Safe Import, and inline-deadzone writes additionally
+  read back and compare the written value, and the write-only back-paddle bindings
+  are reported as sent, not verified.
 
 ## Distribution & signing
 
