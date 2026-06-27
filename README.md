@@ -82,7 +82,7 @@ can and can't do.
 
 ## Status
 
-v2.0.1 — feature-complete for normal use.
+v2.0.3 — feature-complete for normal use.
 
 Controller settings (all written as standard HID feature reports; a normal Apply
 reports each field's write outcome and refreshes the on-screen state from the
@@ -152,7 +152,7 @@ how releases are (will be) signed.
 Two ways to get it — the **portable ZIP is the simplest** and needs no admin
 rights; the installer adds Start-Menu/uninstaller integration if you prefer it.
 Both ship the exact same wrapper executable. (In the download names below,
-`<version>` is just the release number — e.g. `2.0.1` in the current release.)
+`<version>` is just the release number — e.g. `2.0.3` in the current release.)
 
 > **A note on names.** The project is named **LegendCTL**, but the application
 > window, Start Menu entry, and executable still carry the legacy name *ZD
