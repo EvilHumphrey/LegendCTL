@@ -61,7 +61,7 @@ class ThemeTests(unittest.TestCase):
         self.assertTrue(required.issubset(themes.COLORS))
 
     def test_legacy_color_aliases_resolve(self) -> None:
-        self.assertEqual(themes.LEGACY_COLOR_ALIASES["accent"], (16, 185, 129, 255))
+        self.assertEqual(themes.LEGACY_COLOR_ALIASES["accent"], (46, 155, 255, 255))
         self.assertEqual(themes.LEGACY_COLOR_ALIASES["good"], themes.COLORS["success"])
         self.assertEqual(themes.LEGACY_COLOR_ALIASES["bad"], themes.COLORS["error"])
 

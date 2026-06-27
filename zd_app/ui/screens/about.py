@@ -74,8 +74,26 @@ def build(shell, parent: str) -> None:
         # wide empty field.
         with card(width=_CONTENT_MAX_WIDTH):
             with dpg.drawlist(width=96, height=96):
-                dpg.draw_circle((48, 48), 42, color=shell.COLORS["accent"], thickness=4)
-                dpg.draw_text((26, 18), "Z", size=60, color=shell.COLORS["accent"])
+                # Live-deadzone radar mark — the app's signature Live Verify
+                # visual distilled: faint rings + crosshair, one accent ring with
+                # the stick vector and blip sitting on it, a light center dot.
+                ring = shell.COLORS["panel_alt"]
+                dpg.draw_line((10, 48), (86, 48), color=ring, thickness=1)
+                dpg.draw_line((48, 10), (48, 86), color=ring, thickness=1)
+                dpg.draw_circle((48, 48), 16, color=ring, thickness=1)
+                dpg.draw_circle((48, 48), 28, color=ring, thickness=1)
+                dpg.draw_circle((48, 48), 38, color=shell.COLORS["accent"], thickness=2.5)
+                dpg.draw_line((48, 48), (79, 26), color=shell.COLORS["accent"], thickness=2.5)
+                dpg.draw_circle(
+                    (79, 26), 5,
+                    color=shell.COLORS["accent_hover"],
+                    fill=shell.COLORS["accent_hover"],
+                )
+                dpg.draw_circle(
+                    (48, 48), 3,
+                    color=shell.COLORS["text"],
+                    fill=shell.COLORS["text"],
+                )
             dpg.add_spacer(height=14)
             screen_title(t("about.app_name"), tag="about_app_name")
             version_line = f"{t('about.version_label')} {__version__}"

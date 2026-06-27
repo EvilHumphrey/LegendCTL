@@ -17,7 +17,7 @@ class TestSettingsScreen(unittest.TestCase):
         """Run preferences.build under stub patches; return the bind_item_font mock."""
         shell = SimpleNamespace(
             settings=AppSettings(),
-            COLORS={"accent": (16, 185, 129), "muted": (148, 163, 184), "warn": (245, 158, 11)},
+            COLORS={"accent": (46, 155, 255), "muted": (148, 163, 184), "warn": (245, 158, 11)},
             settings_service=None,
             update_language=MagicMock(),
             update_setting=MagicMock(),
