@@ -6,7 +6,7 @@ Read-only Live Verify widening. The live tester now works with any connected XIn
 controller for sticks, buttons, triggers, and circularity, while all HID settings writes
 remain hard-gated to the verified ZD Ultimate Legend allowlist. No new settings are
 written by the wrapper; same test discipline (full suite green on Python 3.12 /
-DearPyGui 2.3).
+DearPyGui 2.3.1).
 
 - **Live Verify now works on any XInput controller.** Non-ZD pads can use the read-only
   stick, circularity, button, and trigger tester without claiming settings support.

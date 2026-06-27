@@ -11,6 +11,6 @@ write attempted.
 
 This update adds no new wrapper-written settings. It widens only the read-only tester
 surface and keeps the same release discipline: full suite green on Python 3.12 /
-DearPyGui 2.3.
+DearPyGui 2.3.1.
 
 LegendCTL remains a standalone unofficial configurator for the ZD Ultimate Legend.

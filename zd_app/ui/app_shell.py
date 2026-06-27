@@ -4260,12 +4260,6 @@ class AppShell:
         self.refresh_shell()
         self.rebuild_current_screen()
 
-    def identify_controller(self) -> None:
-        success, message = self.device_service.identify_controller()
-        if not success:
-            self.device_service.record_apply_result(False, message)
-        self.refresh_shell()
-
     def selected_button_mapping(self):
         if self.selected_button_input is None:
             return None

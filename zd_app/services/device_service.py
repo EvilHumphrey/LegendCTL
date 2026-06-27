@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from zd_app.services.xinput import describe_battery_level, get_connected_controllers, set_vibration
+from zd_app.services.xinput import describe_battery_level, get_connected_controllers
 from zd_app.i18n import t
 from zd_app.models import DeviceClass, DeviceState, utc_now_iso
 from zd_app.services._subprocess_helpers import silent_run
@@ -224,23 +224,6 @@ class DeviceService:
             state.sync_status = "Disconnected"
         self.last_read_duration_ms = round((time.perf_counter() - started) * 1000.0, 2)
         return state
-
-    def identify_controller(self) -> tuple[bool, str]:
-        slot = self.state.xinput_slot
-        if slot is None:
-            message = "No XInput slot available for identify."
-            self.log_event(message)
-            return False, message
-
-        def pulse() -> None:
-            set_vibration(slot, 45000, 30000)
-            time.sleep(0.35)
-            set_vibration(slot, 0, 0)
-
-        threading.Thread(target=pulse, daemon=True).start()
-        message = f"Identify pulse sent to XInput slot {slot}."
-        self.log_event(message)
-        return True, message
 
     def restore_safe_defaults(self) -> str:
         message = "Restored local safe defaults. Device write remains explicit."
