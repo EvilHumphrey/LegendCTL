@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/legendctl-banner.png" alt="LegendCTL — unofficial, open-source Windows configurator for ZD Ultimate Legend controllers" width="100%">
+</p>
+
 # LegendCTL
 
 *Unofficial Windows configurator for ZD Ultimate Legend controllers.*
