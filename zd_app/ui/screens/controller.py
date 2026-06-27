@@ -246,6 +246,7 @@ def render(shell) -> None:
 
     screen_title(t("controller.title"))
     helper_text(t("controller.subtitle"), wrap=720)
+    _render_unverified_device_banner(shell)
     dpg.add_spacer(height=8)
     dpg.add_text("", tag="settings_v2_status_text", color=shell.COLORS["muted"], wrap=720)
     dpg.add_spacer(height=8)
@@ -268,6 +269,29 @@ def render(shell) -> None:
     active_tab_tag = _tab_id_to_tag(getattr(shell, "controller_active_tab", "vibration"))
     if dpg.does_item_exist(active_tab_tag):
         dpg.set_value("controller_tab_bar", active_tab_tag)
+
+
+def _render_unverified_device_banner(shell) -> None:
+    """Warn banner shown when the connected controller isn't an allowlisted ZD
+    Ultimate Legend.
+
+    Every setting on this screen is a HID write gated to the verified ZD, so on
+    any other XInput pad they are unverified and refuse to write. The banner says
+    so plainly and points the user at the model-agnostic Live Verify tester.
+    Built unconditionally with a stable tag (``show`` toggled) so device-state
+    changes can flip its visibility, and so tests can assert it. Defaults to
+    hidden for stub shells without a device state.
+    """
+
+    state = getattr(getattr(shell, "device_service", None), "state", None)
+    write_supported = bool(getattr(state, "write_supported", True))
+    dpg.add_text(
+        t("controller.unverified_device.banner"),
+        tag="controller_unverified_device_banner",
+        color=shell.COLORS["warn"],
+        wrap=720,
+        show=not write_supported,
+    )
 
 
 def _render_loading_hint(shell) -> None:

@@ -67,6 +67,7 @@
   "apply.binding.unknown_source": "应用失败：未知源按键“{source}”；绑定未应用。",
   "apply.binding.unknown_target": "应用失败：未知目标按键“{target}”；绑定未应用。",
   "apply.busy": "控制器操作正在进行中，请稍后再试",
+  "apply.device_unverified": "此设备上为只读：完整的控制器设置需要 ZD Ultimate Legend。",
   "apply.busy_long": "控制器操作仍在进行中（{seconds}秒）…",
   "apply.deadzone.failed": "应用失败：死区设置：{reason}",
   "apply.deadzone.success": "OK：死区设置已应用。",
@@ -581,6 +582,7 @@
   "home.cta.helper": "运行快速健康检查，或读取控制器的当前状态。",
   "controller.title": "控制器",
   "controller.subtitle": "由包装器协议支持的分页控制器设置。",
+  "controller.unverified_device.banner": "此控制器不是 ZD Ultimate Legend，因此这些设置在此设备上未经验证，仅为只读——不会向设备写入任何更改。实时验证测试器（摇杆、按键、扳机、圆度）适用于任何 XInput 控制器。",
   "controller.no_service": "设置服务不可用；无法读取或应用控制器设置。",
   "controller.loading": "正在读取控制器状态...",
   "controller.tab.vibration": "振动",
@@ -1424,6 +1426,7 @@
   "diagnostics.live_verify.triggers.right": "R2",
   "diagnostics.live_verify.deadzone.title": "内联死区调节",
   "diagnostics.live_verify.deadzone.note": "这些滑块会写入手柄真实的固件死区（带防抖并经回读验证）——上方的圆度包络会移动，是因为手柄的输出确实发生了改变。系统会先捕获一个还原点，以便你可以还原。",
+  "diagnostics.live_verify.deadzone.note_unverified": "死区调节会写入手柄的真实固件，仅在 ZD Ultimate Legend 上经过验证，因此在此设备上为只读。上方的实时测试器仍适用于任何 XInput 控制器。",
   "diagnostics.live_verify.deadzone.left_center": "左摇杆内圈（中心）",
   "diagnostics.live_verify.deadzone.left_outer": "左摇杆外圈（边缘）",
   "diagnostics.live_verify.deadzone.right_center": "右摇杆内圈（中心）",
@@ -1435,5 +1438,6 @@
   "diagnostics.live_verify.deadzone.status.mismatch": "已写入，但回读不匹配。",
   "diagnostics.live_verify.deadzone.status.sent_unverified": "已发送，但无法验证。",
   "diagnostics.live_verify.deadzone.status.failed": "写入失败。",
-  "diagnostics.live_verify.deadzone.status.unavailable": "请连接手柄以调节死区。"
+  "diagnostics.live_verify.deadzone.status.unavailable": "请连接手柄以调节死区。",
+  "diagnostics.live_verify.deadzone.status.unverified_device": "只读：死区调节需要 ZD Ultimate Legend。"
 }

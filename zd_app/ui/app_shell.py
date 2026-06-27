@@ -1902,6 +1902,27 @@ class AppShell:
         logger.info("HID flow refused: a controller operation is already in flight")
         self._update_apply_status(t("apply.busy"), False)
 
+    def _device_write_supported(self) -> bool:
+        """True when the connected controller is an allowlisted ZD Ultimate Legend."""
+
+        state = getattr(self.device_service, "state", None)
+        return bool(getattr(state, "write_supported", True))
+
+    def _refuse_hid_write_unverified_device(self) -> None:
+        logger.info(
+            "HID write refused: connected controller is not an allowlisted "
+            "ZD Ultimate Legend"
+        )
+        self._update_apply_status(t("apply.device_unverified"), False)
+
+    def _zd_write_allowed_or_refuse(self) -> bool:
+        """Gate HID write bursts that do not enter through _hid_available_or_refuse."""
+
+        if self._device_write_supported():
+            return True
+        self._refuse_hid_write_unverified_device()
+        return False
+
     @property
     def hid_busy(self) -> bool:
         """True while a threaded HID job is in flight.
@@ -1947,12 +1968,15 @@ class AppShell:
         interleaved writes can trip the firmware's in-burst rejection quirk,
         and concurrent ``_read_response`` loops consume each other's frames.
 
-        Returns True when no job is in flight (always, in sync mode).
-        Otherwise surfaces the localized busy status via
-        :meth:`_refuse_hid_job` and returns False — callers early-return and
-        must NOT queue the refused action.
+        Returns True when the connected controller is write-capable and no job
+        is in flight (always, in sync mode). Otherwise surfaces a localized
+        refusal and returns False — callers early-return and must NOT queue the
+        refused action.
         """
 
+        if not self._device_write_supported():
+            self._refuse_hid_write_unverified_device()
+            return False
         if not self._hid_job_in_flight:
             return True
         self._refuse_hid_job()
@@ -2750,6 +2774,10 @@ class AppShell:
         self.apply_named_wrapper_profile(name)
 
     def apply_named_wrapper_profile(self, name: str) -> None:
+        if not self._zd_write_allowed_or_refuse():
+            self.refresh_shell()
+            return
+
         if self.settings_service is None:
             message = t("apply.profile.unavailable")
             self._record_settings_apply_result(False, message)
@@ -3103,6 +3131,10 @@ class AppShell:
     def _apply_wrapper_profile_snapshot(
         self, name: str, snapshot: ControllerSnapshot, *, include_device: bool = True
     ) -> None:
+        if not self._zd_write_allowed_or_refuse():
+            self.refresh_shell()
+            return
+
         # ``include_device=False`` flows through the post-write
         # refresh_from_controller so the step-size slider and polling-rate
         # combo do not snap to the post-write read; the user's live-write value

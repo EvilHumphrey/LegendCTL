@@ -67,6 +67,7 @@
   "apply.binding.unknown_source": "Apply failed: unknown source button '{source}'; binding not applied.",
   "apply.binding.unknown_target": "Apply failed: unknown target button '{target}'; binding not applied.",
   "apply.busy": "Controller operation in progress - try again in a moment",
+  "apply.device_unverified": "Read-only on this device: full controller settings require a ZD Ultimate Legend.",
   "apply.busy_long": "Controller operation still running ({seconds}s)…",
   "apply.deadzone.failed": "Apply failed: deadzone settings: {reason}",
   "apply.deadzone.success": "OK: Deadzone settings applied.",
@@ -581,6 +582,7 @@
   "home.cta.helper": "Run a quick health check, or read the controller's current state.",
   "controller.title": "Controller",
   "controller.subtitle": "Tabbed controller settings backed by the wrapper protocol.",
+  "controller.unverified_device.banner": "This controller isn't a ZD Ultimate Legend, so these settings are unverified here and stay read-only - nothing is written to the device. The Live Verify tester (sticks, buttons, triggers, circularity) works with any XInput controller.",
   "controller.no_service": "The settings service is unavailable; controller settings cannot be read or applied.",
   "controller.loading": "Reading controller state...",
   "controller.tab.vibration": "Vibration",
@@ -1424,6 +1426,7 @@
   "diagnostics.live_verify.triggers.right": "R2",
   "diagnostics.live_verify.deadzone.title": "Inline Deadzone Tuning",
   "diagnostics.live_verify.deadzone.note": "These sliders write the controller's real firmware deadzones (debounced and verified) - the circularity envelope above moves because the controller's output actually changes. A Restore Point is captured first, so you can revert.",
+  "diagnostics.live_verify.deadzone.note_unverified": "Deadzone tuning writes the controller's real firmware and is only verified on the ZD Ultimate Legend, so it stays read-only here. The live tester above still works with any XInput controller.",
   "diagnostics.live_verify.deadzone.left_center": "Left Inner (center)",
   "diagnostics.live_verify.deadzone.left_outer": "Left Outer (edge)",
   "diagnostics.live_verify.deadzone.right_center": "Right Inner (center)",
@@ -1435,5 +1438,6 @@
   "diagnostics.live_verify.deadzone.status.mismatch": "Written, but read-back did not match.",
   "diagnostics.live_verify.deadzone.status.sent_unverified": "Sent - could not verify.",
   "diagnostics.live_verify.deadzone.status.failed": "Write failed.",
-  "diagnostics.live_verify.deadzone.status.unavailable": "Connect a controller to tune deadzones."
+  "diagnostics.live_verify.deadzone.status.unavailable": "Connect a controller to tune deadzones.",
+  "diagnostics.live_verify.deadzone.status.unverified_device": "Read-only: deadzone tuning needs a ZD Ultimate Legend."
 }

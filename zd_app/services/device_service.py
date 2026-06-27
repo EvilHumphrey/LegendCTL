@@ -13,7 +13,7 @@ from typing import Any
 
 from zd_app.services.xinput import describe_battery_level, get_connected_controllers, set_vibration
 from zd_app.i18n import t
-from zd_app.models import DeviceState, utc_now_iso
+from zd_app.models import DeviceClass, DeviceState, utc_now_iso
 from zd_app.services._subprocess_helpers import silent_run
 from zd_app.services.official_app_summary_service import OfficialAppSummary, OfficialAppSummaryService
 
@@ -33,6 +33,20 @@ from zd_app.services._log_entry import (
 _PNPUTIL_EXE = os.path.join(
     os.environ.get("SystemRoot", r"C:\Windows"), "System32", "pnputil.exe"
 )
+
+
+# Allowlist of USB ``VID&PID`` needles (lowercase) for controllers verified as a
+# ZD Ultimate Legend: the only hardware whose HID settings/write protocol this
+# app implements. A non-allowlisted controller remains eligible for read-only
+# XInput live verification, but all HID write/settings surfaces stay gated.
+ZD_ULTIMATE_LEGEND_DEVICE_IDS: tuple[str, ...] = ("vid_413d&pid_2104",)
+
+
+def instance_id_is_allowlisted_zd(instance_id: str) -> bool:
+    """True if ``instance_id`` belongs to an allowlisted ZD Ultimate Legend."""
+
+    lowered = instance_id.lower()
+    return any(needle in lowered for needle in ZD_ULTIMATE_LEGEND_DEVICE_IDS)
 
 
 class DeviceService:
@@ -128,18 +142,21 @@ class DeviceService:
         if pnp_entries:
             chosen = pnp_entries[0]
             product_name = "ZD Ultimate Legend"
+            device_class: DeviceClass = "zd_ultimate_legend"
             stable_identifier = chosen["instance_id"]
             connection_mode = self._infer_transport(chosen["instance_id"])
             connection_state = "connected"
             sync_status = self.state.sync_status if was_connected and self.state.last_read_time else "Connected"
         elif xinput_slots:
             product_name = "Xbox-compatible controller"
+            device_class = "generic_xinput"
             stable_identifier = f"xinput-slot-{slot}"
             connection_mode = "XInput"
             connection_state = "connected"
             sync_status = self.state.sync_status if was_connected and self.state.last_read_time else "Connected"
         else:
             product_name = "No controller detected"
+            device_class = "none"
             stable_identifier = "unknown"
             connection_mode = "Unknown"
             connection_state = "no_device"
@@ -158,6 +175,7 @@ class DeviceService:
                 self.log_i18n_event("log.controller.not_detected")
 
         self.state.product_name = product_name
+        self.state.device_class = device_class
         self.state.stable_identifier = stable_identifier
         self.state.connection_mode = connection_mode
         self.state.connection_state = connection_state
@@ -403,7 +421,7 @@ class DeviceService:
 
         matches = [
             entry for entry in entries
-            if "vid_413d&pid_2104" in entry.get("instance id", "").lower()
+            if instance_id_is_allowlisted_zd(entry.get("instance id", ""))
         ]
         normalized = []
         for entry in matches:
@@ -414,7 +432,12 @@ class DeviceService:
                     "status": entry.get("status", "Unknown"),
                 }
             )
-        normalized.sort(key=lambda item: ("usb\\vid_413d&pid_2104\\" not in item["instance_id"].lower(), item["instance_id"]))
+        normalized.sort(
+            key=lambda item: (
+                not item["instance_id"].lower().startswith("usb\\"),
+                item["instance_id"],
+            )
+        )
         with self._presence_cache_lock:
             self._cached_zd_entries = [entry.copy() for entry in normalized]
             self._has_cached_zd_entries = True

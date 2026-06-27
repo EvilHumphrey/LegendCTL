@@ -43,6 +43,25 @@ SyncStatus = Literal[
 ProfileOrigin = Literal["device", "desktop", "draft"]
 SummaryFieldSource = Literal["unknown", "xinput", "official_app_ui", "protocol"]
 
+# Capability tier of the connected controller. ``zd_ultimate_legend`` is the only
+# hardware whose HID settings/write protocol is verified (the allowlist lives in
+# ``device_service``); ``generic_xinput`` is any other connected XInput pad — the
+# read-only live tester (sticks / circularity / buttons / triggers) is pure XInput
+# and works for it, but no HID write/settings burst may be attempted on it;
+# ``none`` is no controller detected.
+DeviceClass = Literal["zd_ultimate_legend", "generic_xinput", "none"]
+
+# Capability map: device class -> what the UI may offer. The WRITE half is
+# allowlisted to the verified ZD Ultimate Legend (the load-bearing honesty seam —
+# never claim or attempt settings support on an untested controller); the
+# read-only XInput live tester is model-agnostic, so any connected pad gets it.
+# ``DeviceState.write_supported`` / ``live_verify_supported`` read these sets, so
+# this dict is the single source of truth for both gating and labeling.
+_WRITE_SUPPORTED_DEVICE_CLASSES: frozenset[str] = frozenset({"zd_ultimate_legend"})
+_LIVE_VERIFY_DEVICE_CLASSES: frozenset[str] = frozenset(
+    {"zd_ultimate_legend", "generic_xinput"}
+)
+
 BUTTON_ACTIONS = [
     "A",
     "B",
@@ -276,6 +295,14 @@ class OnboardSlot:
 @dataclass
 class DeviceState:
     product_name: str = "ZD Ultimate Legend"
+    # Capability tier of the connected controller, set by
+    # ``DeviceService.refresh_state``. Defaults to ``zd_ultimate_legend`` so a
+    # freshly-constructed state (before detection runs, and in tests/headless
+    # paths) behaves exactly as it did before the any-XInput widening — the HID
+    # transport is itself ZD-scoped, so this default never enables a write to
+    # other hardware. ``refresh_state`` downgrades it to ``generic_xinput`` /
+    # ``none`` the moment a non-ZD / absent controller is seen.
+    device_class: DeviceClass = "zd_ultimate_legend"
     stable_identifier: str = "unknown"
     connection_mode: str = "Unknown"
     firmware_version: str = "Unknown"
@@ -297,6 +324,31 @@ class DeviceState:
     xinput_slot: int | None = None
     last_read_time: str | None = None
     last_apply_time: str | None = None
+
+    @property
+    def write_supported(self) -> bool:
+        """True when the connected controller is an allowlisted ZD Ultimate
+        Legend — the only hardware whose HID settings/write protocol is verified.
+
+        This is the gate the write surfaces (settings apply, deadzone, profiles,
+        restore points) consult: a ``generic_xinput`` pad or ``none`` returns
+        False, so no HID write is attempted and the surfaces label themselves
+        ``unverified on this device``. Reads from the capability map so the
+        policy lives in one place.
+        """
+
+        return self.device_class in _WRITE_SUPPORTED_DEVICE_CLASSES
+
+    @property
+    def live_verify_supported(self) -> bool:
+        """True when a controller the read-only live tester can read is present.
+
+        The live tester (per-stick axes + circularity, live buttons/triggers) is
+        pure XInput and model-agnostic, so ANY connected XInput pad qualifies —
+        not just the ZD. ``none`` (no controller) returns False.
+        """
+
+        return self.device_class in _LIVE_VERIFY_DEVICE_CLASSES
 
 
 @dataclass

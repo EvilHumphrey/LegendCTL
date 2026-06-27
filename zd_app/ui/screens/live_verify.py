@@ -494,12 +494,20 @@ def _build_trigger_bars(shell) -> None:
         dpg.add_progress_bar(default_value=0.0, width=240, overlay="0", tag=TRIGGER_RIGHT_BAR_TAG)
 
 
+def _device_write_supported(shell) -> bool:
+    """True when the connected controller is an allowlisted ZD Ultimate Legend."""
+
+    state = getattr(getattr(shell, "device_service", None), "state", None)
+    return bool(getattr(state, "write_supported", True))
+
+
 def _build_inline_deadzone_card(shell) -> None:
-    """Inline firmware-deadzone tuning card. These sliders write the REAL
-    controller ``StickDeadzones`` (debounced + read-back-verified via the
-    shell), which is what makes the circularity envelope move. Hydrated from a
-    live ``get_deadzones()`` read; callbacks are inert until that read succeeds
-    so a read-miss can never clobber the controller with a default.
+    """Inline firmware-deadzone tuning card.
+
+    On an allowlisted ZD these sliders write the REAL controller
+    ``StickDeadzones`` (debounced + read-back-verified via the shell). On any
+    other XInput controller the live tester still runs, but this write surface is
+    read-only and never issues a firmware deadzone read or write.
 
     _fit_card() (auto_resize_y) fits its content so it never overflows / grows its
     own scrollbar (layout fit); a fitted card has no scroll range, so any wheel
@@ -507,22 +515,33 @@ def _build_inline_deadzone_card(shell) -> None:
     legacy autosize_y would FILL instead on dearpygui 2.x — see _fit_card.)
     """
 
-    current = _read_current_deadzones(shell)
+    write_supported = _device_write_supported(shell)
+    current = _read_current_deadzones(shell) if write_supported else None
     hydrated = current is not None
     shell._diag_deadzone_hydrated = hydrated
     defaults = current if current is not None else StickDeadzones(0, 0, 0, 0)
+    if write_supported:
+        status_key = (
+            "diagnostics.live_verify.deadzone.status.idle"
+            if hydrated
+            else "diagnostics.live_verify.deadzone.status.unavailable"
+        )
+        note_key = "diagnostics.live_verify.deadzone.note"
+        shell._diag_deadzone_status_key = "idle" if hydrated else "unavailable"
+    else:
+        status_key = "diagnostics.live_verify.deadzone.status.unverified_device"
+        note_key = "diagnostics.live_verify.deadzone.note_unverified"
+        shell._diag_deadzone_status_key = "unverified_device"
 
     with _fit_card():
         section_title(t("diagnostics.live_verify.deadzone.title"))
         dpg.add_text(
-            t("diagnostics.live_verify.deadzone.note"),
+            t(note_key),
             color=shell.COLORS["warn"],
             wrap=_SCREEN_WRAP,
         )
         dpg.add_text(
-            t("diagnostics.live_verify.deadzone.status.idle")
-            if hydrated
-            else t("diagnostics.live_verify.deadzone.status.unavailable"),
+            t(status_key),
             tag=DEADZONE_STATUS_TAG,
             color=shell.COLORS["muted"] if hydrated else shell.COLORS["warn"],
         )
@@ -846,6 +865,10 @@ _DEADZONE_STATUS_DISPLAY = {
     "sent_unverified": ("diagnostics.live_verify.deadzone.status.sent_unverified", "warn"),
     "failed": ("diagnostics.live_verify.deadzone.status.failed", "bad"),
     "unavailable": ("diagnostics.live_verify.deadzone.status.unavailable", "warn"),
+    "unverified_device": (
+        "diagnostics.live_verify.deadzone.status.unverified_device",
+        "warn",
+    ),
 }
 
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.0.2 — 2026-06-26
+
+Read-only Live Verify widening. The live tester now works with any connected XInput
+controller for sticks, buttons, triggers, and circularity, while all HID settings writes
+remain hard-gated to the verified ZD Ultimate Legend allowlist. No new settings are
+written by the wrapper; same test discipline (full suite green on Python 3.12 /
+DearPyGui 2.3).
+
+- **Live Verify now works on any XInput controller.** Non-ZD pads can use the read-only
+  stick, circularity, button, and trigger tester without claiming settings support.
+- **HID writes remain ZD-only.** The device capability map exposes write support only
+  for the allowlisted ZD Ultimate Legend, and controller settings, profile apply,
+  restore, and firmware-deadzone write paths refuse honestly on non-ZD devices.
+- **The UI labels unverified controllers plainly.** Controller settings and the
+  Live Verify deadzone card show read-only messaging instead of implying writable
+  support on generic XInput hardware.
+
 ## v2.0.1 — 2026-06-24
 
 Post-release bug-fix update. Four fixes found while smoke-testing v2.0.0 on hardware.

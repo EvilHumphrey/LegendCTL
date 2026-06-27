@@ -999,6 +999,19 @@ def _execute_restore(shell) -> None:
         shell.rebuild_current_screen()
         return
 
+    # Honesty gate: a restore re-applies a captured snapshot to the controller —
+    # a HID write burst. Refuse on a non-allowlisted controller (drop back to
+    # CONFIRM with the unverified-device status) so no write is attempted on a
+    # non-ZD pad. Defaults to allowed for stub shells without a device state, so
+    # the existing sync/stub restore tests are unchanged.
+    device_state = getattr(getattr(shell, "device_service", None), "state", None)
+    if device_state is not None and not getattr(device_state, "write_supported", True):
+        state.view = VIEW_CONFIRM
+        state.status_text = t("apply.device_unverified")
+        state.status_kind = "warn"
+        shell.rebuild_current_screen()
+        return
+
     rp_id = state.selected_rp_id
 
     def job():
