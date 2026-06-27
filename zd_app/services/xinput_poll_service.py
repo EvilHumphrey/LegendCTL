@@ -272,9 +272,13 @@ class XInputPollService:
         showing the operator's explicit "Player N").
         """
 
-        if not 0 <= index < _XUSER_MAX_COUNT:
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or not 0 <= index < _XUSER_MAX_COUNT
+        ):
             raise ValueError(
-                f"XInput slot must be 0..{_XUSER_MAX_COUNT - 1}, got {index!r}"
+                f"XInput slot must be an int 0..{_XUSER_MAX_COUNT - 1}, got {index!r}"
             )
         with self._sel_lock:
             self._mode = _MODE_MANUAL
@@ -325,10 +329,14 @@ class XInputPollService:
             logger.warning("XInputGetState raised OSError: %s", exc)
             return XInputSnapshot.disconnected(slot=None)
         # Persist an AUTO (re-)selection so the next poll sticks to it — but only
-        # if the UI hasn't switched modes underneath us; a manual pin wins.
+        # if the UI hasn't changed the selection underneath us during the
+        # (unlocked) scan. Compare-and-set: a select_slot() flips _mode to MANUAL
+        # and a select_auto() clears _selected_slot to None; either must win over
+        # this now-stale write-back, else the operator's explicit re-pick / Auto
+        # re-scan is silently lost and the tester sticks to the old slot.
         if mode == _MODE_AUTO:
             with self._sel_lock:
-                if self._mode == _MODE_AUTO:
+                if self._mode == _MODE_AUTO and self._selected_slot == slot:
                     self._selected_slot = resolved_slot
         return snapshot
 

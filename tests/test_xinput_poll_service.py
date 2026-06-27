@@ -11,6 +11,7 @@ from zd_app.services.settings_service import ControllerButtonTarget
 from zd_app.services.xinput_poll_service import (
     XInputPollService,
     XInputSnapshot,
+    _MODE_AUTO,
     _XINPUT_STATE,
     buttons_from_mask,
 )
@@ -414,6 +415,40 @@ class XInputMultiSlotSelectionTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     service.select_slot(bad)
+
+    def test_select_slot_rejects_non_canonical_int(self) -> None:
+        # Audit #1 regression: bool/float pass a bare numeric range check (bool is
+        # an int subclass; float compares numerically) but are not valid slots and
+        # must not ride onto snapshot.slot. Reject them at the API boundary.
+        service, _fake = self._service({0})
+        for bad in (True, False, 2.5, 1.0):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    service.select_slot(bad)
+
+    def test_auto_writeback_does_not_clobber_concurrent_select_auto(self) -> None:
+        # Audit #2 regression: a select_auto() that lands DURING the worker's
+        # (unlocked) scan must win over the stale AUTO write-back. Sticky on slot
+        # 2; the fake DLL fires select_auto() on the first XInputGetState call
+        # (the UI thread, mid-scan). The worker must respect the cleared pin
+        # (None), not re-sticky slot 2 — else the operator's Auto re-scan is lost.
+        calls: list[int] = []
+        holder: dict = {}
+
+        class _RaceDLL:
+            def XInputGetState(self, user_index, state_byref):  # noqa: N802
+                calls.append(user_index)
+                if len(calls) == 1:
+                    holder["svc"].select_auto()
+                return 0 if user_index == 2 else 1167
+
+        service = XInputPollService(dll_loader=lambda: _RaceDLL())
+        holder["svc"] = service
+        service._mode = _MODE_AUTO
+        service._selected_slot = 2  # sticky on slot 2 (connected)
+        service._poll_once(_XINPUT_STATE())
+        self.assertIsNone(service._selected_slot)  # cleared pin survives
+        self.assertEqual(service.selection_mode, "auto")
 
 
 if __name__ == "__main__":
