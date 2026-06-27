@@ -1438,5 +1438,10 @@
   "diagnostics.live_verify.deadzone.status.sent_unverified": "已发送，但无法验证。",
   "diagnostics.live_verify.deadzone.status.failed": "写入失败。",
   "diagnostics.live_verify.deadzone.status.unavailable": "请连接手柄以调节死区。",
-  "diagnostics.live_verify.deadzone.status.unverified_device": "只读：死区调节需要 ZD Ultimate Legend。"
+  "diagnostics.live_verify.deadzone.status.unverified_device": "只读：死区调节需要 ZD Ultimate Legend。",
+  "diagnostics.live_verify.player.control_label": "手柄槽位",
+  "diagnostics.live_verify.player.auto": "自动",
+  "diagnostics.live_verify.player.slot": "玩家 {n}",
+  "diagnostics.live_verify.player.active": "当前：{label}",
+  "diagnostics.live_verify.player.none": "无手柄"
 }

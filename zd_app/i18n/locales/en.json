@@ -1438,5 +1438,10 @@
   "diagnostics.live_verify.deadzone.status.sent_unverified": "Sent - could not verify.",
   "diagnostics.live_verify.deadzone.status.failed": "Write failed.",
   "diagnostics.live_verify.deadzone.status.unavailable": "Connect a controller to tune deadzones.",
-  "diagnostics.live_verify.deadzone.status.unverified_device": "Read-only: deadzone tuning needs a ZD Ultimate Legend."
+  "diagnostics.live_verify.deadzone.status.unverified_device": "Read-only: deadzone tuning needs a ZD Ultimate Legend.",
+  "diagnostics.live_verify.player.control_label": "Controller slot",
+  "diagnostics.live_verify.player.auto": "Auto",
+  "diagnostics.live_verify.player.slot": "Player {n}",
+  "diagnostics.live_verify.player.active": "Active: {label}",
+  "diagnostics.live_verify.player.none": "No controller"
 }

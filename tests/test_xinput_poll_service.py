@@ -287,5 +287,134 @@ class XInputPointerDecodeTests(unittest.TestCase):
         self.assertEqual(snapshot.right_stick_y, -32768)
 
 
+class _MultiSlotFakeDLL:
+    """XInput DLL stand-in driven by a mutable set of connected slots.
+
+    Returns ``ERROR_SUCCESS`` (0) and writes a populated state for any slot in
+    ``connected`` (with a per-slot packet number so a test can confirm WHICH
+    slot's data was decoded); ``ERROR_DEVICE_NOT_CONNECTED`` (1167) otherwise.
+    ``calls`` records every polled user index, so a test can assert the scan
+    pattern (a sticky selection re-reads ONE slot, not all four).
+    """
+
+    def __init__(self, connected) -> None:
+        self.connected = set(connected)
+        self.calls: list[int] = []
+
+    def XInputGetState(self, user_index, state_byref):  # noqa: N802 — Win32 name
+        self.calls.append(user_index)
+        if user_index in self.connected:
+            state = ctypes.cast(state_byref, ctypes.POINTER(_XINPUT_STATE)).contents
+            state.dwPacketNumber = 1000 + user_index
+            return 0  # ERROR_SUCCESS
+        return 1167  # ERROR_DEVICE_NOT_CONNECTED
+
+
+class XInputMultiSlotSelectionTests(unittest.TestCase):
+    """Headless proof of the multi-slot fix: the service scans XInput indices
+    0-3, auto-selects the FIRST connected pad, stays sticky, honours a manual
+    pin, and re-scans on disconnect. Drives ``_poll_once`` directly with a
+    mocked DLL — no hardware, no worker thread — mirroring the existing
+    ``_PopulatingFakeDLL`` / ``_poll_once`` decode-test style above.
+    """
+
+    def _service(self, connected):
+        fake = _MultiSlotFakeDLL(connected)
+        return XInputPollService(dll_loader=lambda: fake), fake
+
+    def test_auto_selects_the_only_connected_slot(self) -> None:
+        # (a) When ONLY slot 2 is connected, the service selects slot 2 — the
+        # exact reviewer multi-pad-bench case the hardcoded index 0 missed.
+        service, fake = self._service({2})
+        snap = service._poll_once(_XINPUT_STATE())
+        self.assertTrue(snap.connected)
+        self.assertEqual(snap.slot, 2)
+        self.assertEqual(snap.packet_number, 1002)  # decoded slot 2's own data
+        self.assertEqual(service.active_slot, 2)
+        self.assertEqual(service.selection_mode, "auto")
+        # Scan stopped at the first connected slot (polled 0,1,2 — never 3).
+        self.assertEqual(fake.calls, [0, 1, 2])
+
+    def test_auto_selection_is_sticky_across_polls(self) -> None:
+        # (b) With two pads live (1 and 3), auto takes the first (1) and stays
+        # there; a still-connected selection is re-read with ONE call, never
+        # re-scanned, so it cannot flip to 3 mid-session.
+        service, fake = self._service({1, 3})
+        state = _XINPUT_STATE()
+        self.assertEqual(service._poll_once(state).slot, 1)
+        fake.calls.clear()
+        self.assertEqual(service._poll_once(state).slot, 1)
+        self.assertEqual(fake.calls, [1])  # sticky == single re-read, no re-scan
+        self.assertEqual(service._poll_once(state).slot, 1)
+
+    def test_manual_override_pins_chosen_slot(self) -> None:
+        # (c) A manual pin selects exactly that slot and polls only it, even
+        # when a lower-numbered pad (0) is also connected.
+        service, fake = self._service({0, 2})
+        state = _XINPUT_STATE()
+        service.select_slot(2)
+        self.assertEqual(service.selection_mode, "manual")
+        snap = service._poll_once(state)
+        self.assertEqual(snap.slot, 2)  # pinned to 2 despite 0 being live + lower
+        self.assertEqual(service.active_slot, 2)
+        fake.calls.clear()
+        service._poll_once(state)
+        self.assertEqual(fake.calls, [2])  # polls ONLY the pinned slot
+
+    def test_disconnect_rescans_and_picks_next_connected(self) -> None:
+        # (d) When the selected slot disconnects, the worker re-scans and
+        # re-selects the next connected slot; with none left it exposes a clean
+        # no-pad state (no crash, slot None).
+        service, fake = self._service({1})
+        state = _XINPUT_STATE()
+        self.assertEqual(service._poll_once(state).slot, 1)
+        fake.connected = {3}  # 1 drops, 3 appears
+        second = service._poll_once(state)
+        self.assertEqual(second.slot, 3)
+        self.assertEqual(service.active_slot, 3)
+        fake.connected = set()  # everything gone
+        third = service._poll_once(state)
+        self.assertFalse(third.connected)
+        self.assertIsNone(third.slot)
+        self.assertIsNone(service.active_slot)
+
+    def test_manual_pin_survives_its_slot_disconnecting(self) -> None:
+        # A manually-pinned slot keeps its identity while disconnected (no
+        # auto-flip), so the UI keeps showing the operator's explicit Player N.
+        service, _fake = self._service({0})
+        state = _XINPUT_STATE()
+        service.select_slot(3)  # pin an empty slot
+        snap = service._poll_once(state)
+        self.assertFalse(snap.connected)
+        self.assertEqual(snap.slot, 3)  # still the pin
+        self.assertEqual(service.active_slot, 3)
+        self.assertEqual(service.selection_mode, "manual")
+
+    def test_select_auto_resumes_scan_from_a_manual_pin(self) -> None:
+        service, _fake = self._service({0, 2})
+        state = _XINPUT_STATE()
+        service.select_slot(2)
+        self.assertEqual(service._poll_once(state).slot, 2)
+        service.select_auto()
+        self.assertEqual(service.selection_mode, "auto")
+        self.assertEqual(service._poll_once(state).slot, 0)  # fresh scan -> first
+        self.assertEqual(service.active_slot, 0)
+
+    def test_no_pad_connected_is_clean_disconnected_state(self) -> None:
+        service, fake = self._service(set())
+        snap = service._poll_once(_XINPUT_STATE())
+        self.assertFalse(snap.connected)
+        self.assertTrue(snap.dll_available)
+        self.assertIsNone(snap.slot)
+        self.assertEqual(fake.calls, [0, 1, 2, 3])  # scanned all four, then gave up
+
+    def test_select_slot_rejects_out_of_range(self) -> None:
+        service, _fake = self._service({0})
+        for bad in (-1, 4, 99):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    service.select_slot(bad)
+
+
 if __name__ == "__main__":
     unittest.main()

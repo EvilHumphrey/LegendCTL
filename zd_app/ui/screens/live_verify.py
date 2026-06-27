@@ -79,6 +79,16 @@ DEADZONE_STATUS_TAG = "diag_live_verify_deadzone_status"
 TRIGGER_LEFT_BAR_TAG = "diag_live_verify_trigger_left"
 TRIGGER_RIGHT_BAR_TAG = "diag_live_verify_trigger_right"
 
+# Player-slot override row: which XInput user index (0-3) the live tester reads.
+# The poll service owns the selection logic; these tags are just the combo the
+# operator picks with and the live "Active: Player N" readout.
+PLAYER_SELECT_COMBO_TAG = "diag_live_verify_player_combo"
+PLAYER_ACTIVE_TAG = "diag_live_verify_player_active"
+
+# XInput user indices the override exposes (== XUSER_MAX_COUNT). The combo lists
+# Auto + Player 1..N, where Player N maps to zero-based slot N-1.
+_PLAYER_SLOT_COUNT = 4
+
 # ~60 fps: re-arm every frame for a smooth circularity sweep.
 _REFRESH_FRAME_INTERVAL = 1
 
@@ -354,6 +364,121 @@ def _build_header(shell) -> None:
         color=shell.COLORS["muted"],
         wrap=_SCREEN_WRAP,
     )
+    _build_player_selector(shell)
+
+
+def _build_player_selector(shell) -> None:
+    """Controller-slot override row: which XInput pad the live tester reads.
+
+    A small Auto / Player 1-4 combo plus a live "Active: Player N" readout. All
+    slot logic lives in the poll service (``XInputPollService`` scans 0-3 and
+    sticks to the first connected pad); this row only reflects the active slot
+    and forwards the operator's override. The combo's content matches the
+    current locale, so it inherits the bound default font's CJK glyphs — no
+    per-item font bind, unlike the cross-locale language picker in Preferences.
+    """
+
+    service = getattr(shell, "xinput_poll_service", None)
+    dpg.add_spacer(height=6)
+    with dpg.group(horizontal=True):
+        dpg.add_text(
+            t("diagnostics.live_verify.player.control_label"),
+            color=shell.COLORS["muted"],
+        )
+        dpg.add_combo(
+            items=_player_combo_items(),
+            default_value=_player_combo_default(service),
+            width=130,
+            tag=PLAYER_SELECT_COMBO_TAG,
+            callback=lambda _s, value: _on_player_select(shell, value),
+        )
+        dpg.add_spacer(width=12)
+        dpg.add_text(
+            _player_active_text(_current_snapshot(service)),
+            tag=PLAYER_ACTIVE_TAG,
+            color=shell.COLORS["muted"],
+        )
+
+
+def _player_combo_items() -> list[str]:
+    """Override-combo labels: ``Auto`` then ``Player 1..N`` (localized)."""
+
+    items = [t("diagnostics.live_verify.player.auto")]
+    items.extend(
+        t("diagnostics.live_verify.player.slot", n=n)
+        for n in range(1, _PLAYER_SLOT_COUNT + 1)
+    )
+    return items
+
+
+def _player_combo_default(service) -> str:
+    """Initial combo value reflecting the service's current selection.
+
+    ``Player N`` only when the service is explicitly pinned (MANUAL) to a real
+    slot; AUTO (and any stub service lacking the selection API) shows ``Auto``.
+    """
+
+    mode = getattr(service, "selection_mode", "auto") if service is not None else "auto"
+    slot = getattr(service, "active_slot", None) if service is not None else None
+    if mode == "manual" and isinstance(slot, int) and 0 <= slot < _PLAYER_SLOT_COUNT:
+        return t("diagnostics.live_verify.player.slot", n=slot + 1)
+    return t("diagnostics.live_verify.player.auto")
+
+
+def _player_active_text(snap) -> str:
+    """The "Active: Player N" readout for the current snapshot.
+
+    Reads the slot OFF the snapshot so it is atomic with the connection state:
+    a connected pad shows its 1-based player number; anything else (no pad, or a
+    manually-pinned-but-disconnected slot) reads "No controller".
+    """
+
+    slot = getattr(snap, "slot", None) if snap is not None else None
+    connected = bool(getattr(snap, "connected", False)) if snap is not None else False
+    if connected and isinstance(slot, int):
+        label = t("diagnostics.live_verify.player.slot", n=slot + 1)
+    else:
+        label = t("diagnostics.live_verify.player.none")
+    return t("diagnostics.live_verify.player.active", label=label)
+
+
+def _current_snapshot(service):
+    """Best-effort latest snapshot for the build-time readout (None on any stub
+    service without a usable ``get_snapshot``)."""
+
+    if service is None:
+        return None
+    try:
+        return service.get_snapshot()
+    except Exception:  # noqa: BLE001 — the readout is cosmetic; never block build
+        return None
+
+
+def _on_player_select(shell, value) -> None:
+    """Forward an override-combo pick to the poll service (Auto / Player N)."""
+
+    service = getattr(shell, "xinput_poll_service", None)
+    if service is None:
+        return
+    if value == t("diagnostics.live_verify.player.auto"):
+        _call_selection(service, "select_auto")
+        return
+    for n in range(1, _PLAYER_SLOT_COUNT + 1):
+        if value == t("diagnostics.live_verify.player.slot", n=n):
+            _call_selection(service, "select_slot", n - 1)
+            return
+    # Unknown label (locale swap mid-open, stray value): default to auto.
+    _call_selection(service, "select_auto")
+
+
+def _call_selection(service, name: str, *args) -> None:
+    fn = getattr(service, name, None)
+    if not callable(fn):
+        return
+    try:
+        fn(*args)
+    except Exception:  # noqa: BLE001 — a UI click must never crash the screen
+        logger.exception("Live-verify: %s%r failed", name, args)
 
 
 def _build_stick_block(shell, state: "_LiveVerifyState", side: str) -> None:
@@ -762,6 +887,9 @@ def _schedule_live_verify_refresh(shell, state: "_LiveVerifyState") -> None:
 
 def _refresh_live_verify(shell, state: "_LiveVerifyState") -> None:
     snap = shell.xinput_poll_service.get_snapshot()
+    # Keep the active-slot readout honest in EVERY state (live / no-pad /
+    # unavailable) so it tracks auto-selection and reflects a lost pad.
+    _lv_set(PLAYER_ACTIVE_TAG, _player_active_text(snap))
     if not snap.dll_available:
         _set_availability(shell, "unavailable")
         return

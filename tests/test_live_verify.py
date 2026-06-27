@@ -42,12 +42,19 @@ from zd_app.ui.screens import diagnostics, live_verify
 
 class _FakeXInputService:
     """Deterministic stand-in for XInputPollService: serves a fixed snapshot
-    and records start()/stop() so lifecycle assertions don't spawn a thread."""
+    and records start()/stop() so lifecycle assertions don't spawn a thread.
+
+    Also mirrors the slot-selection surface (``select_slot`` / ``select_auto`` /
+    ``active_slot`` / ``selection_mode``) so the live-verify player-override row
+    can build and forward picks against the fake without a real worker."""
 
     def __init__(self, snapshot: XInputSnapshot) -> None:
         self._snapshot = snapshot
         self.started = 0
         self.stopped = 0
+        self.selection_mode = "auto"
+        self.active_slot = snapshot.slot
+        self.selected: list = []  # records select_slot(i) / select_auto() picks
 
     def start(self) -> None:
         self.started += 1
@@ -61,6 +68,16 @@ class _FakeXInputService:
     @property
     def dll_available(self) -> bool:
         return self._snapshot.dll_available
+
+    def select_slot(self, index: int) -> None:
+        self.selection_mode = "manual"
+        self.active_slot = index
+        self.selected.append(index)
+
+    def select_auto(self) -> None:
+        self.selection_mode = "auto"
+        self.active_slot = None
+        self.selected.append("auto")
 
 
 class _DeadzoneService:
@@ -220,6 +237,9 @@ class LiveVerifyScreenBuildTests(unittest.TestCase):
     def _assert_core_tags(self) -> None:
         self.assertTrue(dpg.does_item_exist(live_verify.LIVE_VERIFY_ROOT_TAG))
         self.assertTrue(dpg.does_item_exist(live_verify.LIVE_VERIFY_AVAILABILITY_TAG))
+        # Player-slot override row (multi-slot selection) builds in every state.
+        self.assertTrue(dpg.does_item_exist(live_verify.PLAYER_SELECT_COMBO_TAG))
+        self.assertTrue(dpg.does_item_exist(live_verify.PLAYER_ACTIVE_TAG))
         self.assertTrue(dpg.does_item_exist(live_verify._test_button_tag("left")))
         self.assertTrue(dpg.does_item_exist(live_verify._test_button_tag("right")))
         self.assertTrue(
@@ -849,6 +869,12 @@ class LiveVerifyI18nTests(unittest.TestCase):
             "diagnostics.trust.body",
             "log.diagnostics.bundle_unavailable",
             "log.diagnostics.bundle_failed",
+            # Player-slot override row (multi-slot selection).
+            "diagnostics.live_verify.player.control_label",
+            "diagnostics.live_verify.player.auto",
+            "diagnostics.live_verify.player.slot",
+            "diagnostics.live_verify.player.active",
+            "diagnostics.live_verify.player.none",
         ]
         for key in required:
             with self.subTest(key=key):
@@ -919,6 +945,90 @@ class LiveVerifyI18nTests(unittest.TestCase):
         # not the em-dash the spec sketched with.
         for ch in ("—", "…", "✓"):
             self.assertNotIn(ch, live_verify._HEADER_PCT_IDLE)
+
+
+class LiveVerifyPlayerSelectorTests(unittest.TestCase):
+    """The player-slot override row: builds, shows the active 'Player N', and
+    forwards Auto / Player 1-4 picks to the poll service (which owns the slot
+    logic). Pairs with tests/test_xinput_poll_service.py, which proves the
+    service-side multi-slot selection itself."""
+
+    def setUp(self) -> None:
+        i18n._loaded.clear()
+        i18n._reverse_en.clear()
+        i18n.set_locale("en")
+
+    def _build(self, fake) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        shell._xinput_poll_service = fake
+        with dpg.window():
+            with dpg.child_window(tag="content_region"):
+                pass
+        live_verify.build(shell, "content_region")
+        return shell
+
+    def test_row_builds_with_combo_and_auto_player_items(self) -> None:
+        dpg.create_context()
+        try:
+            self._build(_FakeXInputService(_live_snap(slot=1)))
+            self.assertTrue(dpg.does_item_exist(live_verify.PLAYER_SELECT_COMBO_TAG))
+            self.assertTrue(dpg.does_item_exist(live_verify.PLAYER_ACTIVE_TAG))
+            items = dpg.get_item_configuration(
+                live_verify.PLAYER_SELECT_COMBO_TAG
+            )["items"]
+            self.assertEqual(
+                list(items),
+                ["Auto", "Player 1", "Player 2", "Player 3", "Player 4"],
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_active_readout_shows_player_for_connected_slot(self) -> None:
+        dpg.create_context()
+        try:
+            self._build(_FakeXInputService(_live_snap(slot=2)))
+            # 1-based: snapshot slot 2 -> "Player 3".
+            self.assertEqual(
+                dpg.get_value(live_verify.PLAYER_ACTIVE_TAG), "Active: Player 3"
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_active_readout_reads_no_controller_when_disconnected(self) -> None:
+        dpg.create_context()
+        try:
+            self._build(_FakeXInputService(XInputSnapshot.disconnected()))
+            self.assertEqual(
+                dpg.get_value(live_verify.PLAYER_ACTIVE_TAG),
+                "Active: No controller",
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_override_forwards_player_pick_to_service(self) -> None:
+        fake = _FakeXInputService(_live_snap(slot=0))
+        live_verify._on_player_select(
+            SimpleNamespace(xinput_poll_service=fake), "Player 3"
+        )
+        self.assertEqual(fake.selection_mode, "manual")
+        self.assertEqual(fake.active_slot, 2)  # Player 3 -> zero-based slot 2
+        self.assertEqual(fake.selected, [2])
+
+    def test_override_auto_resumes_auto_selection(self) -> None:
+        fake = _FakeXInputService(_live_snap(slot=0))
+        fake.select_slot(1)  # start pinned
+        live_verify._on_player_select(
+            SimpleNamespace(xinput_poll_service=fake), "Auto"
+        )
+        self.assertEqual(fake.selection_mode, "auto")
+        self.assertIsNone(fake.active_slot)
+
+    def test_combo_default_reflects_manual_pin_then_auto(self) -> None:
+        fake = _FakeXInputService(_live_snap(slot=2))
+        fake.select_slot(2)
+        self.assertEqual(live_verify._player_combo_default(fake), "Player 3")
+        fake.select_auto()
+        self.assertEqual(live_verify._player_combo_default(fake), "Auto")
 
 
 class PollServiceConstructionTests(unittest.TestCase):
