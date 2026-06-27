@@ -418,6 +418,11 @@ class _StubSettingsService:
             ),
         )
 
+    def set_zone_lighting_verified(self, zone: LightingZone, settings: LightingSettings, attempts: int = 3, settle_s: float = 0.1):
+        # The apply pipeline calls the verified setter; this fake stands in for the
+        # whole write+read-back op via its scripted set_zone_lighting outcome.
+        return self.set_zone_lighting(zone, settings)
+
     def set_back_paddle_binding(self, slot, target):
         label = f"back_paddle_{slot.name}"
         return self._result_for(

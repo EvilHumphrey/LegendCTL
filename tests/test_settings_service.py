@@ -2113,6 +2113,210 @@ class TestSetStepSizeVerified(unittest.TestCase):
         self.assertEqual(result.value, value)
 
 
+def _lighting_read_response(zone: LightingZone, settings: LightingSettings) -> bytes:
+    """Build a cat-0x10 read-response frame ``get_zone_lighting`` decodes.
+
+    Layout mirrors the device frame Windows hands back: report id at [0], read
+    magic at [1:5], category at [5], the zone selector at [7], then light_on /
+    mode / brightness / r / g / b at [8:14] -- exactly what ``get_zone_lighting``
+    reads.
+    """
+
+    payload = bytes(
+        [
+            zone.value,
+            0x01 if settings.light_on else 0x00,
+            settings.mode.value,
+            settings.brightness_byte,
+            settings.color.r,
+            settings.color.g,
+            settings.color.b,
+        ]
+    )
+    return _make_read_response(category=CATEGORY_LIGHTING, payload=payload)
+
+
+class TestSetZoneLightingVerified(unittest.TestCase):
+    """The verify-and-retry lighting setter (RIGHT-zone silent-reject fix, 2026-06-27).
+
+    The firmware silently rejects a fraction of cat-0x10 lighting-zone writes
+    (WriteFile OK, device never commits), and it bites the LAST same-category zone
+    write in a profile-apply burst hardest. Hardware repro (fw 1.24): a profile
+    with LEFT/RIGHT ``off/FLOW`` was re-applied; LEFT_LIGHT committed ``off/FLOW``
+    but RIGHT_LIGHT stayed at its pre-apply ``on/FADE`` on the FIRST apply,
+    converging only on a second (restore-point trail 20260627-071135 ->
+    20260627-071303). ``set_zone_lighting_verified`` writes, settles, reads back
+    via ``get_zone_lighting``, and re-writes on a mismatch up to ``attempts``
+    times -- surfacing ``VERIFY_FAILED`` only when the device never commits. The
+    read-back is mocked via the recorder's scripted ``read_results``; true
+    firmware commit can only be confirmed on real hardware.
+    """
+
+    # The exact values from the 2026-06-27 hardware repro: the profile asks for
+    # off/FLOW; the device sat at on/FADE before the apply and (when the write is
+    # silently rejected) keeps reading back that on/FADE.
+    _ZONE = LightingZone.RIGHT_LIGHT
+    _TARGET = LightingSettings(
+        light_on=False,
+        mode=LightingMode.FLOW,
+        brightness_byte=102,
+        color=RgbColor(r=0, g=0, b=255),
+    )
+    _PRIOR = LightingSettings(
+        light_on=True,
+        mode=LightingMode.FADE,
+        brightness_byte=102,
+        color=RgbColor(r=0, g=0, b=255),
+    )
+
+    @staticmethod
+    def _zone_set_writes(
+        rec: _Recorder, zone: LightingZone, settings: LightingSettings
+    ) -> int:
+        """Count the lighting *set* writes (excludes the read-query writes)."""
+
+        target = build_lighting_payload(zone, settings)
+        return sum(
+            1
+            for event in rec.events
+            if event[0] == "write_file" and event[2] == target
+        )
+
+    def test_first_write_not_committed_then_retries_and_commits(self) -> None:
+        # The RIGHT-zone repro: the first read-back shows the zone still at its
+        # prior on/FADE (not committed) -> one retry -> the second read-back shows
+        # the written off/FLOW -> verified success.
+        rec = _Recorder(
+            read_results=[
+                _lighting_read_response(self._ZONE, self._PRIOR),
+                _lighting_read_response(self._ZONE, self._TARGET),
+            ]
+        )
+        service = _make_service(rec)
+
+        result = service.set_zone_lighting_verified(self._ZONE, self._TARGET)
+
+        self.assertEqual(result.outcome, SetLightingOutcome.OK)
+        # Exactly two device set-writes of the zone: the rejected one + the retry.
+        self.assertEqual(self._zone_set_writes(rec, self._ZONE, self._TARGET), 2)
+        # The settle seam ran between write and read-back.
+        self.assertIn(("sleep", 0.1), rec.events)
+
+    def test_never_commits_returns_verify_failed_after_attempts(self) -> None:
+        # The device never commits across the full attempt budget: the write layer
+        # reports OK each time, but the read-back keeps showing the prior on/FADE
+        # -> the setter surfaces VERIFY_FAILED (not a false success).
+        attempts = 3
+        rec = _Recorder(
+            read_results=[
+                _lighting_read_response(self._ZONE, self._PRIOR)
+                for _ in range(attempts)
+            ]
+        )
+        service = _make_service(rec)
+
+        with self.assertLogs("zd_app.services.settings_service", level="WARNING"):
+            result = service.set_zone_lighting_verified(
+                self._ZONE, self._TARGET, attempts=attempts
+            )
+
+        self.assertEqual(result.outcome, SetLightingOutcome.VERIFY_FAILED)
+        self.assertEqual(
+            self._zone_set_writes(rec, self._ZONE, self._TARGET), attempts
+        )
+
+    def test_commits_first_try_issues_single_write(self) -> None:
+        # The first read-back already matches -> one write, no retry, success.
+        rec = _Recorder(
+            read_results=[_lighting_read_response(self._ZONE, self._TARGET)]
+        )
+        service = _make_service(rec)
+
+        result = service.set_zone_lighting_verified(self._ZONE, self._TARGET)
+
+        self.assertEqual(result.outcome, SetLightingOutcome.OK)
+        self.assertEqual(self._zone_set_writes(rec, self._ZONE, self._TARGET), 1)
+
+    def test_write_layer_failure_returns_immediately_unwrapped(self) -> None:
+        # A write-layer failure (no device) has no commit ambiguity to resolve: it
+        # is returned as-is, with no read-back attempted.
+        rec = _Recorder(paths=[])
+        service = _make_service(rec)
+
+        result = service.set_zone_lighting_verified(self._ZONE, self._TARGET)
+
+        self.assertEqual(result.outcome, SetLightingOutcome.DEVICE_NOT_FOUND)
+        self.assertNotIn("read_file", [event[0] for event in rec.events])
+
+    def test_readback_timeout_degrades_to_unverified_write_no_crash(self) -> None:
+        # The verify read-back can RAISE a TimeoutError on real hardware. The
+        # setter must CATCH it, retry within budget, and -- when every attempt only
+        # ever failed to READ (never read back a different value) -- DEGRADE to the
+        # write's OK result. A verified write must never be worse than a plain one.
+        attempts = 3
+        rec = _Recorder(
+            read_results=[
+                TimeoutError("HID read timed out after 1000ms")
+                for _ in range(attempts)
+            ]
+        )
+        service = _make_service(rec)
+
+        with self.assertLogs("zd_app.services.settings_service", level="WARNING"):
+            result = service.set_zone_lighting_verified(
+                self._ZONE, self._TARGET, attempts=attempts
+            )
+
+        self.assertEqual(result.outcome, SetLightingOutcome.OK)
+        self.assertEqual(
+            self._zone_set_writes(rec, self._ZONE, self._TARGET), attempts
+        )
+
+    def test_readback_none_degrades_not_verify_failed(self) -> None:
+        # get_zone_lighting returns None when the read fails gracefully (a
+        # SettingsServiceError it swallows) or yields an unknown mode byte. None
+        # means "could not read it back", NOT a confirmed wrong value, so it must
+        # degrade to the write result -- never a false VERIFY_FAILED.
+        attempts = 2
+        rec = _Recorder(
+            read_results=[
+                SettingsServiceError("synthetic read failure")
+                for _ in range(attempts)
+            ]
+        )
+        service = _make_service(rec)
+
+        with self.assertLogs("zd_app.services.settings_service", level="WARNING"):
+            result = service.set_zone_lighting_verified(
+                self._ZONE, self._TARGET, attempts=attempts
+            )
+
+        self.assertEqual(result.outcome, SetLightingOutcome.OK)
+        self.assertEqual(
+            self._zone_set_writes(rec, self._ZONE, self._TARGET), attempts
+        )
+
+    def test_confirmed_mismatch_then_readback_raise_still_verify_failed(self) -> None:
+        # A CONFIRMED mismatch (read SUCCEEDED, showed the prior on/FADE) on one
+        # attempt is real evidence the device rejected the write; a later read-back
+        # that raises must not erase it. With at least one confirmed mismatch in
+        # the run, the budget-exhausted result is VERIFY_FAILED, not a degraded OK.
+        rec = _Recorder(
+            read_results=[
+                _lighting_read_response(self._ZONE, self._PRIOR),
+                TimeoutError("HID read timed out after 1000ms"),
+            ]
+        )
+        service = _make_service(rec)
+
+        with self.assertLogs("zd_app.services.settings_service", level="WARNING"):
+            result = service.set_zone_lighting_verified(
+                self._ZONE, self._TARGET, attempts=2
+            )
+
+        self.assertEqual(result.outcome, SetLightingOutcome.VERIFY_FAILED)
+
+
 class TestGetVibration(unittest.TestCase):
     def test_get_vibration_parses_response_payload(self) -> None:
         rec = _Recorder(read_results=[_make_read_response(

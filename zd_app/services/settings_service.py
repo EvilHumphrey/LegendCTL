@@ -118,6 +118,20 @@ CATEGORY_MOTION = 0x0B
 MOTION_SUBCOMMAND = 0x00
 CATEGORY_LIGHTING = 0x10
 LIGHTING_SUBCOMMAND = 0x00
+# Lighting zones (cat 0x10) share the in-burst silent-reject quirk that step_size
+# (cat 0x0d) does: WriteFile returns OK but the firmware never commits. It bites
+# the LAST same-category zone write in a profile-apply burst hardest -- the apply
+# writes HOME -> LEFT -> RIGHT back-to-back, and the 2026-06-27 hardware repro
+# (fw 1.24) had RIGHT_LIGHT stay at its pre-apply on/FADE while the LEFT_LIGHT
+# write just before it committed off/FLOW, converging only on a second apply
+# (restore-point trail 20260627-071135 -> 071303). A single unverified
+# set_zone_lighting can't tell a committed write from a silently-rejected one, so
+# set_zone_lighting_verified writes, settles, reads back, and re-writes on a
+# confirmed mismatch up to this many attempts -- the exact pattern
+# set_step_size_verified uses. The settle rides the injected self._sleep seam, so
+# tests stub it to a no-op (no real sleep in the suite).
+LIGHTING_VERIFY_ATTEMPTS = 3
+LIGHTING_VERIFY_SETTLE_S = 0.1
 CATEGORY_BACK_PADDLE_PRIMARY = 0x03
 CATEGORY_BACK_PADDLE_BINDING = 0x05
 CATEGORY_BACK_PADDLE_BULK = 0x12
@@ -2566,6 +2580,135 @@ class SettingsService:
             context=f"lighting:{zone.name}",
             make_result=partial(SetLightingResult, zone=zone.name.lower(), settings=validated),
         )
+
+    def set_zone_lighting_verified(
+        self,
+        zone: LightingZone,
+        settings: LightingSettings,
+        attempts: int = LIGHTING_VERIFY_ATTEMPTS,
+        settle_s: float = LIGHTING_VERIFY_SETTLE_S,
+    ) -> SetLightingResult:
+        """Write a lighting zone and confirm the device actually committed it.
+
+        Lighting zones (cat 0x10) share the silent-reject quirk that step_size
+        (cat 0x0d) does: ``WriteFile`` returns OK but the firmware never commits.
+        It bites the LAST same-category zone write in a profile-apply burst
+        hardest -- the 2026-06-27 hardware repro (fw 1.24) had RIGHT_LIGHT stay at
+        its pre-apply ``on/FADE`` while the LEFT_LIGHT write just before it
+        committed ``off/FLOW``, converging only on a second apply.
+        ``set_zone_lighting`` alone cannot tell a committed write from a silently-
+        rejected one, so this setter writes via ``set_zone_lighting``, settles,
+        reads back with ``get_zone_lighting``, and re-writes on a confirmed
+        mismatch up to ``attempts`` times. It returns the verified-success result
+        (outcome ``OK`` / ``OK_WITH_RETRY`` from the committing write) or, once the
+        budget is exhausted on a confirmed mismatch, the last write result
+        re-stamped ``WriteOutcome.VERIFY_FAILED`` so the apply plumbing surfaces
+        "not committed" instead of a false success.
+
+        A read-back can FAIL on real hardware -- a HID read timeout
+        (``TimeoutError``) or a raw ``ReadFile`` ``OSError`` -- or collapse to
+        ``None`` (a ``SettingsServiceError`` ``get_zone_lighting`` swallowed, or an
+        unknown mode byte). That is NOT treated as a failed verify: the write
+        succeeded, the read just could not be read. Such an attempt logs a warning
+        and retries; if the whole budget is exhausted with ONLY read-back failures
+        (never a confirmed wrong value), the setter DEGRADES to the underlying
+        write's ``OK`` / ``OK_WITH_RETRY`` result so a verified write is never
+        worse than a plain one. ``VERIFY_FAILED`` is reserved for a CONFIRMED
+        mismatch -- a successful read that returned a different
+        ``LightingSettings``. Mirrors ``set_step_size_verified`` exactly.
+        """
+
+        attempts = max(1, int(attempts))
+        last_result: Optional[SetLightingResult] = None
+        saw_confirmed_mismatch = False
+        for attempt in range(attempts):
+            result = self.set_zone_lighting(zone, settings)
+            last_result = result
+            # A write-layer failure (DEVICE_NOT_FOUND / OPEN_FAILED /
+            # WRITE_FAILED) is terminal for this attempt's purpose: there is no
+            # committed-vs-rejected ambiguity to resolve, so surface it as-is.
+            if result.outcome not in (WriteOutcome.OK, WriteOutcome.OK_WITH_RETRY):
+                return result
+
+            # Settle so the firmware leaves its post-write quiet window before we
+            # read back; rides the injected sleep seam (no real sleep in tests).
+            self._sleep(settle_s)
+
+            # ``get_zone_lighting`` already swallows ``SettingsServiceError`` into
+            # ``None`` internally, but a HID read timeout (``TimeoutError``, a
+            # subclass of ``OSError``) or a raw ``ReadFile`` ``OSError`` from the
+            # bounded reader can still escape it. Catch them here so a read that
+            # could not be read is treated as "couldn't verify" (retry within
+            # budget), never as a committed-wrong-value mismatch.
+            try:
+                readback = self.get_zone_lighting(zone)
+            except (SettingsServiceError, OSError) as exc:
+                logger.warning(
+                    "lighting %s verify read-back failed (attempt %d/%d): %s; "
+                    "write succeeded -- will degrade to unverified if unresolved",
+                    zone.name,
+                    attempt + 1,
+                    attempts,
+                    exc,
+                )
+                continue
+
+            if readback == settings:
+                # Committed. Preserve the real write outcome (OK / OK_WITH_RETRY).
+                return result
+            if readback is None:
+                # No usable read-back (a graceful read failure that collapsed to
+                # ``None``, or an unknown mode byte). Inconclusive -- NOT a
+                # confirmed wrong value -- so degrade rather than paint a false
+                # VERIFY_FAILED.
+                logger.warning(
+                    "lighting %s verify read-back inconclusive (attempt %d/%d): "
+                    "get_zone_lighting returned None; write succeeded",
+                    zone.name,
+                    attempt + 1,
+                    attempts,
+                )
+                continue
+
+            # CONFIRMED mismatch: the read SUCCEEDED and returned a different
+            # LightingSettings -- the silent-reject signature (the zone stayed at
+            # its prior state). Real evidence the write did not commit; retry, and
+            # if it persists, surface VERIFY_FAILED.
+            saw_confirmed_mismatch = True
+            logger.warning(
+                "lighting %s verify mismatch (attempt %d/%d): wrote %r, device read %r",
+                zone.name,
+                attempt + 1,
+                attempts,
+                settings,
+                readback,
+            )
+
+        # Budget exhausted. ``last_result`` is always set (attempts >= 1) and its
+        # outcome was a write success on the final pass.
+        if saw_confirmed_mismatch:
+            # The device read back a different value at least once: a real
+            # silent-reject. Re-stamp VERIFY_FAILED so the apply shows "not
+            # committed" instead of a false success.
+            logger.error(
+                "lighting %s never committed after %d verified write attempts",
+                zone.name,
+                attempts,
+            )
+            return replace(last_result, outcome=WriteOutcome.VERIFY_FAILED)
+
+        # Only read-back failures (raises / None) -- never a confirmed wrong
+        # value. The write layer reported success on every attempt; we simply
+        # could not read it back. Degrade to that unverified write result so a
+        # verified write is never worse than a plain one.
+        logger.warning(
+            "lighting %s written but could not be read back to verify after %d "
+            "attempt(s); returning the unverified write result (%s)",
+            zone.name,
+            attempts,
+            getattr(last_result.outcome, "name", last_result.outcome),
+        )
+        return last_result
 
     def get_zone_lighting(self, zone: LightingZone) -> Optional[LightingSettings]:
         """Read one lighting zone from the controller."""

@@ -321,11 +321,22 @@ class SettingsApplyCoordinator:
                     mapping,
                 ),
             )
+        # Lighting zones go through the VERIFIED setter (write + settle +
+        # read-back + re-write on confirmed mismatch), not the plain one. Three
+        # same-category 0x10 writes fire back-to-back here (HOME -> LEFT ->
+        # RIGHT), and the firmware silently rejects the LAST of them
+        # intermittently -- WriteFile returns OK but the zone never commits, so a
+        # plain set_zone_lighting counts a false success and nothing re-writes it.
+        # Hardware repro 2026-06-27 (fw 1.24): re-applying a profile with
+        # LEFT/RIGHT off/FLOW left RIGHT_LIGHT stuck at on/FADE on the first apply
+        # (LEFT committed), converging only on a second apply. set_zone_lighting_
+        # verified detects the reject and retries within one apply, the same fix
+        # the step_size trailer already uses for its own silent-reject quirk.
         for zone, settings_obj in (snapshot.lighting_zones or {}).items():
             zone_label = zone.name if hasattr(zone, "name") else str(zone)
             trailer_write(
                 f"lighting_{zone_label}",
-                lambda zone=zone, settings_obj=settings_obj: settings_service.set_zone_lighting(
+                lambda zone=zone, settings_obj=settings_obj: settings_service.set_zone_lighting_verified(
                     zone,
                     settings_obj,
                 ),

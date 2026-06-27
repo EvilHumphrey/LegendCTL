@@ -303,6 +303,15 @@ def _ok_profile_write_results(settings_service: MagicMock) -> None:
         outcome=SetLightingOutcome.OK,
         error_code=None,
     )
+    # The APPLY path drives each lighting zone through the verified setter (write +
+    # read-back) per the RIGHT-zone silent-reject fix; the Lighting-tab one-shot
+    # writes plainly. Delegate the verified setter to the plain set_zone_lighting
+    # so apply-path set_zone_lighting assertions keep verifying the value reaches
+    # the write layer -- mirrors production, where set_zone_lighting_verified calls
+    # set_zone_lighting internally.
+    settings_service.set_zone_lighting_verified.side_effect = (
+        lambda zone, settings, *a, **k: settings_service.set_zone_lighting(zone, settings)
+    )
     settings_service.set_back_paddle_binding.return_value = SimpleNamespace(
         outcome=SetBackPaddleBindingOutcome.OK,
         error_code=None,

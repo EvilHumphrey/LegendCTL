@@ -29,6 +29,8 @@ from zd_app.services.settings_service import (
     PollingRate,
     RgbColor,
     SensitivityAnchor,
+    SetLightingOutcome,
+    SetLightingResult,
     SetPollingRateOutcome,
     SetPollingRateResult,
     SetStepSizeOutcome,
@@ -759,7 +761,9 @@ _VULNERABLE_SETTER_NAMES = (
     "set_left_trigger_settings",
     "set_right_trigger_settings",
     "set_button_binding",
-    "set_zone_lighting",
+    # Lighting goes through the verified setter (write + read-back) per the
+    # RIGHT-zone silent-reject fix; the coordinator never calls the plain one.
+    "set_zone_lighting_verified",
 )
 
 
@@ -795,7 +799,7 @@ class CoordinatorFieldTrailerTests(unittest.TestCase):
             "set_left_trigger_settings",
             "set_right_trigger_settings",
             "set_button_binding",
-            "set_zone_lighting",
+            "set_zone_lighting_verified",
             "set_back_paddle_binding",
         ):
             getattr(settings_service, name).return_value = ok
@@ -899,7 +903,67 @@ class CoordinatorFieldTrailerTests(unittest.TestCase):
             coordinator.apply_snapshot(snapshot)
 
         self.assertEqual(sleep.call_count, len(lighting_zones))
-        self.assertEqual(settings_service.set_zone_lighting.call_count, len(lighting_zones))
+        self.assertEqual(
+            settings_service.set_zone_lighting_verified.call_count, len(lighting_zones)
+        )
+
+    def test_lighting_uses_verified_setter(self) -> None:
+        """The apply path must drive each lighting zone through set_zone_lighting_verified.
+
+        RIGHT-zone silent-reject fix (2026-06-27): a plain set_zone_lighting could
+        be silently rejected by the firmware on the last same-category zone write
+        with nothing detecting it (hardware repro: profile LEFT/RIGHT off/FLOW left
+        RIGHT_LIGHT stuck on/FADE after one apply). The apply path must call the
+        verify-and-retry setter and never the unverified one.
+        """
+        settings_service, coordinator = self._coordinator_with_all_setters_ok(
+            field_trailer_delay_s=0.0,
+        )
+        snapshot = _empty_snapshot(
+            lighting_zones={zone: _lighting_delta() for zone in LightingZone}
+        )
+
+        coordinator.apply_snapshot(snapshot)
+
+        self.assertEqual(
+            settings_service.set_zone_lighting_verified.call_count, len(LightingZone)
+        )
+        settings_service.set_zone_lighting.assert_not_called()
+
+    def test_lighting_verify_failure_surfaces_as_apply_failure(self) -> None:
+        """A VERIFY_FAILED lighting outcome must land as an ApplyFailure row.
+
+        This is the "zone silently reverted" case: the write seam said OK but the
+        read-back never matched, so set_zone_lighting_verified returns
+        VERIFY_FAILED. The apply result must show it failed (not a false success),
+        and it must NOT be flagged transient (it already exhausted its retries).
+        """
+        settings_service, coordinator = self._coordinator_with_all_setters_ok(
+            field_trailer_delay_s=0.0,
+        )
+        settings_service.set_zone_lighting_verified.return_value = SetLightingResult(
+            outcome=SetLightingOutcome.VERIFY_FAILED,
+            zone="right_light",
+            settings=_lighting_delta(),
+            error_code=None,
+            bytes_written=65,
+            payload_hex="00",
+            elapsed_ms=1,
+        )
+        snapshot = _empty_snapshot(
+            lighting_zones={LightingZone.RIGHT_LIGHT: _lighting_delta()}
+        )
+
+        result = coordinator.apply_snapshot(snapshot)
+
+        self.assertEqual(result.succeeded, 0)
+        self.assertEqual(len(result.failed), 1)
+        failure = result.failed[0]
+        self.assertEqual(failure.setting_label, "lighting_RIGHT_LIGHT")
+        self.assertFalse(
+            failure.is_transient,
+            "VERIFY_FAILED already retried internally -- not transient",
+        )
 
     def test_field_trailer_default_delay_is_100ms(self) -> None:
         """Default field-trailer delay matches the 100ms hardware-validated threshold."""
