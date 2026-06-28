@@ -13,9 +13,9 @@
 
 LegendCTL is a free, open-source Windows app for reading and applying ZD Ultimate
 Legend controller settings. It runs **standalone** — it talks directly to the
-controller over USB-HID, so the official ZD app is **not required** to use it. (Keep
-the official app for firmware updates if you like — LegendCTL works independently and
-doesn't depend on it.) It is
+controller over USB-HID, so the official ZD app is **not required** to use it. (Firmware
+updates use ZD's **separate** official firmware tool — not the config app, and not
+LegendCTL.) It is
 lightweight, fully local, and preserves your configuration across sessions. It
 configures the controller's supported settings — it is not a firmware updater.
 

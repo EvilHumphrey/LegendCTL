@@ -8,24 +8,26 @@ description: "Compare the official ZD app/PC software with standalone LegendCTL 
 Both exist, and they do different jobs. This page explains the difference plainly so you can pick the right tool
 without confusion.
 
-**TL;DR:** The official ZD app/PC software is the vendor's tool and the place to do **firmware updates** and anything
-ZD officially supports. **LegendCTL** is an independent, open-source, fully-local Windows app that configures the ZD
+**TL;DR:** The official ZD app/PC software is the vendor's tool for ZD's own settings and officially-supported
+workflows. **Firmware updates** are done with ZD's **separate** official firmware-update utility — not the config app,
+and not LegendCTL. **LegendCTL** is an independent, open-source, fully-local Windows app that configures the ZD
 Ultimate Legend's **settings** over USB-HID. LegendCTL is **standalone — you do not need the official ZD app installed
-to use it** — and it is *not* a firmware updater. Installing LegendCTL doesn't require, remove, or replace the official
-app — they're independent. If you keep the vendor app for firmware/reset workflows, use LegendCTL separately for fast,
-local, no-telemetry settings.
+to use it** — and it is *not* a firmware updater. Installing LegendCTL doesn't require, remove, or replace ZD's official
+tools — they're independent. Keep ZD's official tools for firmware and supported workflows; use LegendCTL separately for
+fast, local, no-telemetry settings.
 
 > LegendCTL is an unofficial, third-party project — not developed by, affiliated with, or endorsed by ZD Gaming.
 
-## What the official ZD app is for
+## What ZD's official tools are for
 
-- **Firmware updates** — the official app is the correct place to update or recover the controller's firmware.
-  LegendCTL cannot do this (by design).
-- **Anything ZD officially supports** — the vendor's app is the source of truth for ZD's own feature set, official
-  documentation, and warranty-relevant operations.
+- **Firmware updates** — ZD ships a **separate** official firmware-update utility (a dedicated tool, distinct from the
+  ZD config app) to update or recover the controller's firmware. LegendCTL cannot do this (by design), and neither does
+  the config app.
+- **Anything ZD officially supports** — the vendor's ZD app/PC software is the source of truth for ZD's own feature
+  set, official documentation, and warranty-relevant operations.
 
-If your goal involves firmware, a soft-bricked controller, or an officially-supported workflow, use the official ZD
-app first.
+If your goal involves firmware or a soft-bricked controller, use ZD's official firmware-update utility. For other
+officially-supported workflows, use the official ZD app.
 
 ## What LegendCTL is for
 
@@ -48,14 +50,14 @@ firmware flasher and cannot change firmware.
 
 | If you want to… | Use |
 |---|---|
-| Update or recover **firmware** | Official ZD app |
+| Update or recover **firmware** | ZD's official firmware-update utility (separate tool) |
 | An officially-supported / warranty-relevant operation | Official ZD app |
 | Configure **deadzones, sensitivity, polling, buttons, triggers, vibration, lighting, profiles** on Windows | **LegendCTL** |
 | A **fully-local, open-source, no-telemetry** way to manage settings | **LegendCTL** |
 | **View** live stick output / circularity (any XInput pad) | **LegendCTL** (read-only) |
 | Macros / turbo / rapid-fire / virtual-device remapping | Neither — LegendCTL deliberately omits these |
 
-LegendCTL doesn't require the official app. If you keep the vendor app for firmware/reset workflows, use LegendCTL
+LegendCTL doesn't require the official app. Keep ZD's official tools for firmware/reset workflows; use LegendCTL
 separately for the supported settings above.
 
 ## The trust difference (and how to verify it yourself)
@@ -79,7 +81,7 @@ be independently audited the same way, which is exactly why LegendCTL keeps ever
 
 ## What LegendCTL deliberately does *not* do
 
-- **No firmware flashing/updating** — use the official ZD app for that.
+- **No firmware flashing/updating** — use ZD's official firmware-update utility for that.
 - **No macros, turbo, rapid-fire, or automation**, and **no input injection** — intentionally absent and test-enforced.
 - **No drivers / virtual gamepads / background service.**
 - **No network calls or telemetry.**
@@ -101,5 +103,6 @@ See the [FAQ](FAQ.md) and, if something's off on your unit, please file a
 
 ---
 
-*LegendCTL is free and open-source (MIT). The official ZD app/PC software exists and remains the place for firmware;
-LegendCTL is the standalone, local, open-source way to manage supported settings.*
+*LegendCTL is free and open-source (MIT). The official ZD app/PC software exists for ZD's supported settings/workflows,
+and firmware updates use ZD's separate official firmware utility; LegendCTL is the standalone, local, open-source way to
+manage supported settings.*

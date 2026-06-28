@@ -62,13 +62,25 @@ against many engines. If you want zero packaged binaries, build from source.
 
 ### Do I need the official ZD app installed?
 No. LegendCTL runs **standalone** — it talks directly to the controller over
-USB-HID, so the official ZD app is not required. Keep the official app for firmware
-updates if you like; LegendCTL works independently of it and doesn't depend on it.
+USB-HID, so the official ZD app is not required. (Firmware updates use ZD's **separate**
+official firmware tool — not the config app, and not LegendCTL.) LegendCTL works
+independently and doesn't depend on either.
 
 ### Installer or portable ZIP — which should I use?
 The **portable ZIP** is the simplest: no admin, no UAC, runs from any folder, and
 you uninstall by deleting the folder. Use the installer if you want a Start-Menu
 entry and an entry in Windows' Apps list. Both ship the identical wrapper.
+
+### The official ZD app can't find my controller — can LegendCTL help?
+Maybe, depending on your goal. If Windows sees the controller in its normal wired mode,
+LegendCTL may still read and apply **supported settings** (deadzones, sensitivity, polling,
+buttons, lighting, vibration, profiles) and show live stick output — even when the official
+app is having trouble connecting. It **can't** help with firmware flashing/recovery, official
+calibration, warranty/support, or app/account/pairing issues — those stay with ZD's official
+tools. Quick triage: try a known-good cable and a direct USB port, confirm Windows lists it
+under Game Controllers, close other controller tools, and read state in LegendCTL before
+applying changes. If LegendCTL also can't see it, please file a
+[compatibility report](https://github.com/EvilHumphrey/LegendCTL/issues/new/choose).
 
 ## Compatibility
 
@@ -88,6 +100,13 @@ controller-agnostic for *viewing*. The full settings (deadzone, sensitivity,
 polling, etc.) are ZD-Ultimate-Legend-specific because they ride that controller's
 HID protocol.
 
+### Why can't I select 8K polling or 8-point stick curves?
+Those paths are **firmware-gated** by the controller. **8000 Hz polling** needs firmware
+tested at **v1.18+**, and **8-point sensitivity curves** need **v1.24+**. On older firmware,
+LegendCTL reports the path as unsupported rather than faking a successful write. To enable
+them, update firmware with ZD's official firmware tool, then reconnect and re-read state in
+LegendCTL — LegendCTL itself is not a firmware updater.
+
 ## What it does
 
 ### What settings can it actually change?
@@ -100,6 +119,11 @@ in the README [Status](../README.md#status) section.
 No — and that's deliberate. Macros / turbo / automation / input injection / a
 background service are *intentionally absent* (and enforced by tests). LegendCTL
 configures your controller; it doesn't play it for you.
+
+That boundary is useful, but it is **not a tournament/legal guarantee** — LegendCTL
+has no macros, turbo, or input-injection by design, but tournament rules, game
+anti-cheat, and competition-firmware requirements are outside its control. If you
+play somewhere regulated, check the event/game/controller rules.
 
 ### Does it update or change my controller's firmware?
 No. It reads and writes *settings* via HID. It is not a firmware updater and
