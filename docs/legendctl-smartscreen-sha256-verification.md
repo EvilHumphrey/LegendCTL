@@ -40,10 +40,10 @@ a checksum file:
 
 ## Verify the ZIP or installer on Windows
 
-Open PowerShell in your Downloads folder and run (substitute your file name):
+Open PowerShell in your Downloads folder and run (substitute your file name — replace `<version>` with the release you downloaded, e.g. `2.0.3`):
 
 ```powershell
-Get-FileHash .\ZDUltimateLegend-v2.0.2-windows.zip -Algorithm SHA256
+Get-FileHash .\ZDUltimateLegend-v<version>-windows.zip -Algorithm SHA256
 ```
 
 That prints a 64-character hash. Open `SHA256SUMS.txt` from the same release and find the line for your file.
@@ -56,7 +56,7 @@ Open `SHA256SUMS.txt` from the same release, find the line for your file, and co
 ```powershell
 # Paste the SHA-256 for your file from the release's SHA256SUMS.txt:
 $published = '<paste-from-SHA256SUMS.txt>'
-(Get-FileHash .\ZDUltimateLegend-v2.0.2-windows.zip -Algorithm SHA256).Hash -eq $published   # True = match
+(Get-FileHash .\ZDUltimateLegend-v<version>-windows.zip -Algorithm SHA256).Hash -eq $published   # True = match
 ```
 
 Always use the hash from **the same release you downloaded** — hashes change with every release, so don't reuse one

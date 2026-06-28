@@ -6,12 +6,12 @@ package manifest for the **public LegendCTL release**, so that
 works once it is merged into the community repo. No code-signing certificate is
 required — winget only needs a public installer URL and its SHA256.
 
-The version subfolder (`2.0.2/`) contains the three manifest files that get
+The version subfolder (`2.0.3/`) contains the three manifest files that get
 copied verbatim into a `microsoft/winget-pkgs` fork. **Copy only the `.yaml`
 files** — this `README.md` stays here.
 
 ```
-2.0.2/
+2.0.3/
   EvilHumphrey.LegendCTL.installer.yaml     # installer manifest (url, sha256, inno, ProductCode)
   EvilHumphrey.LegendCTL.locale.en-US.yaml  # default-locale manifest (publisher, description, tags)
   EvilHumphrey.LegendCTL.yaml               # version manifest (ties the set together)
@@ -21,13 +21,13 @@ files** — this `README.md` stays here.
 
 | Field | Value | Source |
 |---|---|---|
-| InstallerUrl | `https://github.com/EvilHumphrey/LegendCTL/releases/download/v2.0.2/ZDUltimateLegend-v2.0.2-Setup.exe` | `gh release view v2.0.2 -R EvilHumphrey/LegendCTL` asset `url` |
-| InstallerSha256 | `B858D60E9D0B292E9F4AEAB8BD9691C760525C6235162297AB453E880DFB4F2C` | Release `SHA256SUMS.txt`, cross-checked against GitHub's API asset `digest` (`sha256:b858d60e…`) — both agree |
+| InstallerUrl | `https://github.com/EvilHumphrey/LegendCTL/releases/download/v2.0.3/ZDUltimateLegend-v2.0.3-Setup.exe` | `gh release view v2.0.3 -R EvilHumphrey/LegendCTL` asset `url` |
+| InstallerSha256 | `1525422B7F451C4516E4DDE137860398EAA160E30A16C7E36320B6151E55A735` | Release `SHA256SUMS.txt`, cross-checked against GitHub's API asset `digest` (`sha256:1525422b…`) — both agree |
 | InstallerType | `inno` | `tools/installer/inno_setup_zd_wrapper.iss` (Inno Setup script) |
 | ProductCode | `{ZDUltimateLegend}_is1` | Inno `AppId={{ZDUltimateLegend}` → resolved AppId `{ZDUltimateLegend}` → Inno appends `_is1` for the ARP/uninstall key |
 | AppsAndFeaturesEntries DisplayName | `ZD Ultimate Legend Wrapper` | Inno `AppName` (`.iss` line 21) — the legacy EXE name the installer still registers |
 | AppsAndFeaturesEntries Publisher | `EvilHumphrey` | Inno `AppPublisher` (`.iss` line 23) |
-| AppsAndFeaturesEntries DisplayVersion | `2.0.2` | Inno `AppVersion` = `ZDUL_VERSION` build env = release version |
+| AppsAndFeaturesEntries DisplayVersion | `2.0.3` | Inno `AppVersion` = `ZDUL_VERSION` build env = release version |
 | Scope | `machine` | Inno `PrivilegesRequired=admin` + `DefaultDirName={autopf}\ZDUltimateLegend` (Program Files) |
 | Architecture | `x64` | Inno `ArchitecturesAllowed=x64compatible` |
 
@@ -58,7 +58,7 @@ if you prefer — it only gates which Windows builds winget will install on.
 ## Validation
 
 ```
-> winget validate --manifest <this>/2.0.2
+> winget validate --manifest <this>/2.0.3
 Manifest validation succeeded.
 ```
 (Validated locally with winget v1.28.240.)
@@ -71,28 +71,28 @@ Manifest validation succeeded.
    ```powershell
    git clone https://github.com/<you>/winget-pkgs.git
    cd winget-pkgs
-   git checkout -b legendctl-2.0.2
+   git checkout -b legendctl-2.0.3
    ```
 2. **Place the files** at the path winget-pkgs expects (publisher's first letter,
    lowercase, then PackageIdentifier parts, then version):
    ```
-   manifests/e/EvilHumphrey/LegendCTL/2.0.2/EvilHumphrey.LegendCTL.installer.yaml
-   manifests/e/EvilHumphrey/LegendCTL/2.0.2/EvilHumphrey.LegendCTL.locale.en-US.yaml
-   manifests/e/EvilHumphrey/LegendCTL/2.0.2/EvilHumphrey.LegendCTL.yaml
+   manifests/e/EvilHumphrey/LegendCTL/2.0.3/EvilHumphrey.LegendCTL.installer.yaml
+   manifests/e/EvilHumphrey/LegendCTL/2.0.3/EvilHumphrey.LegendCTL.locale.en-US.yaml
+   manifests/e/EvilHumphrey/LegendCTL/2.0.3/EvilHumphrey.LegendCTL.yaml
    ```
-   (Copy the three `.yaml` files from this repo's `packaging/winget/2.0.2/`.)
+   (Copy the three `.yaml` files from this repo's `packaging/winget/2.0.3/`.)
 3. **Re-validate** in place, and optionally test-install in Windows Sandbox:
    ```powershell
-   winget validate --manifest manifests/e/EvilHumphrey/LegendCTL/2.0.2
+   winget validate --manifest manifests/e/EvilHumphrey/LegendCTL/2.0.3
    # optional, requires Windows Sandbox enabled — installs the package for real:
-   winget install --manifest manifests/e/EvilHumphrey/LegendCTL/2.0.2
+   winget install --manifest manifests/e/EvilHumphrey/LegendCTL/2.0.3
    ```
 4. **Commit and push to your fork**, then open a PR against
    `microsoft/winget-pkgs:master`:
    ```powershell
-   git add manifests/e/EvilHumphrey/LegendCTL/2.0.2
-   git commit -m "New package: EvilHumphrey.LegendCTL version 2.0.2"
-   git push -u origin legendctl-2.0.2
+   git add manifests/e/EvilHumphrey/LegendCTL/2.0.3
+   git commit -m "New package: EvilHumphrey.LegendCTL version 2.0.3"
+   git push -u origin legendctl-2.0.3
    ```
    Open the PR on GitHub. The winget-pkgs CI runs schema validation **and** an
    automated Windows Sandbox install/uninstall smoke test; a moderator merges
