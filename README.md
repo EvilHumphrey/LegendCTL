@@ -29,15 +29,37 @@ configures the controller's supported settings — it is not a firmware updater.
 > **First launch shows a SmartScreen prompt — that's expected.** Because the
 > build is currently unsigned, Windows may show "Windows protected your PC" the
 > first time you run it. That's normal for any new unsigned app, not a malware
-> warning — choose **More info → Run anyway**. You can
-> [verify the download's SHA-256](#distribution-safety) first if you like.
+> warning — choose **More info → Run anyway**. You can verify the
+> [download's SHA-256](docs/install-windows-and-smartscreen.md) first if you like.
 
 **New here, or searching for something specific?** →
 [Official ZD app vs LegendCTL](docs/official-zd-app-vs-legendctl.md) ·
 [Deadzone & circularity tuning](docs/zd-ultimate-legend-deadzone-circularity.md) ·
 [Calibration after a stick-module swap](docs/zd-ultimate-legend-stick-swap-calibration.md) ·
-[SmartScreen & verifying your download](docs/legendctl-smartscreen-sha256-verification.md) ·
+[SmartScreen & verifying your download](docs/install-windows-and-smartscreen.md) ·
 [FAQ](docs/FAQ.md)
+
+## Install
+
+- **Portable ZIP (recommended):** download `ZDUltimateLegend-v<version>-windows.zip`
+  from the [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest),
+  unzip it anywhere, and run `ZD Ultimate Legend.exe`.
+- **Setup.exe:** download `ZDUltimateLegend-v<version>-Setup.exe` from the
+  [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest) if
+  you want Start Menu and uninstall integration.
+- **winget:** once the manifest is accepted into the Windows Package Manager
+  community repo:
+
+  ```powershell
+  winget install EvilHumphrey.LegendCTL
+  ```
+
+- **Scoop:** once the bucket is published, add the LegendCTL bucket and run
+  `scoop install legendctl`.
+
+For the first-run SmartScreen warning, and for checking the published SHA-256
+before you run anything, see the
+[Windows install guide](docs/install-windows-and-smartscreen.md).
 
 ## Why LegendCTL?
 
@@ -74,15 +96,17 @@ That's the whole pitch: a small, auditable, no-surprises tool for your controlle
 — open where closed software is opaque, local by design, and honest about what it
 can and can't do.
 
-## Demo
+## Demo and screenshots
 
 ![LegendCTL Live Verify: sweeping both analog sticks while each stick's circularity readout traces its real XInput output and settles to a percentage.](docs/media/legendctl-liveverify-demo.gif)
 
 **Live Verify** reads both sticks straight from XInput. Start a stick test and sweep — each stick's trace fills its circle, sweep-coverage climbs, and the per-stick circularity settles to a percentage, so you can see how round your sticks really are and catch a flat spot or off-center rest. Everything runs locally; no network, no telemetry.
 
-## Status
+<!-- TODO(operator): Add current v2.1.0 screenshots under assets/screenshots/ and reference them here. -->
 
-v2.0.3 — feature-complete for normal use.
+## Features
+
+v2.1.0 — feature-complete for normal use.
 
 Controller settings (all written as standard HID feature reports; a normal Apply
 reports each field's write outcome and refreshes the on-screen state from the
@@ -91,13 +115,16 @@ verify the written value — the write-only back-paddle bindings are reported as
 sent, not verified):
 
 - USB polling rate (250–8000 Hz; 8K requires firmware v1.18+)
-- 16×16 button binding matrix
-- Sticks: deadzone (4 zones), sensitivity curves (3-anchor, plus 8-point curves on
+- 16×16 button binding matrix, with a Current Bindings display read from the
+  controller
+- Sticks: deadzones (4 zones), sensitivity curves (3-anchor, plus 8-point curves on
   firmware v1.24+), axis inversion, joystick step-size
 - Triggers: range, mode, vibration mode
 - Lighting: per-zone (Home / Left / Right) — on/off, mode, brightness, RGB
 - Vibration: per-motor + trigger vibration mode
-- Back-paddle bindings: 1-step controller-button-only (8 paddles: M1–M4, LM, RM, LK, RK)
+- Back-paddle bindings: 1-step controller-button-only (8 paddles: M1–M4, LM, RM, LK, RK);
+  existing on-controller paddle mappings are not readable over USB, so LegendCTL
+  says plainly when a value is "Not set in LegendCTL" instead of inventing one
 - Wrapper profiles: save / apply / delete with full controller state
 
 Controller lifecycle & trust surfaces:
@@ -106,6 +133,9 @@ Controller lifecycle & trust surfaces:
   restore, retention pruning
 - Device vs Profile: read-only three-way diff (live device / saved profile /
   last-applied) with per-field drift highlighting
+- Live controller visualizer: controls light as you press them, but it is honest
+  that the live view reflects XInput output — not the physical source of a
+  remapped input
 - Health Report (guided multi-step measurement workflow, exportable) and Readiness
   Check (20-second pre-match verdict)
 - Wear Ledger: append-only audit log of wrapper events
@@ -152,7 +182,7 @@ how releases are (will be) signed.
 Two ways to get it — the **portable ZIP is the simplest** and needs no admin
 rights; the installer adds Start-Menu/uninstaller integration if you prefer it.
 Both ship the exact same wrapper executable. (In the download names below,
-`<version>` is just the release number — e.g. `2.0.3` in the current release.)
+`<version>` is just the release number — e.g. `2.1.0` in the current release.)
 
 > **A note on names.** The project is named **LegendCTL**, but the application
 > window, Start Menu entry, and executable still carry the legacy name *ZD
@@ -218,8 +248,8 @@ so a couple of things are expected and normal:
    **On first launch,** because the build is currently unsigned, Windows
    SmartScreen may show "Windows protected your PC." That's normal for any new
    unsigned app and not a sign of malware — click **More info → Run anyway**
-   (you can [verify the download's SHA-256](#distribution-safety) first if you
-   like).
+   (you can verify the
+   [download's SHA-256](docs/install-windows-and-smartscreen.md) first if you like).
 3. The app auto-reads current controller state on connect.
 4. Adjust settings via the sidebar tabs; click Apply per-tab or in the footer to write.
 
