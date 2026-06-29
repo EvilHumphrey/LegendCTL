@@ -89,4 +89,4 @@ repair hardware or modify firmware.
 - [Calibration after a stick-module swap](zd-ultimate-legend-stick-swap-calibration.md)
 - [Official ZD app vs LegendCTL: which tool to use](official-zd-app-vs-legendctl.md)
 - [FAQ](FAQ.md) — "does it have macros/turbo?", "can it fix drift?"
-- [SmartScreen & SHA-256 verification](legendctl-smartscreen-sha256-verification.md) — first-install trust checks
+- [SmartScreen & SHA-256 verification](install-windows-and-smartscreen.md) — first-install trust checks

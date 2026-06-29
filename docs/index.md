@@ -18,7 +18,7 @@ has no telemetry, drivers, macros, or background service.
 - [**Official ZD app vs LegendCTL** — which tool to use](official-zd-app-vs-legendctl.md)
 - [**Deadzone & circularity tuning**](zd-ultimate-legend-deadzone-circularity.md)
 - [**Calibration after a stick-module swap**](zd-ultimate-legend-stick-swap-calibration.md)
-- [**SmartScreen, unsigned builds & verifying your download**](legendctl-smartscreen-sha256-verification.md)
+- [**SmartScreen, unsigned builds & verifying your download**](install-windows-and-smartscreen.md)
 
 ## Reference
 

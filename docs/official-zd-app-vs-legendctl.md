@@ -98,7 +98,7 @@ See the [FAQ](FAQ.md) and, if something's off on your unit, please file a
 
 - [Deadzone & circularity tuning guide](zd-ultimate-legend-deadzone-circularity.md) — reduce unwanted input; read the live circularity view
 - [Calibration after a stick-module swap](zd-ultimate-legend-stick-swap-calibration.md) — what to test and adjust after hardware changes
-- [SmartScreen, unsigned builds & verifying the SHA-256](legendctl-smartscreen-sha256-verification.md) — install-trust checks
+- [SmartScreen, unsigned builds & verifying the SHA-256](install-windows-and-smartscreen.md) — install-trust checks
 - [README](../README.md) — overview, download, Quick Start · [FAQ](FAQ.md) · [Verifying no network access](verifying-no-network.md)
 
 ---
