@@ -54,6 +54,7 @@ off-render-thread read-back verify — none of that lives here.
 from __future__ import annotations
 
 import logging
+import math
 
 import dearpygui.dearpygui as dpg
 
@@ -172,6 +173,53 @@ _BUTTON_CHIP_ORDER = (
     ControllerButtonTarget.START,
 )
 
+# Code-drawn front-face controller model (Phase 1 live visualizer).
+_FACE_DIAGRAM_W = 360
+_FACE_DIAGRAM_H = 260
+_FACE_BUTTON_R = 10
+_FACE_STICK_R = 23
+_FACE_STICK_DOT_R = 5
+_FACE_STICK_DOT_TRAVEL = 14
+_FACE_LABEL_SIZE = 13
+_FACE_TRIGGER_LIGHT_THRESHOLD = 0.06
+_FACE_STICK_LIGHT_DEADZONE = 0.18
+
+_FACE_BUTTON_POS = {
+    ControllerButtonTarget.Y: (282, 88),
+    ControllerButtonTarget.X: (258, 114),
+    ControllerButtonTarget.B: (306, 114),
+    ControllerButtonTarget.A: (282, 140),
+    ControllerButtonTarget.LB: (66, 42),
+    ControllerButtonTarget.RB: (294, 42),
+    ControllerButtonTarget.BACK: (154, 122),
+    ControllerButtonTarget.START: (206, 122),
+    ControllerButtonTarget.LS: (112, 92),
+    ControllerButtonTarget.RS: (244, 162),
+    ControllerButtonTarget.UP: (92, 138),
+    ControllerButtonTarget.DOWN: (92, 174),
+    ControllerButtonTarget.LEFT: (74, 156),
+    ControllerButtonTarget.RIGHT: (110, 156),
+}
+
+_FACE_TRIGGER_RECTS = {
+    ControllerButtonTarget.LT: ((34, 12), (126, 30)),
+    ControllerButtonTarget.RT: ((234, 12), (326, 30)),
+}
+
+_FACE_STICK_CENTERS = {
+    "left": _FACE_BUTTON_POS[ControllerButtonTarget.LS],
+    "right": _FACE_BUTTON_POS[ControllerButtonTarget.RS],
+}
+
+_FACE_LABEL_POS_OVERRIDES = {
+    ControllerButtonTarget.UP: (92, 118),
+    ControllerButtonTarget.DOWN: (92, 194),
+    ControllerButtonTarget.LEFT: (48, 156),
+    ControllerButtonTarget.RIGHT: (136, 156),
+    ControllerButtonTarget.BACK: (150, 145),
+    ControllerButtonTarget.START: (210, 145),
+}
+
 
 class _LiveVerifyState:
     """Per-build state for the live-verify screen.
@@ -248,6 +296,18 @@ def _stick_block_tag(side: str) -> str:
 
 def _button_chip_tag(target: ControllerButtonTarget) -> str:
     return f"diag_live_verify_btn_{target.name}"
+
+
+def _face_hotspot_tag(target: ControllerButtonTarget) -> str:
+    return f"diagram_face_{target.name}"
+
+
+def _face_label_tag(target: ControllerButtonTarget) -> str:
+    return f"diagram_face_label_{target.name}"
+
+
+def _face_stick_dot_tag(side: str) -> str:
+    return f"diagram_face_{side}_stick_dot"
 
 
 def _deadzone_slider_tag(side: str, kind: str) -> str:
@@ -590,9 +650,13 @@ def _build_buttons_triggers_card(shell) -> None:
     with _fit_card():
         section_title(t("diagnostics.live_verify.buttons_triggers_title"))
         dpg.add_spacer(height=4)
-        _build_button_chip_row(shell)
-        dpg.add_spacer(height=8)
-        _build_trigger_bars(shell)
+        with dpg.group(horizontal=True):
+            with dpg.group():
+                _build_button_chip_row(shell)
+                dpg.add_spacer(height=8)
+                _build_trigger_bars(shell)
+            dpg.add_spacer(width=24)
+            _render_face_diagram(shell)
 
 
 def _build_button_chip_row(shell) -> None:
@@ -617,6 +681,119 @@ def _build_trigger_bars(shell) -> None:
     with dpg.group(horizontal=True):
         dpg.add_text(t("diagnostics.live_verify.triggers.right"), color=shell.COLORS["muted"])
         dpg.add_progress_bar(default_value=0.0, width=240, overlay="0", tag=TRIGGER_RIGHT_BAR_TAG)
+
+
+def _render_face_diagram(shell) -> None:
+    """Code-drawn FRONT-face live model for XInput output state.
+
+    The model deliberately lights XInput outputs only: physical paddle/source
+    identity is not visible through XInput, so the always-on note below states
+    the honest boundary. The live refresh pre-creates every draw item here and
+    only recolors / moves items in place.
+    """
+
+    dpg.add_text(t("diagnostics.live_verify.face_diagram.title"), color=shell.COLORS["muted"])
+    with dpg.drawlist(
+        width=_FACE_DIAGRAM_W,
+        height=_FACE_DIAGRAM_H,
+        tag="diagram_face_drawlist",
+    ):
+        body = shell.COLORS["panel_alt"]
+        muted = shell.COLORS["muted"]
+        text = shell.COLORS["text"]
+        dpg.draw_rectangle((34, 46), (326, 214), color=body, thickness=2, rounding=36)
+        dpg.draw_line((72, 198), (48, 246), color=body, thickness=2)
+        dpg.draw_line((288, 198), (312, 246), color=body, thickness=2)
+        dpg.draw_circle((112, 92), 48, color=body, thickness=2)
+        dpg.draw_circle((244, 162), 48, color=body, thickness=2)
+
+        for target, (p1, p2) in _FACE_TRIGGER_RECTS.items():
+            dpg.draw_rectangle(
+                p1,
+                p2,
+                color=muted,
+                fill=_with_alpha(muted, 28),
+                thickness=2,
+                rounding=6,
+                tag=_face_hotspot_tag(target),
+            )
+            _draw_centered_label(
+                target.name,
+                ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2),
+                text,
+            )
+
+        dpg.draw_circle((180, 122), 8, color=muted, thickness=1)
+        _draw_centered_label(
+            t("diagnostics.live_verify.face_diagram.home"),
+            (180, 109),
+            text,
+            size=11,
+        )
+        _draw_centered_label("M3", (136, 75), muted, size=11)
+        _draw_centered_label("M4", (218, 182), muted, size=11)
+
+        for target, (cx, cy) in _FACE_BUTTON_POS.items():
+            radius = (
+                _FACE_STICK_R
+                if target in (ControllerButtonTarget.LS, ControllerButtonTarget.RS)
+                else _FACE_BUTTON_R
+            )
+            dpg.draw_circle(
+                (cx, cy),
+                radius,
+                color=muted,
+                fill=(
+                    _with_alpha(muted, 34)
+                    if radius == _FACE_BUTTON_R
+                    else (0, 0, 0, 0)
+                ),
+                thickness=2.0,
+                tag=_face_hotspot_tag(target),
+            )
+            _draw_centered_label(
+                target.name,
+                _FACE_LABEL_POS_OVERRIDES.get(target, (cx, cy - radius - 13)),
+                text,
+                tag=_face_label_tag(target),
+            )
+
+        for side, (cx, cy) in _FACE_STICK_CENTERS.items():
+            dpg.draw_circle(
+                (cx, cy),
+                _FACE_STICK_DOT_R,
+                color=muted,
+                fill=muted,
+                tag=_face_stick_dot_tag(side),
+            )
+
+    dpg.add_text(
+        t("diagnostics.live_verify.face_diagram.note"),
+        color=shell.COLORS["muted"],
+        wrap=_FACE_DIAGRAM_W,
+    )
+
+
+def _draw_centered_label(
+    label: str,
+    center: tuple[float, float],
+    color,
+    *,
+    size: int = _FACE_LABEL_SIZE,
+    tag=0,
+) -> None:
+    x, y = center
+    dpg.draw_text(
+        (x - len(label) * size * 0.24, y - size * 0.5),
+        label,
+        color=color,
+        size=size,
+        tag=tag,
+    )
+
+
+def _with_alpha(color, alpha: int):
+    return (color[0], color[1], color[2], alpha)
 
 
 def _device_write_supported(shell) -> bool:
@@ -902,6 +1079,7 @@ def _refresh_live_verify(shell, state: "_LiveVerifyState") -> None:
     _refresh_stick(shell, state, "left", lx, ly)
     _refresh_stick(shell, state, "right", rx, ry)
     _refresh_buttons(shell, snap)
+    _refresh_live_face_highlights(shell, snap)
     _refresh_triggers(shell, snap)
     _refresh_deadzone_status(shell)
 
@@ -960,6 +1138,62 @@ def _refresh_buttons(shell, snap) -> None:
             dpg.configure_item(
                 tag,
                 color=shell.COLORS["good"] if pressed else shell.COLORS["muted"],
+            )
+
+
+def _refresh_live_face_highlights(shell, snap) -> None:
+    for target in _BUTTON_CHIP_ORDER:
+        tag = _face_hotspot_tag(target)
+        if dpg.does_item_exist(tag):
+            pressed = target in snap.buttons
+            color = shell.COLORS["good"] if pressed else shell.COLORS["muted"]
+            dpg.configure_item(tag, color=color)
+
+    for value, target in (
+        (snap.left_trigger, ControllerButtonTarget.LT),
+        (snap.right_trigger, ControllerButtonTarget.RT),
+    ):
+        tag = _face_hotspot_tag(target)
+        if dpg.does_item_exist(tag):
+            intensity = max(0.0, min(1.0, value / 255.0))
+            lit = intensity > _FACE_TRIGGER_LIGHT_THRESHOLD
+            color = shell.COLORS["good"] if lit else shell.COLORS["muted"]
+            if lit:
+                scaled = (intensity - _FACE_TRIGGER_LIGHT_THRESHOLD) / (
+                    1.0 - _FACE_TRIGGER_LIGHT_THRESHOLD
+                )
+                fill_alpha = int(28 + 190 * max(0.0, min(1.0, scaled)))
+            else:
+                fill_alpha = 28
+            dpg.configure_item(
+                tag,
+                color=color,
+                fill=_with_alpha(color, fill_alpha),
+            )
+
+    for side, (x, y) in (
+        ("left", snap.left_stick_normalized),
+        ("right", snap.right_stick_normalized),
+    ):
+        tag = _face_stick_dot_tag(side)
+        if dpg.does_item_exist(tag):
+            cx, cy = _FACE_STICK_CENTERS[side]
+            mag = math.hypot(x, y)
+            lit = mag > _FACE_STICK_LIGHT_DEADZONE
+            color = shell.COLORS["good"] if lit else shell.COLORS["muted"]
+            center = (
+                [
+                    cx + x * _FACE_STICK_DOT_TRAVEL,
+                    cy - y * _FACE_STICK_DOT_TRAVEL,
+                ]
+                if lit
+                else [cx, cy]
+            )
+            dpg.configure_item(
+                tag,
+                color=color,
+                fill=color,
+                center=center,
             )
 
 

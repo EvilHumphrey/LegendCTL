@@ -150,7 +150,11 @@ def _coverage() -> RestorePointCoverage:
     )
 
 
-def _rp(id: str = "rp_20260524_190355_9b42de", title: Optional[str] = None) -> RestorePoint:
+def _rp(
+    id: str = "rp_20260524_190355_9b42de",
+    title: Optional[str] = None,
+    trigger_type: str = "before_safe_import_apply",
+) -> RestorePoint:
     return RestorePoint(
         schema_version=SCHEMA_VERSION,
         kind=KIND,
@@ -160,7 +164,7 @@ def _rp(id: str = "rp_20260524_190355_9b42de", title: Optional[str] = None) -> R
         app_build_commit=None,
         title=title or "Before Safe Import — 2026-05-24 19:03",
         trigger=RestorePointTrigger(
-            type="before_safe_import_apply",
+            type=trigger_type,
             source_label="Safe Import",
             reason="Created before applying imported profile to controller",
         ),
@@ -456,6 +460,140 @@ class ListViewTests(unittest.TestCase):
         self.assertIn("Captured 8 of 13", all_text)
         self.assertIn("Never restored", all_text)
 
+    def test_list_hides_routine_auto_captures_by_default_and_shows_count(self) -> None:
+        routine_1 = _rp(
+            id="rp_routine_1",
+            title="Routine connect 1",
+            trigger_type="first_readable_connect",
+        )
+        manual = _rp(
+            id="rp_manual",
+            title="Manual checkpoint",
+            trigger_type="manual",
+        )
+        routine_2 = _rp(
+            id="rp_routine_2",
+            title="Routine connect 2",
+            trigger_type="first_readable_connect",
+        )
+        service = _FakeService(valid=[routine_1, manual, routine_2])
+        shell = _shell_with(service)
+        with _PatchedScreen(shell) as ps:
+            ps.build()
+        all_text = " ".join(ps.text_strings())
+        self.assertIn("Manual checkpoint", all_text)
+        self.assertNotIn("Routine connect 1", all_text)
+        self.assertNotIn("Routine connect 2", all_text)
+        self.assertIn("2 routine auto-captures hidden", all_text)
+        self.assertIn(screen.TAG_LIST_ROUTINE_TOGGLE, ps.button_tags())
+        self.assertIn("Show all", [kw.get("label") for kw in ps.buttons])
+        self.assertEqual(
+            len([call for call in ps.calls if call[0] == "table_row"]),
+            1,
+        )
+
+    def test_list_keeps_meaningful_restore_points_visible_when_routine_hidden(self) -> None:
+        meaningful = [
+            _rp(id="rp_manual", title="Manual RP", trigger_type="manual"),
+            _rp(
+                id="rp_before_restore",
+                title="Before restore RP",
+                trigger_type="before_restore",
+            ),
+            _rp(
+                id="rp_safe_import",
+                title="Before Safe Import RP",
+                trigger_type="before_safe_import_apply",
+            ),
+            _rp(
+                id="rp_profile_apply",
+                title="Before profile apply RP",
+                trigger_type="before_profile_apply_with_device_settings",
+            ),
+            _rp(
+                id="rp_manual_write",
+                title="Before manual write RP",
+                trigger_type="before_manual_device_setting_write",
+            ),
+        ]
+        routine = _rp(
+            id="rp_routine",
+            title="Routine connect",
+            trigger_type="first_readable_connect",
+        )
+        service = _FakeService(valid=[routine, *meaningful])
+        shell = _shell_with(service)
+        with _PatchedScreen(shell) as ps:
+            ps.build()
+        all_text = " ".join(ps.text_strings())
+        for rp in meaningful:
+            self.assertIn(rp.title, all_text)
+        self.assertNotIn("Routine connect", all_text)
+        self.assertEqual(
+            len([call for call in ps.calls if call[0] == "table_row"]),
+            len(meaningful),
+        )
+
+    def test_routine_toggle_reveals_all_restore_points(self) -> None:
+        routine_1 = _rp(
+            id="rp_routine_1",
+            title="Routine connect 1",
+            trigger_type="first_readable_connect",
+        )
+        manual = _rp(
+            id="rp_manual",
+            title="Manual checkpoint",
+            trigger_type="manual",
+        )
+        routine_2 = _rp(
+            id="rp_routine_2",
+            title="Routine connect 2",
+            trigger_type="first_readable_connect",
+        )
+        service = _FakeService(valid=[routine_1, manual, routine_2])
+        shell = _shell_with(service)
+        with _PatchedScreen(shell) as ps:
+            ps.build()
+            toggle = next(
+                kw for kw in ps.buttons
+                if kw.get("tag") == screen.TAG_LIST_ROUTINE_TOGGLE
+            )
+            toggle["callback"](42, None, None)
+        state = shell.restore_points_screen_state
+        self.assertFalse(state.hide_routine_captures)
+        shell.rebuild_current_screen.assert_called_once()
+
+        with _PatchedScreen(shell) as ps:
+            ps.build()
+        all_text = " ".join(ps.text_strings())
+        self.assertIn("Routine connect 1", all_text)
+        self.assertIn("Routine connect 2", all_text)
+        self.assertIn("Manual checkpoint", all_text)
+        self.assertIn("Hide routine", [kw.get("label") for kw in ps.buttons])
+        self.assertEqual(
+            len([call for call in ps.calls if call[0] == "table_row"]),
+            3,
+        )
+
+    def test_all_routine_restore_points_show_count_not_empty_state(self) -> None:
+        service = _FakeService(
+            valid=[
+                _rp(
+                    id=f"rp_routine_{i}",
+                    title=f"Routine connect {i}",
+                    trigger_type="first_readable_connect",
+                )
+                for i in range(3)
+            ]
+        )
+        shell = _shell_with(service)
+        with _PatchedScreen(shell) as ps:
+            ps.build()
+        all_text = " ".join(ps.text_strings())
+        self.assertIn("3 routine auto-captures hidden", all_text)
+        self.assertNotIn("No restore points yet", all_text)
+        self.assertEqual(len(ps.tables), 0)
+
     def test_refresh_button_rebuilds_screen(self) -> None:
         service = _FakeService(valid=[])
         shell = _shell_with(service)
@@ -644,8 +782,8 @@ class ConfirmViewTests(unittest.TestCase):
                 RestoreFieldDelta(
                     field_name="polling_rate",
                     will_change=True,
-                    current_value="PollingRate.HZ_8000",
-                    target_value="PollingRate.HZ_1000",
+                    current_value="8000 Hz",
+                    target_value="1000 Hz",
                 ),
             ),
             fields_changing=2,
@@ -660,7 +798,7 @@ class ConfirmViewTests(unittest.TestCase):
             ps.__exit__(None, None, None)
         self.assertIn("What this restore will change", all_text)
         self.assertIn("step_size: 75 → 128", all_text)
-        self.assertIn("polling_rate: PollingRate.HZ_8000 → PollingRate.HZ_1000", all_text)
+        self.assertIn("polling_rate: 8000 Hz → 1000 Hz", all_text)
 
     def test_confirm_preview_omits_unchanged_fields(self) -> None:
         """The preview lists only changing fields — unchanged ones are
@@ -680,8 +818,8 @@ class ConfirmViewTests(unittest.TestCase):
                 RestoreFieldDelta(
                     field_name="polling_rate",
                     will_change=False,
-                    current_value="PollingRate.HZ_1000",
-                    target_value="PollingRate.HZ_1000",
+                    current_value="1000 Hz",
+                    target_value="1000 Hz",
                 ),
             ),
             fields_changing=1,
@@ -712,7 +850,7 @@ class ConfirmViewTests(unittest.TestCase):
                     field_name="polling_rate",
                     will_change=False,
                     current_value=None,
-                    target_value="PollingRate.HZ_1000",
+                    target_value="1000 Hz",
                     note=(
                         "device read failed: TimeoutError: "
                         "HID read timed out after 967ms"
@@ -751,8 +889,8 @@ class ConfirmViewTests(unittest.TestCase):
                 RestoreFieldDelta(
                     field_name="polling_rate",
                     will_change=False,
-                    current_value="PollingRate.HZ_1000",
-                    target_value="PollingRate.HZ_1000",
+                    current_value="1000 Hz",
+                    target_value="1000 Hz",
                 ),
             ),
             fields_changing=0,
@@ -950,7 +1088,7 @@ class ResultViewTests(unittest.TestCase):
         the compact rendering produced by
         :mod:`zd_app.services.restore_field_formatting` rather than the
         noisy ``str(dataclass)`` form. The screen surfaces those strings
-        verbatim, so the user reads "L=10 R=20 TL=30 TR=40 (NATIVE)"
+        verbatim, so the user reads "Grips 10/20; Triggers 30/40; Native"
         instead of "VibrationSettings(left_grip_strength=10, ...)".
 
         Pins the contract by passing the compact strings through
@@ -972,8 +1110,8 @@ class ResultViewTests(unittest.TestCase):
                     write_error=None,
                     verify_matched=False,
                     verify_note="read-back value differs from expected",
-                    expected_value="L=10 R=20 TL=30 TR=40 (NATIVE)",
-                    observed_value="L=99 R=99 TL=99 TR=99 (STEREO_RESONANCE)",
+                    expected_value="Grips 10/20; Triggers 30/40; Native",
+                    observed_value="Grips 99/99; Triggers 99/99; Stereo resonance",
                 ),
             ),
             before_restore_point_id=None,
@@ -990,8 +1128,8 @@ class ResultViewTests(unittest.TestCase):
             ps.build()
         all_text = " ".join(ps.text_strings())
         self.assertIn("vibration", all_text)
-        self.assertIn("L=10 R=20 TL=30 TR=40 (NATIVE)", all_text)
-        self.assertIn("L=99 R=99 TL=99 TR=99 (STEREO_RESONANCE)", all_text)
+        self.assertIn("Grips 10/20; Triggers 30/40; Native", all_text)
+        self.assertIn("Grips 99/99; Triggers 99/99; Stereo resonance", all_text)
         # Critical: the class-name prefix must NOT appear anywhere on the
         # result page — that's the whole motivation for the compact helper.
         self.assertNotIn("VibrationSettings(", all_text)

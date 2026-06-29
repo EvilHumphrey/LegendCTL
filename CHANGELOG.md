@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.1.0 — 2026-06-28
+
+Visibility-and-honesty release: the app now shows the controller's real button bindings and
+lights up controls live, while saying plainly where it can't read the device. No new settings
+are written by the wrapper (the new surfaces are read-only displays); same test discipline
+(full suite green on Python 3.12 / DearPyGui 2.3.1).
+
+- **See your real button bindings.** The Buttons tab reads and displays the controller's
+  current per-button mapping and refreshes in place after an in-app remap.
+- **Honest paddle + profile display.** Unreadable back paddles show "Not set in LegendCTL"
+  (never a false "Unbound") with a note on what can and can't be read; on-device profile slots
+  are labeled "Profile 1–4" since their names aren't readable over USB.
+- **Back-paddle map.** A code-drawn diagram shows where each paddle (M1, M2, LM, RM, LK, RK)
+  sits, lighting the selected paddle's spot; drawn from the official manual layout and labeled
+  as a selection guide, not a device read.
+- **Live controller visualizer.** Live Verify shows a code-drawn controller that lights up as
+  you press buttons/triggers and tracks the sticks live, with an honest note that it reflects
+  XInput output, not which physical control was pressed.
+- **Clearer "Profile: Not verified" status.** A tooltip explains it's an informational
+  active-slot indicator (settings unaffected) and how to confirm it.
+- **Readable Device vs Profile.** Human labels ("8000 Hz", "Not inverted", "Linear") replace
+  internal values, and the comparison defaults to showing only what changed.
+- **Tidier Restore Points.** Routine per-session auto-captures collapse behind a count with a
+  one-click "Show all"; nothing is deleted and every restore point stays restorable.
+- **Honesty/reliability fixes.** The display never invents a button name for a mapping kind
+  LegendCTL doesn't model.
+
 ## v2.0.3 — 2026-06-27
 
 LegendCTL rebrand plus a multi-slot live tester and a lighting-apply reliability fix. No new

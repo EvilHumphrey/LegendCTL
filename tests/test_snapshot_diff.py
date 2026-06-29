@@ -77,6 +77,12 @@ def _rows_by_name(diff) -> dict:
     return {r.field_name: r for r in diff.fields}
 
 
+def _anchor_pair_count(rendered: str | None) -> int:
+    if rendered is None:
+        return 0
+    return sum(1 for token in rendered.split() if "/" in token)
+
+
 _SENS_3 = (
     SensitivityAnchor(0, 0),
     SensitivityAnchor(50, 50),
@@ -440,8 +446,8 @@ class MixedEncodingFoldTests(unittest.TestCase):
         self.assertEqual(row.status, STATUS_ENCODING_DIFFERS)
         self.assertIsNotNone(row.current_value)
         self.assertIsNotNone(row.selected_value)
-        self.assertEqual(row.current_value.count("("), 8)  # the 8-point curve
-        self.assertEqual(row.selected_value.count("("), 3)  # the 3-point host
+        self.assertEqual(_anchor_pair_count(row.current_value), 8)  # the 8-point curve
+        self.assertEqual(row.selected_value, "Linear")  # the 3-point host
         self.assertIn("not directly comparable", row.note)
         # Informational, never a change: the always-present motion row + this.
         self.assertEqual(diff.n_changed, 0)
@@ -461,8 +467,8 @@ class MixedEncodingFoldTests(unittest.TestCase):
         self.assertNotIn("sensitivity_left", rows)
         row = rows["sensitivity_left_8point"]
         self.assertEqual(row.status, STATUS_ENCODING_DIFFERS)
-        self.assertEqual(row.current_value.count("("), 3)
-        self.assertEqual(row.selected_value.count("("), 8)
+        self.assertEqual(row.current_value, "Linear")
+        self.assertEqual(_anchor_pair_count(row.selected_value), 8)
         self.assertIn("not directly comparable", row.note)
         self.assertEqual(diff.n_changed, 0)
 
@@ -936,7 +942,7 @@ class LastAppliedSensitivityFoldTests(unittest.TestCase):
         self.assertNotIn("sensitivity_left", rows)  # host stays folded
         row = rows["sensitivity_left_8point"]
         self.assertEqual(row.drift, DRIFT_DRIFTED)
-        self.assertEqual(row.last_applied_value.count("("), 8)
+        self.assertEqual(_anchor_pair_count(row.last_applied_value), 8)
 
     def test_record_rider_matches_folded_rider_row(self) -> None:
         diff = compute_snapshot_diff(
@@ -963,7 +969,7 @@ class LastAppliedSensitivityFoldTests(unittest.TestCase):
         self.assertIn("sensitivity_left", rows)
         self.assertNotIn("sensitivity_left_8point", rows)
         row = rows["sensitivity_left"]
-        self.assertEqual(row.last_applied_value.count("("), 8)
+        self.assertEqual(_anchor_pair_count(row.last_applied_value), 8)
         self.assertIsNone(row.drift)
 
     def test_record_3point_under_folded_rider_row_is_cross_encoding(self) -> None:
@@ -976,7 +982,7 @@ class LastAppliedSensitivityFoldTests(unittest.TestCase):
             last_applied=_snap(sensitivity_left=_SENS_3),
         )
         row = _rows_by_name(diff)["sensitivity_left_8point"]
-        self.assertEqual(row.last_applied_value.count("("), 3)
+        self.assertEqual(row.last_applied_value, "Linear")
         self.assertIsNone(row.drift)
 
     def test_record_3point_on_3point_host_row_compares(self) -> None:

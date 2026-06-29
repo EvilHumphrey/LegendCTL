@@ -149,6 +149,13 @@ def _profile_card(shell) -> None:
                 _localized_active_config_label(state),
                 value_tag="home_profile_active",
             )
+            # The active value is the controller's on-device profile SLOT by
+            # number — the controller doesn't expose a custom name, so the tooltip
+            # explains why only "Profile N" shows (honest abstention, never a
+            # fabricated/blank name). A tooltip is zero layout cost; the card
+            # height is pinned to stay even with the Connection card.
+            with dpg.tooltip("home_profile_active"):
+                dpg.add_text(t("home.profile.device_slot_tooltip"), wrap=320)
             metric(
                 t("home.profile.draft"),
                 _localized_draft_label(shell.profile_service.current_draft),

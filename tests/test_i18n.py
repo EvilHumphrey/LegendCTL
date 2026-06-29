@@ -72,6 +72,19 @@ class I18nTests(unittest.TestCase):
                 zh_keys = {key for key in zh if key.startswith(prefix)}
                 self.assertEqual(en_keys, zh_keys)
 
+    def test_not_verified_profile_tooltip_exists_in_both_locales(self) -> None:
+        locale_dir = Path("zd_app/i18n/locales")
+        en = json.loads((locale_dir / "en.json").read_text(encoding="utf-8"))
+        zh = json.loads((locale_dir / "zh-CN.json").read_text(encoding="utf-8"))
+        key = "status.config.not_verified_tooltip"
+
+        self.assertIn(key, en)
+        self.assertIn(key, zh)
+        self.assertIn("official app's view can lag", en[key])
+        self.assertIn("settings work normally", en[key])
+        self.assertIn("Profiles tab", en[key])
+        self.assertIn("协议确认", zh[key])
+
     def test_polling_rate_non_commit_key_present_and_interpolates(self) -> None:
         # The 8000 Hz firmware-capability non-commit message must exist in BOTH
         # locales, carry the {kept} placeholder, and interpolate the kept rate.

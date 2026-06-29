@@ -186,6 +186,26 @@ def _last_configure(fake, tag):
     return None
 
 
+def _collect_labels(root) -> list[str]:
+    labels: list[str] = []
+    stack = [root]
+    while stack:
+        item = stack.pop()
+        label = dpg.get_item_label(item)
+        value = (
+            dpg.get_value(item)
+            if dpg.get_item_type(item) == "mvAppItemType::mvText"
+            else None
+        )
+        if label:
+            labels.append(str(label))
+        if value:
+            labels.append(str(value))
+        for slot in range(4):
+            stack.extend(dpg.get_item_children(item, slot) or [])
+    return labels
+
+
 class _TimeoutReadDeadzoneService(_DeadzoneService):
     """Deadzone stub whose read-back times out (the item-J smoke condition)."""
 
@@ -292,6 +312,52 @@ class LiveVerifyScreenBuildTests(unittest.TestCase):
                     live_verify._deadzone_slider_tag(side, kind)
                 )
                 self.assertFalse(slider_cfg.get("label"))
+        finally:
+            dpg.destroy_context()
+
+    def test_face_diagram_renders_hotspot_tags_for_every_live_control(self) -> None:
+        dpg.create_context()
+        try:
+            self._build_full_screen(_live_snap())
+            self.assertTrue(dpg.does_item_exist("diagram_face_drawlist"))
+            for target in live_verify._BUTTON_CHIP_ORDER:
+                with self.subTest(target=target.name):
+                    self.assertTrue(
+                        dpg.does_item_exist(live_verify._face_hotspot_tag(target)),
+                        target.name,
+                    )
+                    self.assertTrue(
+                        dpg.does_item_exist(live_verify._face_label_tag(target)),
+                        target.name,
+                    )
+            for target in (ControllerButtonTarget.LT, ControllerButtonTarget.RT):
+                with self.subTest(target=target.name):
+                    self.assertTrue(
+                        dpg.does_item_exist(live_verify._face_hotspot_tag(target)),
+                        target.name,
+                    )
+            for side in ("left", "right"):
+                with self.subTest(side=side):
+                    self.assertTrue(
+                        dpg.does_item_exist(live_verify._face_stick_dot_tag(side)),
+                        side,
+                    )
+        finally:
+            dpg.destroy_context()
+
+    def test_face_diagram_honest_note_renders(self) -> None:
+        dpg.create_context()
+        try:
+            self._build_full_screen(_live_snap())
+            labels = _collect_labels(live_verify.LIVE_VERIFY_ROOT_TAG)
+            self.assertIn(
+                i18n.t("diagnostics.live_verify.face_diagram.title"),
+                labels,
+            )
+            self.assertIn(
+                i18n.t("diagnostics.live_verify.face_diagram.note"),
+                labels,
+            )
         finally:
             dpg.destroy_context()
 
@@ -540,6 +606,149 @@ class LiveVerifyFrameCallbackTests(unittest.TestCase):
         self.assertGreater(
             shell._live_verify_state.left_sweep.sample_count, before
         )
+
+    def test_face_highlight_lights_pressed_a_and_mutes_other_buttons(self) -> None:
+        shell, _service, fake = self._build_with_fake(
+            _live_snap(buttons=frozenset({ControllerButtonTarget.A}))
+        )
+        self._tick(fake)
+        self.assertEqual(
+            _last_configure(fake, live_verify._face_hotspot_tag(ControllerButtonTarget.A))["color"],
+            shell.COLORS["good"],
+        )
+        for target in live_verify._BUTTON_CHIP_ORDER:
+            if target is ControllerButtonTarget.A:
+                continue
+            with self.subTest(target=target.name):
+                self.assertEqual(
+                    _last_configure(fake, live_verify._face_hotspot_tag(target))["color"],
+                    shell.COLORS["muted"],
+                )
+
+    def test_face_trigger_intensity_and_stick_dot_mapping(self) -> None:
+        shell, _service, fake = self._build_with_fake(
+            _live_snap(
+                buttons=frozenset(),
+                left_trigger=255,
+                right_trigger=0,
+                left_stick_x=32767,
+                left_stick_y=32767,
+                right_stick_x=-32768,
+                right_stick_y=-32768,
+            )
+        )
+        self._tick(fake)
+
+        left_trigger = _last_configure(
+            fake, live_verify._face_hotspot_tag(ControllerButtonTarget.LT)
+        )
+        right_trigger = _last_configure(
+            fake, live_verify._face_hotspot_tag(ControllerButtonTarget.RT)
+        )
+        self.assertEqual(left_trigger["color"], shell.COLORS["good"])
+        self.assertEqual(right_trigger["color"], shell.COLORS["muted"])
+        self.assertGreater(left_trigger["fill"][3], right_trigger["fill"][3])
+
+        left_dot = _last_configure(fake, live_verify._face_stick_dot_tag("left"))
+        right_dot = _last_configure(fake, live_verify._face_stick_dot_tag("right"))
+        self.assertEqual(left_dot["color"], shell.COLORS["good"])
+        self.assertEqual(left_dot["fill"], shell.COLORS["good"])
+        self.assertEqual(right_dot["color"], shell.COLORS["good"])
+        self.assertEqual(right_dot["fill"], shell.COLORS["good"])
+        self.assertAlmostEqual(left_dot["center"][0], 126.0, places=2)
+        self.assertAlmostEqual(left_dot["center"][1], 78.0, places=2)
+        self.assertAlmostEqual(right_dot["center"][0], 230.0, places=2)
+        self.assertAlmostEqual(right_dot["center"][1], 176.0, places=2)
+
+    def test_face_trigger_display_threshold_mutes_resting_noise(self) -> None:
+        shell, service, fake = self._build_with_fake(
+            _live_snap(
+                buttons=frozenset(),
+                left_trigger=10,
+                right_trigger=0,
+                left_stick_x=0,
+                left_stick_y=0,
+                right_stick_x=0,
+                right_stick_y=0,
+            )
+        )
+        self._tick(fake)
+
+        low_trigger = _last_configure(
+            fake, live_verify._face_hotspot_tag(ControllerButtonTarget.LT)
+        )
+        self.assertEqual(low_trigger["color"], shell.COLORS["muted"])
+        self.assertEqual(low_trigger["fill"][3], 28)
+
+        service._snapshot = _live_snap(
+            buttons=frozenset(),
+            left_trigger=180,
+            right_trigger=0,
+            left_stick_x=0,
+            left_stick_y=0,
+            right_stick_x=0,
+            right_stick_y=0,
+        )
+        self._tick(fake)
+        high_trigger = _last_configure(
+            fake, live_verify._face_hotspot_tag(ControllerButtonTarget.LT)
+        )
+        self.assertEqual(high_trigger["color"], shell.COLORS["good"])
+        self.assertGreater(high_trigger["fill"][3], 28)
+
+    def test_face_stick_dot_deadzone_recenters_and_mutes_drift(self) -> None:
+        shell, service, fake = self._build_with_fake(
+            _live_snap(
+                buttons=frozenset(),
+                left_trigger=0,
+                right_trigger=0,
+                left_stick_x=int(0.05 * 32768),
+                left_stick_y=0,
+                right_stick_x=0,
+                right_stick_y=0,
+            )
+        )
+        self._tick(fake)
+
+        cx, cy = live_verify._FACE_STICK_CENTERS["left"]
+        drift_dot = _last_configure(fake, live_verify._face_stick_dot_tag("left"))
+        self.assertEqual(drift_dot["color"], shell.COLORS["muted"])
+        self.assertEqual(drift_dot["fill"], shell.COLORS["muted"])
+        self.assertEqual(drift_dot["center"], [cx, cy])
+
+        service._snapshot = _live_snap(
+            buttons=frozenset(),
+            left_trigger=0,
+            right_trigger=0,
+            left_stick_x=int(0.7 * 32768),
+            left_stick_y=0,
+            right_stick_x=0,
+            right_stick_y=0,
+        )
+        self._tick(fake)
+        deflected_dot = _last_configure(
+            fake, live_verify._face_stick_dot_tag("left")
+        )
+        expected_x = (
+            cx
+            + service._snapshot.left_stick_normalized[0]
+            * live_verify._FACE_STICK_DOT_TRAVEL
+        )
+        self.assertEqual(deflected_dot["color"], shell.COLORS["good"])
+        self.assertEqual(deflected_dot["fill"], shell.COLORS["good"])
+        self.assertAlmostEqual(deflected_dot["center"][0], expected_x, places=2)
+        self.assertAlmostEqual(deflected_dot["center"][1], cy, places=2)
+
+    def test_face_refresh_guarded_no_throw_when_unmounted(self) -> None:
+        shell = SimpleNamespace(COLORS={"good": (1, 2, 3, 255), "muted": (4, 5, 6, 255)})
+        fake = MagicMock()
+        fake.does_item_exist.return_value = False
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._refresh_live_face_highlights(
+                shell,
+                _live_snap(buttons=frozenset({ControllerButtonTarget.A})),
+            )
+        fake.configure_item.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -856,6 +1065,9 @@ class LiveVerifyI18nTests(unittest.TestCase):
             "diagnostics.live_verify.circularity_help",
             "diagnostics.live_verify.buttons.title",
             "diagnostics.live_verify.triggers.title",
+            "diagnostics.live_verify.face_diagram.title",
+            "diagnostics.live_verify.face_diagram.home",
+            "diagnostics.live_verify.face_diagram.note",
             "diagnostics.live_verify.deadzone.title",
             "diagnostics.live_verify.deadzone.note",
             "diagnostics.live_verify.deadzone.status.verified",
@@ -899,6 +1111,12 @@ class LiveVerifyI18nTests(unittest.TestCase):
     def test_trust_body_keeps_honest_reported_as_sent_wording(self) -> None:
         en, _zh = self._locales()
         self.assertIn("reported as sent", en["diagnostics.trust.body"])
+
+    def test_face_diagram_note_names_xinput_output_boundary(self) -> None:
+        en, zh = self._locales()
+        self.assertIn("XInput output", en["diagnostics.live_verify.face_diagram.note"])
+        self.assertIn("physical control", en["diagnostics.live_verify.face_diagram.note"])
+        self.assertIn("XInput", zh["diagnostics.live_verify.face_diagram.note"])
 
     def test_stale_warning_keys_match_pinned_constants(self) -> None:
         en, _zh = self._locales()

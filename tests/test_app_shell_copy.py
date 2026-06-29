@@ -59,8 +59,8 @@ class AppShellCopyTests(unittest.TestCase):
         known = DeviceState(active_onboard_profile=2)
         known.summary_sources["active_profile"] = "protocol"
 
-        self.assertEqual(_top_profile_label(unknown), "Config: Not verified")
-        self.assertEqual(_top_profile_label(known), "Config 2")
+        self.assertEqual(_top_profile_label(unknown), "Profile: Not verified")
+        self.assertEqual(_top_profile_label(known), "Profile 2")
 
     def test_top_bar_does_not_boot_with_default_config_1(self) -> None:
         shell = self.make_shell()
@@ -69,7 +69,43 @@ class AppShellCopyTests(unittest.TestCase):
         try:
             with dpg.window():
                 shell._build_top_bar()
-            self.assertEqual(dpg.get_value("top_profile"), "Config: Not verified")
+            self.assertEqual(dpg.get_value("top_profile"), "Profile: Not verified")
+        finally:
+            dpg.destroy_context()
+
+    def test_top_bar_not_verified_profile_has_explanatory_tooltip(self) -> None:
+        shell = self.make_shell()
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                shell._build_top_bar()
+
+            tooltip = dpg.get_value("top_active_profile_tooltip_text")
+            self.assertEqual(dpg.get_value("top_active_profile"), "Profile: Not verified")
+            self.assertTrue(dpg.get_item_configuration("top_active_profile_tooltip")["show"])
+            self.assertEqual(tooltip, t("status.config.not_verified_tooltip"))
+            self.assertIn("hasn't independently confirmed", tooltip)
+            self.assertIn("official app's view can lag", tooltip)
+            self.assertIn("settings work normally", tooltip)
+            self.assertIn("Profiles tab", tooltip)
+            self.assertNotIn("security", tooltip.lower())
+            self.assertNotIn("safety", tooltip.lower())
+        finally:
+            dpg.destroy_context()
+
+    def test_top_bar_verified_profile_hides_not_verified_tooltip(self) -> None:
+        shell = self.make_shell()
+        shell.device_service.state.active_onboard_profile = 2
+        shell.device_service.state.summary_sources["active_profile"] = "protocol"
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                shell._build_top_bar()
+
+            self.assertEqual(dpg.get_value("top_active_profile"), "Profile 2")
+            self.assertFalse(dpg.get_item_configuration("top_active_profile_tooltip")["show"])
         finally:
             dpg.destroy_context()
 
@@ -89,7 +125,7 @@ class AppShellCopyTests(unittest.TestCase):
 
             self.assertEqual(dpg.get_value("top_connection_mode"), "USB")
             self.assertEqual(dpg.get_value("top_sync_status"), "已连接")
-            self.assertEqual(dpg.get_value("top_profile"), "配置：未验证")
+            self.assertEqual(dpg.get_value("top_profile"), "配置文件：未验证")
         finally:
             set_locale("en")
             dpg.destroy_context()

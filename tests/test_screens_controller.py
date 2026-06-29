@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -9,10 +11,15 @@ import dearpygui.dearpygui as dpg
 from tests.r2_shell_test_helpers import alias_of, empty_snapshot, make_shell
 from zd_app.i18n import t
 from zd_app.services.settings_service import (
+    ButtonMapping,
+    ButtonSlot,
+    ControllerButtonTarget,
+    MacroSlot,
     MotionMappingMode,
     MotionMappingTarget,
     MotionSettings,
     SensitivityAnchor,
+    SetButtonBindingOutcome,
 )
 from zd_app.ui import components, typography
 from zd_app.ui.screens import controller
@@ -1037,6 +1044,494 @@ class ControllerScreenTests(unittest.TestCase):
             self.assertEqual(alias_of(dpg.get_value("controller_tab_bar")), "tab_profiles")
         finally:
             dpg.destroy_context()
+
+    def test_buttons_tab_current_section_shows_present_default_muted(self) -> None:
+        # A slot mapped to its OWN identity target (A→A) is an unremapped
+        # default: it renders the target name with NO "(remapped)" tag.
+        shell = make_shell(settings_service=MagicMock())
+        shell.last_controller_snapshot = empty_snapshot(
+            button_bindings={
+                ButtonSlot.A: ButtonMapping.controller_button(ControllerButtonTarget.A)
+            }
+        )
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            controller.build(shell, "content_region")
+
+            self.assertTrue(dpg.does_item_exist("current_binding_row_A"))
+            self.assertEqual(dpg.get_value("current_binding_target_A"), "A")
+            self.assertNotIn(
+                t("controller.buttons.current.remapped_tag"),
+                _collect_labels("current_binding_row_A"),
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_buttons_tab_current_section_marks_remap_distinct(self) -> None:
+        # A→B is a real remap: target "B", the "(remapped)" tag, and a color
+        # distinct from a default (X→X) row. Pins the default-vs-remap surface.
+        shell = make_shell(settings_service=MagicMock())
+        shell.last_controller_snapshot = empty_snapshot(
+            button_bindings={
+                ButtonSlot.A: ButtonMapping.controller_button(ControllerButtonTarget.B),
+                ButtonSlot.X: ButtonMapping.controller_button(ControllerButtonTarget.X),
+            }
+        )
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            controller.build(shell, "content_region")
+
+            # Remap row: new target + the remapped tag.
+            self.assertEqual(dpg.get_value("current_binding_target_A"), "B")
+            self.assertIn(
+                t("controller.buttons.current.remapped_tag"),
+                _collect_labels("current_binding_row_A"),
+            )
+            # Default row: identity target, no remapped tag.
+            self.assertEqual(dpg.get_value("current_binding_target_X"), "X")
+            self.assertNotIn(
+                t("controller.buttons.current.remapped_tag"),
+                _collect_labels("current_binding_row_X"),
+            )
+            # Visually distinct: the remap target color differs from a default's.
+            remap_color = dpg.get_item_configuration("current_binding_target_A")["color"]
+            default_color = dpg.get_item_configuration("current_binding_target_X")["color"]
+            self.assertNotEqual(list(remap_color), list(default_color))
+        finally:
+            dpg.destroy_context()
+
+    def test_buttons_tab_current_section_absent_slot_shows_honest_unknown(self) -> None:
+        # A slot ABSENT from button_bindings (failed to read) must show an honest
+        # unknown — the em dash + tooltip — NEVER its identity default. This is
+        # the honest-abstention guard (cf. the axis_inversion fake-default bug).
+        shell = make_shell(settings_service=MagicMock())
+        shell.last_controller_snapshot = empty_snapshot(
+            button_bindings={
+                ButtonSlot.A: ButtonMapping.controller_button(ControllerButtonTarget.A)
+            }
+        )  # LB intentionally absent from the dict
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            controller.build(shell, "content_region")
+
+            self.assertEqual(
+                dpg.get_value("current_binding_target_LB"),
+                controller._UNKNOWN_BINDING_GLYPH,
+            )
+            # The crucial assertion: an unread slot is NOT shown as its default.
+            self.assertNotEqual(dpg.get_value("current_binding_target_LB"), "LB")
+            # The "couldn't read" tooltip is attached so the unknown is explained.
+            self.assertTrue(dpg.does_item_exist("current_binding_tip_LB"))
+        finally:
+            dpg.destroy_context()
+
+    def test_buttons_tab_current_section_unsupported_kind_not_fabricated(self) -> None:
+        # Honest-abstention guard: a slot whose mapping
+        # KIND LegendCTL doesn't model (e.g. a keyboard/macro/vendor kind from the
+        # official app or a future firmware) must NEVER render as a controller
+        # button — even when its target_value byte collides with a known button
+        # value. Here kind is 0x02 but value 0x10 == ControllerButtonTarget.B, so
+        # the pre-fix renderer showed "B (remapped)" — a fabricated remap. The UI
+        # must show the raw bytes instead and make NO "(remapped)" claim.
+        shell = make_shell(settings_service=MagicMock())
+        shell.last_controller_snapshot = empty_snapshot(
+            button_bindings={
+                ButtonSlot.A: ButtonMapping(
+                    target_kind=0x02,
+                    target_low=0x00,
+                    target_value=ControllerButtonTarget.B.value,
+                ),
+            }
+        )
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            controller.build(shell, "content_region")
+
+            value = dpg.get_value("current_binding_target_A")
+            # The crucial assertion: an unmodeled kind is NOT named as button "B".
+            self.assertNotEqual(value, "B")
+            # It shows the honest raw bytes, with the kind surfaced so it reads as
+            # an unsupported mapping rather than a controller-button remap.
+            self.assertIn("kind=0x02", value)
+            self.assertIn("val=0x10", value)
+            # And it makes no "(remapped)" claim for a mapping we can't model.
+            self.assertNotIn(
+                t("controller.buttons.current.remapped_tag"),
+                _collect_labels("current_binding_row_A"),
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_buttons_tab_current_section_none_snapshot_shows_read_hint(self) -> None:
+        # Never-read device (None snapshot): show the read hint, fabricate NO
+        # rows.
+        shell = make_shell(settings_service=MagicMock())
+        shell.last_controller_snapshot = None
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            controller.build(shell, "content_region")
+
+            labels = _collect_labels("tab_buttons")
+            self.assertIn(t("controller.buttons.current.not_read"), labels)
+            self.assertFalse(dpg.does_item_exist("current_binding_row_A"))
+        finally:
+            dpg.destroy_context()
+
+    def test_apply_binding_live_refreshes_current_bindings_without_tab_reentry(
+        self,
+    ) -> None:
+        # Regression guard for the 2026-06-27 hardware bug: applying A→B in the
+        # Buttons tab left the read-only Current Bindings list showing "A → A"
+        # until the user left and re-entered the tab. The apply path must fold
+        # the just-written mapping into the snapshot (no device read) and
+        # re-render the list IN PLACE — so this asserts the row flips to
+        # "B (remapped)" without the TEST rebuilding the screen.
+        settings_service = MagicMock()
+        settings_service.set_button_binding.return_value = SimpleNamespace(
+            outcome=SetButtonBindingOutcome.OK,
+            error_code=None,
+            payload_hex="",
+        )
+        shell = make_shell(settings_service=settings_service)
+        # Start from a read where A is unremapped (A→A).
+        shell.last_controller_snapshot = empty_snapshot(
+            button_bindings={
+                ButtonSlot.A: ButtonMapping.controller_button(ControllerButtonTarget.A),
+            }
+        )
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            controller.build(shell, "content_region")
+
+            # Precondition: the list shows A as an unremapped default.
+            self.assertEqual(dpg.get_value("current_binding_target_A"), "A")
+            self.assertNotIn(
+                t("controller.buttons.current.remapped_tag"),
+                _collect_labels("current_binding_row_A"),
+            )
+
+            # Pick Source=A / Target=B and apply (writes A→B to the device).
+            dpg.set_value("binding_source_combo", "A")
+            dpg.set_value("binding_target_combo", "B")
+            result = shell.apply_button_binding()
+
+            # The write went through the settings service...
+            self.assertIsNotNone(result)
+            settings_service.set_button_binding.assert_called_once_with(
+                ButtonSlot.A,
+                ButtonMapping.controller_button(ControllerButtonTarget.B),
+            )
+            # ...the snapshot was updated authoritatively, with NO new device read...
+            settings_service.get_all_settings.assert_not_called()
+            self.assertEqual(
+                shell.last_controller_snapshot.button_bindings[ButtonSlot.A],
+                ButtonMapping.controller_button(ControllerButtonTarget.B),
+            )
+            # ...and the Current Bindings list reflects A→B in place — the apply
+            # path re-rendered the section; the test never rebuilt the screen.
+            self.assertEqual(dpg.get_value("current_binding_target_A"), "B")
+            self.assertIn(
+                t("controller.buttons.current.remapped_tag"),
+                _collect_labels("current_binding_row_A"),
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_snapshot_refresh_live_refreshes_current_bindings(self) -> None:
+        # The async snapshot refresh (read on_done) updates
+        # last_controller_snapshot without rebuilding the screen body. Hydrating
+        # that snapshot must re-render the Current Bindings list in place, so a
+        # Read reflects fresh device bindings without a tab re-entry.
+        shell = make_shell(settings_service=MagicMock())
+        shell.last_controller_snapshot = empty_snapshot(
+            button_bindings={
+                ButtonSlot.A: ButtonMapping.controller_button(ControllerButtonTarget.A),
+            }
+        )
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            controller.build(shell, "content_region")
+
+            self.assertEqual(dpg.get_value("current_binding_target_A"), "A")
+
+            # A fresh read lands: A is now remapped to B on the device.
+            refreshed = empty_snapshot(
+                button_bindings={
+                    ButtonSlot.A: ButtonMapping.controller_button(
+                        ControllerButtonTarget.B
+                    ),
+                }
+            )
+            shell.last_controller_snapshot = refreshed
+            shell._hydrate_controller_snapshot(refreshed, [])
+
+            self.assertEqual(dpg.get_value("current_binding_target_A"), "B")
+            self.assertIn(
+                t("controller.buttons.current.remapped_tag"),
+                _collect_labels("current_binding_row_A"),
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_profiles_tab_distinguishes_device_slots_from_local_profiles(self) -> None:
+        # The Profiles tab lists LegendCTL-LOCAL profiles. A note must make clear
+        # they are separate from the controller's on-device "Profile 1-4" slots,
+        # whose names can't be read (slot number only) — so neither namespace is
+        # mistaken for the other.
+        shell = make_shell(settings_service=MagicMock())
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            controller.build(shell, "content_region")
+
+            joined = " ".join(_collect_labels("tab_profiles"))
+            self.assertIn("separate from the controller", joined)
+            self.assertIn("slot number only", joined)
+        finally:
+            dpg.destroy_context()
+
+
+class ControllerDiagramTests(unittest.TestCase):
+    """The Buttons-tab back-view paddle diagram (v1): code-drawn hotspots for the
+    6 BACK macro slots, highlight-on-select, honest framing, and i18n parity.
+    Pure UI — no device I/O, no snapshot dependency."""
+
+    # The 6 BACK slots the v1 diagram draws (M3/M4 are FRONT — not drawn).
+    BACK_SLOTS = (
+        MacroSlot.LM, MacroSlot.RM,
+        MacroSlot.M1, MacroSlot.M2,
+        MacroSlot.LK, MacroSlot.RK,
+    )
+
+    @staticmethod
+    def _as_255(color) -> tuple:
+        # DPG draw-item colors come back normalised to 0-1 floats; rescale to
+        # 0-255 to compare against the shell COLORS palette (mirrors the
+        # drag-point colour assertion). Defensive against an already-255 build.
+        chans = [float(c) for c in color]
+        if chans and max(chans) <= 1.0:
+            return tuple(round(c * 255) for c in chans)
+        return tuple(round(c) for c in chans)
+
+    def test_diagram_renders_back_slot_hotspots_only(self) -> None:
+        # Each of the 6 BACK slots gets a hotspot + label tag; the 2 FRONT slots
+        # (M3/M4) are deliberately NOT drawn — a note points to them instead.
+        shell = make_shell(settings_service=MagicMock())
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            controller.build(shell, "content_region")
+
+            self.assertTrue(dpg.does_item_exist("diagram_back_drawlist"))
+            for slot in self.BACK_SLOTS:
+                self.assertTrue(
+                    dpg.does_item_exist(f"diagram_paddle_{slot.name}"), slot.name
+                )
+                self.assertTrue(
+                    dpg.does_item_exist(f"diagram_paddle_label_{slot.name}"), slot.name
+                )
+            # M3/M4 are front buttons — never drawn on the back view.
+            for slot in (MacroSlot.M3, MacroSlot.M4):
+                self.assertFalse(
+                    dpg.does_item_exist(f"diagram_paddle_{slot.name}"), slot.name
+                )
+            # The position map carries exactly the 6 back slots.
+            self.assertEqual(set(controller._BACK_PADDLE_POS), set(self.BACK_SLOTS))
+        finally:
+            dpg.destroy_context()
+
+    def test_diagram_position_map_matches_confirmed_mirror(self) -> None:
+        # Lock the CONFIRMED (spec §6) MIRRORED map: image-LEFT = player's RIGHT,
+        # so each LEFT-side slot's x is GREATER than its RIGHT-side pair's x —
+        # including the verified, counter-intuitive split M1 = LEFT-grip lower /
+        # M2 = RIGHT-grip lower.
+        pos = controller._BACK_PADDLE_POS
+        self.assertGreater(pos[MacroSlot.LM][0], pos[MacroSlot.RM][0])  # paddles
+        self.assertGreater(pos[MacroSlot.M1][0], pos[MacroSlot.M2][0])  # rear buttons
+        self.assertGreater(pos[MacroSlot.LK][0], pos[MacroSlot.RK][0])  # top claws
+        # Vertical stack: claws (top edge) above paddles above lower buttons.
+        self.assertLess(pos[MacroSlot.LK][1], pos[MacroSlot.LM][1])
+        self.assertLess(pos[MacroSlot.LM][1], pos[MacroSlot.M1][1])
+        # Every hotspot (with its radius) fits inside the canvas.
+        r = controller._PADDLE_R
+        for slot, (x, y) in pos.items():
+            self.assertTrue(r <= x <= controller._DIAGRAM_W - r, slot.name)
+            self.assertTrue(r <= y <= controller._DIAGRAM_H - r, slot.name)
+
+    def test_diagram_highlight_sets_selected_accent_others_muted(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            controller.build(shell, "content_region")
+
+            accent = tuple(shell.COLORS["accent"])
+            muted = tuple(shell.COLORS["muted"])
+
+            # Default (pre-interaction) state: all hotspots muted.
+            self.assertEqual(
+                self._as_255(dpg.get_item_configuration("diagram_paddle_M1")["color"]),
+                muted,
+            )
+
+            controller.refresh_diagram_paddle_highlight(shell, MacroSlot.M1)
+
+            # Selected slot -> accent; every other back slot -> muted.
+            self.assertEqual(
+                self._as_255(dpg.get_item_configuration("diagram_paddle_M1")["color"]),
+                accent,
+            )
+            for other in self.BACK_SLOTS:
+                if other is MacroSlot.M1:
+                    continue
+                self.assertEqual(
+                    self._as_255(
+                        dpg.get_item_configuration(f"diagram_paddle_{other.name}")["color"]
+                    ),
+                    muted,
+                    other.name,
+                )
+
+            # Clearing (None) returns the selection to muted.
+            controller.refresh_diagram_paddle_highlight(shell, None)
+            self.assertEqual(
+                self._as_255(dpg.get_item_configuration("diagram_paddle_M1")["color"]),
+                muted,
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_diagram_highlight_guarded_no_throw_when_unmounted(self) -> None:
+        # The diagram isn't built (no Buttons tab mounted) — refresh must be a
+        # silent no-op, never raising on the absent tags. Mirrors
+        # _apply_current_binding_target_state's does_item_exist guard.
+        shell = make_shell(settings_service=MagicMock())
+
+        dpg.create_context()
+        try:
+            controller.refresh_diagram_paddle_highlight(shell, MacroSlot.M1)
+            controller.refresh_diagram_paddle_highlight(shell, None)
+        finally:
+            dpg.destroy_context()
+
+    def test_diagram_combo_touch_highlights_matching_slot(self) -> None:
+        # The back-paddle row's combo callback drives the highlight: touching
+        # M1's dropdown lights M1 (accent) and leaves the others muted. Invoked
+        # the way DPG dispatches a combo: (sender, app_data, user_data=slot).
+        shell = make_shell(settings_service=MagicMock())
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            controller.build(shell, "content_region")
+
+            combo = "back_paddle_combo_M1"
+            callback = dpg.get_item_callback(combo)
+            self.assertIsNotNone(callback)
+            # user_data carries the slot, exactly as the apply button does.
+            self.assertEqual(dpg.get_item_user_data(combo), MacroSlot.M1)
+            callback("sender", "A", dpg.get_item_user_data(combo))
+
+            self.assertEqual(
+                self._as_255(dpg.get_item_configuration("diagram_paddle_M1")["color"]),
+                tuple(shell.COLORS["accent"]),
+            )
+            self.assertEqual(
+                self._as_255(dpg.get_item_configuration("diagram_paddle_M2")["color"]),
+                tuple(shell.COLORS["muted"]),
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_diagram_renders_honest_and_front_notes(self) -> None:
+        # Honest framing (always) + the M3/M4-are-front note + the approx caption
+        # (rendered because _BACK_PADDLE_APPROX is non-empty) all show in the tab.
+        self.assertTrue(controller._BACK_PADDLE_APPROX)  # precondition for approx note
+        shell = make_shell(settings_service=MagicMock())
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            controller.build(shell, "content_region")
+
+            labels = _collect_labels("tab_buttons")
+            self.assertIn(t("controller.buttons.diagram.title"), labels)
+            self.assertIn(t("controller.buttons.diagram.note"), labels)
+            self.assertIn(t("controller.buttons.diagram.front_note"), labels)
+            self.assertIn(t("controller.buttons.diagram.approx_note"), labels)
+        finally:
+            dpg.destroy_context()
+
+    def test_diagram_i18n_keys_present_in_both_locales(self) -> None:
+        # Parity + non-empty for the new keys (the global
+        # test_locale_jsons_have_matching_keys covers set equality; this pins the
+        # specific keys, the honest-abstention content, and ASCII glyph-safety).
+        locale_dir = Path("zd_app/i18n/locales")
+        en = json.loads((locale_dir / "en.json").read_text(encoding="utf-8"))
+        zh = json.loads((locale_dir / "zh-CN.json").read_text(encoding="utf-8"))
+        keys = (
+            "controller.buttons.diagram.title",
+            "controller.buttons.diagram.note",
+            "controller.buttons.diagram.front_note",
+            "controller.buttons.diagram.approx_note",
+        )
+        for key in keys:
+            with self.subTest(key=key):
+                self.assertIn(key, en)
+                self.assertIn(key, zh)
+                self.assertTrue(en[key])
+                self.assertTrue(zh[key])
+        # Honest abstention: the framing note never implies a device read.
+        self.assertIn("not a read of the controller", en["controller.buttons.diagram.note"])
+        # The front note names the two front buttons.
+        self.assertIn("M3", en["controller.buttons.diagram.front_note"])
+        self.assertIn("M4", en["controller.buttons.diagram.front_note"])
+        # EN strings stay free of glyphs the Inter font can't render (em-dash,
+        # ellipsis, check, arrow) — they would surface as "?".
+        for key in keys:
+            for ch in ("—", "…", "✓", "→"):
+                self.assertNotIn(ch, en[key], (key, ch))
 
 
 def _collect_labels(root) -> list[str]:

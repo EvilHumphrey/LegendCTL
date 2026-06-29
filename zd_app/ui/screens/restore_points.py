@@ -87,6 +87,8 @@ TAG_STATUS_TEXT = "restore_points_status_text"
 TAG_LIST_REFRESH_BUTTON = "restore_points_list_refresh_button"
 TAG_LIST_MANUAL_SAVE_BUTTON = "restore_points_list_manual_save_button"
 TAG_LIST_TABLE = "restore_points_list_table"
+TAG_LIST_ROUTINE_SUMMARY = "restore_points_list_routine_summary"
+TAG_LIST_ROUTINE_TOGGLE = "restore_points_list_routine_toggle"
 TAG_LIST_FOOTER_CAVEAT = "restore_points_list_footer_caveat"
 TAG_LIST_SKIPPED_FOOTER = "restore_points_list_skipped_footer"
 TAG_LIST_SKIPPED_TOGGLE = "restore_points_list_skipped_toggle"
@@ -101,6 +103,9 @@ TAG_RESULT_SAVE_DIAG_BUTTON = "restore_points_result_save_diag_button"
 TAG_DELETE_CONFIRM_MODAL = "restore_points_delete_confirm_modal"
 TAG_DELETE_CONFIRM_CONFIRM_BUTTON = "restore_points_delete_confirm_confirm"
 TAG_DELETE_CONFIRM_CANCEL_BUTTON = "restore_points_delete_confirm_cancel"
+
+
+_ROUTINE_TRIGGER_TYPES = {"first_readable_connect"}
 
 
 _TRIGGER_LABEL_KEYS = {
@@ -163,6 +168,7 @@ class RestorePointsScreenState:
     selected_rp_id: Optional[str] = None
     result: Optional[RestoreResult] = None
     skipped_expanded: bool = False
+    hide_routine_captures: bool = True
     status_text: str = ""
     status_kind: str = "info"
 
@@ -279,6 +285,13 @@ def _build_list(shell, service, state: RestorePointsScreenState) -> None:
         _build_footer_caveat(shell)
         return
 
+    non_routine, routine = _partition_routine_captures(valid)
+    hidden_routine_count = len(routine) if state.hide_routine_captures else 0
+    visible = non_routine if state.hide_routine_captures else valid
+
+    if routine:
+        _build_routine_toggle(shell, state, hidden_routine_count)
+
     # Scroll discipline: the saved-points table is the ONE scroll surface. In the
     # common case (valid points, no skipped files) the table card fills the height
     # remaining BELOW the top controls MINUS a reserve for the pinned footer
@@ -293,19 +306,59 @@ def _build_list(shell, service, state: RestorePointsScreenState) -> None:
     # fixed footer reserve can't keep everything on one page. There the table
     # card is content-fit instead and the whole page scrolls as a single bar —
     # still one scrollbar, just the page's, with the disclosure + caveat below.
-    if valid and not skipped:
-        _build_list_table(shell, valid, height=-FOOTER_RESERVE_PX)
+    if visible and not skipped:
+        _build_list_table(shell, visible, height=-FOOTER_RESERVE_PX)
         _build_footer_caveat(shell)
         return
 
-    if valid:
-        _build_list_table(shell, valid, fit=True)
+    if visible:
+        _build_list_table(shell, visible, fit=True)
 
     if skipped:
         dpg.add_spacer(height=SPACE_MD)
         _build_skipped_card(shell, state, skipped)
 
     _build_footer_caveat(shell)
+
+
+def _partition_routine_captures(
+    restore_points: list[RestorePoint],
+) -> tuple[list[RestorePoint], list[RestorePoint]]:
+    non_routine: list[RestorePoint] = []
+    routine: list[RestorePoint] = []
+    for rp in restore_points:
+        if rp.trigger.type in _ROUTINE_TRIGGER_TYPES:
+            routine.append(rp)
+        else:
+            non_routine.append(rp)
+    return non_routine, routine
+
+
+def _build_routine_toggle(
+    shell,
+    state: RestorePointsScreenState,
+    hidden_routine_count: int,
+) -> None:
+    with dpg.group(horizontal=True):
+        if state.hide_routine_captures:
+            dpg.add_text(
+                t(
+                    "restore_points.list.routine_hidden_count",
+                    n=hidden_routine_count,
+                ),
+                tag=TAG_LIST_ROUTINE_SUMMARY,
+                color=shell.COLORS["muted"],
+            )
+            toggle_label = t("restore_points.list.routine_show_all")
+        else:
+            toggle_label = t("restore_points.list.routine_hide")
+        dpg.add_button(
+            label=toggle_label,
+            tag=TAG_LIST_ROUTINE_TOGGLE,
+            width=120,
+            callback=lambda *_args: _on_toggle_routine_captures(shell),
+        )
+    dpg.add_spacer(height=SPACE_MD)
 
 
 def _build_footer_caveat(shell) -> None:
@@ -913,6 +966,12 @@ def _on_manual_save(shell) -> None:
 def _on_toggle_skipped(shell) -> None:
     state = _ensure_state(shell)
     state.skipped_expanded = not state.skipped_expanded
+    shell.rebuild_current_screen()
+
+
+def _on_toggle_routine_captures(shell) -> None:
+    state = _ensure_state(shell)
+    state.hide_routine_captures = not state.hide_routine_captures
     shell.rebuild_current_screen()
 
 

@@ -346,12 +346,22 @@ class ConnectedReadTests(unittest.TestCase):
         self.assertIn("1 changed", joined)
 
     def test_changed_and_same_chips_present(self) -> None:
-        sh = _shell(self.store, connected=True, rp_service=self.rp)
+        state = screen.DeviceVsProfileScreenState(show_only_changes=False)
+        sh = _shell(
+            self.store,
+            connected=True,
+            rp_service=self.rp,
+            screen_state=state,
+        )
         with _PatchedScreen(sh) as ps:
             ps.build()
         chips = ps.status_chips()
         self.assertTrue(any("Changed" in c for c in chips), chips)
         self.assertTrue(any("Same" in c for c in chips), chips)
+
+    def test_show_only_changes_defaults_to_true(self) -> None:
+        state = screen.DeviceVsProfileScreenState()
+        self.assertTrue(state.show_only_changes)
 
     def test_show_only_changes_filters_to_changed_rows(self) -> None:
         state = screen.DeviceVsProfileScreenState(show_only_changes=True)
@@ -397,7 +407,8 @@ class EncodingDiffersChipTests(unittest.TestCase):
             {"sensitivity_left": True, "sensitivity_left_8point": True},
             {},
         )
-        sh = _shell(store, connected=True, rp_service=rp)
+        state = screen.DeviceVsProfileScreenState(show_only_changes=False)
+        sh = _shell(store, connected=True, rp_service=rp, screen_state=state)
         with _PatchedScreen(sh) as ps:
             ps.build()
         return sh, ps
@@ -440,7 +451,8 @@ class SectionHeaderColorTests(unittest.TestCase):
         rp = _FakeRPService(
             _snap(polling_rate=PollingRate.HZ_1000), {"polling_rate": True}, {}
         )
-        sh = _shell(store, connected=True, rp_service=rp)
+        state = screen.DeviceVsProfileScreenState(show_only_changes=False)
+        sh = _shell(store, connected=True, rp_service=rp, screen_state=state)
         with _PatchedScreen(sh) as ps:
             ps.build()
         header_labels = {
@@ -478,10 +490,10 @@ class CallbackTests(unittest.TestCase):
         sh.rebuild_current_screen.assert_called()
 
     def test_show_only_changes_toggle_updates_state(self) -> None:
-        state = screen.DeviceVsProfileScreenState()
+        state = screen.DeviceVsProfileScreenState(show_only_changes=True)
         sh = _shell(_FakeStore({"race": _snap()}), screen_state=state)
-        screen._on_show_only_changes(sh, True)
-        self.assertTrue(state.show_only_changes)
+        screen._on_show_only_changes(sh, False)
+        self.assertFalse(state.show_only_changes)
         sh.rebuild_current_screen.assert_called()
 
 

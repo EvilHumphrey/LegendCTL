@@ -1412,6 +1412,7 @@ class AppShell:
     def _build_top_bar(self) -> None:
         with dpg.child_window(tag="top_status_bar", height=_TOP_STATUS_BAR_HEIGHT, border=False, no_scrollbar=True):
             with dpg.group(horizontal=True):
+                profile_not_verified = _top_profile_not_verified(self.device_service.state)
                 dpg.add_text("●", tag="top_connection_dot", color=COLORS["text.muted"])
                 dpg.add_text(tag="top_product_name", default_value=t("status.app_name"))
                 dpg.add_text("|", color=self.COLORS["muted"])
@@ -1423,6 +1424,13 @@ class AppShell:
                 dpg.add_text(tag="top_polling_rate", default_value=t("shell.polling_rate.unknown"))
                 dpg.add_text("|", color=self.COLORS["muted"])
                 dpg.add_text(tag="top_active_profile", default_value=_top_profile_label(self.device_service.state))
+                if dpg.does_item_exist("top_active_profile"):
+                    with dpg.tooltip("top_active_profile", tag="top_active_profile_tooltip", show=profile_not_verified):
+                        dpg.add_text(
+                            t("status.config.not_verified_tooltip"),
+                            wrap=360,
+                            tag="top_active_profile_tooltip_text",
+                        )
                 dpg.add_text(tag="top_profile", default_value=_top_profile_label(self.device_service.state), show=False)
                 dpg.add_text("|", color=self.COLORS["muted"])
                 dpg.add_text(tag="top_sync_status", default_value=t("status.disconnected"), color=self.COLORS["warn"])
@@ -1773,6 +1781,12 @@ class AppShell:
         )
         self._set_if_exists("top_profile", profile_label)
         self._set_if_exists("top_active_profile", profile_label)
+        self._set_if_exists("top_active_profile_tooltip_text", t("status.config.not_verified_tooltip"))
+        if dpg.does_item_exist("top_active_profile_tooltip"):
+            dpg.configure_item(
+                "top_active_profile_tooltip",
+                show=_top_profile_not_verified(state),
+            )
         self._set_if_exists("top_polling_rate", polling_rate)
         self._set_if_exists("top_sync_status", _top_sync_status_label(display_sync_status))
         if dpg.does_item_exist("top_sync_status"):
@@ -2310,6 +2324,12 @@ class AppShell:
             missing,
         )
         self._hydrate_button_bindings(snapshot.button_bindings, missing)
+        # Refresh the read-only Current Bindings list so a snapshot refresh (the
+        # async read on_done / footer Read updates last_controller_snapshot
+        # without rebuilding the screen body) reflects the fresh bindings in
+        # place — no tab re-entry needed. Value-only update (no widget creation),
+        # so it is safe in the hydrate path; per-slot no-op when not mounted.
+        controller.refresh_current_bindings(self)
         self._hydrate_back_paddle_bindings(snapshot.back_paddle_bindings)
         self._hydrate_lighting(snapshot.lighting_zones, missing)
         if include_device:
@@ -3962,6 +3982,35 @@ class AppShell:
                     back_paddle_bindings=merged,
                 )
 
+    def _remember_button_binding(
+        self, slot: ButtonSlot, mapping: ButtonMapping
+    ) -> None:
+        """Fold a just-applied button binding into the cached snapshot.
+
+        ``apply_button_binding`` wrote ``mapping`` to the device, so it is the
+        authoritative current value for ``slot`` — record it WITHOUT a device
+        read so the read-only Current Bindings display can refresh in place.
+        Mirrors :meth:`_remember_back_paddle_binding`'s locked
+        read-modify-write so a concurrent snapshot overwrite (refresh on_done /
+        Save-As) can't drop it.
+
+        No-op when nothing has been read yet (``last_controller_snapshot is
+        None``): we deliberately don't fabricate a whole snapshot from a single
+        known slot — the Current Bindings list stays in its honest "not read
+        yet" state.
+        """
+
+        with self._last_back_paddle_bindings_lock:
+            snapshot = self.last_controller_snapshot
+            if snapshot is None:
+                return
+            merged = dict(snapshot.button_bindings or {})
+            merged[slot] = mapping
+            self.last_controller_snapshot = replace(
+                snapshot,
+                button_bindings=merged,
+            )
+
     def _set_last_controller_snapshot(
         self, snapshot: ControllerSnapshot | None
     ) -> ControllerSnapshot | None:
@@ -4775,6 +4824,15 @@ class AppShell:
 
         combo_tag = f"back_paddle_combo_{slot.name}"
         target_label = dpg.get_value(combo_tag)
+        if target_label == t("controller.back_paddles.not_set_here"):
+            # The unread placeholder is still selected. There is nothing to write,
+            # and we must NOT overwrite the device's (unreadable) paddle state with
+            # a blank just because the user clicked Apply. Tell them how to act and
+            # leave the on-device paddle untouched.
+            message = t("apply.back_paddle.nothing_to_apply", slot=slot.name)
+            self._record_settings_apply_result(False, message)
+            self.refresh_shell()
+            return None
         target = _back_paddle_target_by_label(target_label)
         if target_label != _back_paddle_target_label(None) and target is None:
             message = t("apply.back_paddle.unknown_target", target=target_label)
@@ -5322,6 +5380,14 @@ class AppShell:
 
         self._record_settings_apply_result(success, message)
         self.refresh_shell()
+        if success:
+            # Authoritative: we just wrote this mapping, so fold it into the
+            # cached snapshot (no device read) and refresh the read-only Current
+            # Bindings list in place — it reflects the change without the user
+            # leaving and re-entering the Buttons tab. The source/target picker
+            # combos are left untouched (value-only update, no screen rebuild).
+            self._remember_button_binding(slot, mapping)
+            controller.refresh_current_bindings(self)
         return result
 
     def apply_lighting(self):
@@ -6054,6 +6120,10 @@ def _top_profile_label(state) -> str:
     if active_config_label.startswith("Config "):
         return t("status.config.slot", slot=active_config_label.removeprefix("Config "))
     return active_config_label
+
+
+def _top_profile_not_verified(state) -> bool:
+    return home._active_config_label(state) == "Not verified"
 
 
 def _polling_rate_label(snapshot: ControllerSnapshot | None) -> str:

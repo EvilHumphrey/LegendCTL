@@ -87,7 +87,7 @@ _STATUS_LABEL_KEY: dict[str, str] = {
 @dataclass
 class DeviceVsProfileScreenState:
     selected_profile_id: Optional[str] = None  # wrapper-profile name (the store key)
-    show_only_changes: bool = False
+    show_only_changes: bool = True
     status_text: str = ""
     status_kind: str = "info"  # info|warn|bad|good
     last_read_ts: Optional[float] = None  # time.time() of last live read (display only)

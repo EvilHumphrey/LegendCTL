@@ -986,8 +986,8 @@ class RestoreFlowTests(unittest.TestCase):
             self.assertIs(polling_outcome.verify_matched, False)
             self.assertIsNotNone(polling_outcome.expected_value)
             self.assertIsNotNone(polling_outcome.observed_value)
-            self.assertIn("HZ_1000", polling_outcome.expected_value)
-            self.assertIn("HZ_8000", polling_outcome.observed_value)
+            self.assertEqual(polling_outcome.expected_value, "1000 Hz")
+            self.assertEqual(polling_outcome.observed_value, "8000 Hz")
 
     def test_verified_field_outcome_leaves_expected_observed_none(self) -> None:
         """On verified fields, ``expected_value`` / ``observed_value`` stay
@@ -1362,10 +1362,10 @@ class ComputeRestorePreviewTests(unittest.TestCase):
                 )
 
     def test_preview_renders_scalar_str_values_inline(self) -> None:
-        """Per-field ``target_value`` / ``current_value`` are ``str()``
+        """Per-field ``target_value`` / ``current_value`` are compact
         renderings (same convention the restore-result-enrichment work uses on
-        :class:`RestoreFieldOutcome`). For ``PollingRate``, that means
-        the enum's ``str()`` text contains the variant name.
+        :class:`RestoreFieldOutcome`). For ``PollingRate``, that means a
+        user-facing Hz value rather than the enum repr.
         """
         def _drift(stub: _StubSettingsService) -> None:
             stub.polling_rate = PollingRate.HZ_8000
@@ -1379,8 +1379,8 @@ class ComputeRestorePreviewTests(unittest.TestCase):
                 d for d in preview.fields if d.field_name == "polling_rate"
             )
             self.assertTrue(polling.will_change)
-            self.assertIn("HZ_1000", polling.target_value)
-            self.assertIn("HZ_8000", polling.current_value)
+            self.assertEqual(polling.target_value, "1000 Hz")
+            self.assertEqual(polling.current_value, "8000 Hz")
 
     def test_preview_renders_collection_values_compactly(self) -> None:
         """Per the compact-preview rendering: collection-type fields
@@ -1470,9 +1470,9 @@ class ComputeRestorePreviewTests(unittest.TestCase):
             # Spot-check that the compact info actually made it through —
             # vibration carries all four strength bytes plus mode name.
             vibration = by_name["vibration"]
-            for fragment in ("10", "20", "30", "40", "NATIVE"):
+            for fragment in ("10", "20", "30", "40", "Native"):
                 self.assertIn(fragment, vibration.target_value)
-            for fragment in ("99", "STEREO_RESONANCE"):
+            for fragment in ("99", "Stereo resonance"):
                 self.assertIn(fragment, vibration.current_value)
 
             # Deadzones carry all four values (captured 5/6/90/91).
@@ -1847,8 +1847,8 @@ class Restore8PointSensitivityTests(unittest.TestCase):
                 if d.field_name == "sensitivity_left_8point"
             )
             # All 8 anchor pairs render (no truncation in the diff helper).
-            self.assertIn("(0,0)", left.target_value)
-            self.assertIn("(70,70)", left.target_value)
+            self.assertIn("0/0", left.target_value)
+            self.assertIn("70/70", left.target_value)
 
     # -- legacy device (regression guard) ------------------------------------
 

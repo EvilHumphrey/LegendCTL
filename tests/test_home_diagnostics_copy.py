@@ -44,6 +44,19 @@ class HomeDiagnosticsCopyTests(unittest.TestCase):
         self.assertEqual(home._active_config_label(unknown), "Not verified")
         self.assertEqual(home._active_config_label(known), "Config 3")
 
+    def test_active_config_label_localizes_to_profile_slot(self) -> None:
+        # The device labels its 4 onboard slots positionally "Profile 1-4";
+        # LegendCTL now matches that instead of the old "Config N". The internal
+        # trust-label token stays "Config N" (asserted above); only the
+        # user-facing localized value changes.
+        known = DeviceState(active_onboard_profile=2)
+        known.summary_sources["active_profile"] = "protocol"
+        self.assertEqual(home._localized_active_config_label(known), "Profile 2")
+
+    def test_draft_aligned_label_localizes_to_profile_slot(self) -> None:
+        draft = SimpleNamespace(display_name="Draft aligned to Config 2", dirty=False)
+        self.assertEqual(home._localized_draft_label(draft), "Draft aligned to Profile 2")
+
     def test_diagnostics_firmware_target_split_localizes_in_both_locales(self) -> None:
         # An earlier change moved the previously-mixed-language constant
         # FIRMWARE_TARGET_SPLIT_TEXT to an explicit i18n key so the
@@ -191,7 +204,7 @@ class HomeDiagnosticsCopyTests(unittest.TestCase):
         known.summary_sources["active_profile"] = "protocol"
 
         self.assertEqual(diagnostics.active_config_status_text(unknown), "Not verified")
-        self.assertEqual(diagnostics.active_config_status_text(known), "Config 2")
+        self.assertEqual(diagnostics.active_config_status_text(known), "Profile 2")
 
     def test_freshness_status_labels_stay_human_readable(self) -> None:
         self.assertEqual(

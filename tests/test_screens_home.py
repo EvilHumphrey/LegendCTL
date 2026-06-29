@@ -8,6 +8,7 @@ import dearpygui.dearpygui as dpg
 
 from tests.r2_shell_test_helpers import empty_snapshot, make_shell
 from zd_app.i18n import set_locale, t
+from zd_app.models import DeviceState
 from zd_app.ui.screens import home
 
 
@@ -107,12 +108,41 @@ class HomeScreenTests(unittest.TestCase):
             active = dpg.get_value("home_profile_active")
             draft = dpg.get_value("home_profile_draft")
             self.assertIn("\u672a\u9a8c\u8bc1", active)
-            self.assertIn("\u8349\u7a3f\u5bf9\u9f50\u5230\u914d\u7f6e 1", draft)
+            self.assertIn("\u8349\u7a3f\u5bf9\u9f50\u5230\u914d\u7f6e\u6587\u4ef6 1", draft)
             self.assertNotIn("Not verified", active)
             self.assertNotIn("Draft aligned", draft)
         finally:
             dpg.destroy_context()
             set_locale("en")
+
+    def test_home_active_shows_profile_slot_and_tooltip(self) -> None:
+        # Home's Active value is the device's onboard slot by NUMBER ("Profile N",
+        # relabelled from the old "Config N"); a tooltip explains the controller
+        # doesn't report a custom profile name. Building the tooltip also proves
+        # its wiring — a bad target tag would crash build.
+        shell = make_shell(settings_service=MagicMock())
+        shell.device_service.state = DeviceState(active_onboard_profile=3)
+        shell.device_service.state.summary_sources["active_profile"] = "protocol"
+        shell.device_service.state.connection_state = "connected"
+        shell.device_service.state.last_read_time = "now"
+        shell.last_controller_snapshot = empty_snapshot()
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            home.build(shell, "content_region")
+
+            self.assertEqual(dpg.get_value("home_profile_active"), "Profile 3")
+            self.assertTrue(
+                any(
+                    "doesn't expose a custom profile name" in value
+                    for value in _all_text_values()
+                )
+            )
+        finally:
+            dpg.destroy_context()
 
     def test_home_card_titles_use_section_title_helper(self) -> None:
         # Each card heading flows through the section() component,

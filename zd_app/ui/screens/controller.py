@@ -11,6 +11,7 @@ from zd_app.ui.themes import SPACE_MD, SPACE_LG, SPACE_XL
 from zd_app.ui.components import Column, action_button, table, table_empty_state
 from zd_app.ui.typography import helper_text, screen_title, section_title
 from zd_app.services.settings_service import (
+    ButtonSlot,
     ControllerButtonTarget,
     MacroSlot,
     MotionMappingMode,
@@ -90,6 +91,53 @@ _PLOT_AXIS_VIEW_PAD = 4.0
 # colour — so the size bump reinforces an already-correct colour cue.
 _DRAG_HANDLE_THICKNESS = 3.0
 _DRAG_HANDLE_MARKER_SIZE = 6.0
+
+
+# ---------------------------------------------------------------------------
+# Controller back-view diagram (Buttons tab). A small, code-drawn map of the
+# six BACK-side macro slots so a user can SEE which physical paddle is "M1" vs
+# "M2", etc. — the slot names alone aren't intuitive. Pure UI: NO device I/O,
+# no snapshot dependency. The highlight reflects the back-paddle ROW the user
+# is touching, NEVER a device read (LegendCTL can't read the device's real
+# paddle state — cf. the section's cannot_read note + honest-abstention work).
+# Drawlist precedent: about.py (radar mark) + live_verify.py (circularity plot,
+# the tag + configure_item live-recolor model this reuses).
+# ---------------------------------------------------------------------------
+
+# Compact canvas; the back view is wider-than-tall. Pixel literals — no hi-dpi
+# scaling exists anywhere in this codebase, so match that (known limitation).
+_DIAGRAM_W = 300
+_DIAGRAM_H = 220
+_PADDLE_R = 14  # hotspot radius
+_DIAGRAM_LABEL_SIZE = 13  # small enough to sit inside a _PADDLE_R hotspot
+
+# Back-view physical positions, MIRRORED — drawn as you see the controller when
+# you flip it over to look at its back (matches the official ZD manual's
+# back-view BUTTON LAYOUT): diagram image-LEFT = player's RIGHT. (x, y) in
+# drawlist-local px, origin top-left. CONFIRMED 2026-06-27 from official ZD
+# sources (manual + website images); see _spec_controller_diagram_2026-06-27 §6.
+#   Player's LEFT grip  = LM (upper paddle), M1 (lower rear button), LK (top claw)
+#   Player's RIGHT grip = RM (upper paddle), M2 (lower rear button), RK (top claw)
+# The verified, counter-intuitive split is M1 = LEFT-grip lower and M2 =
+# RIGHT-grip lower — that is CORRECT and intentional; do not "fix" it.
+# Only these six MacroSlots are on the back; M3/M4 are FRONT (beside the sticks)
+# and are deliberately NOT drawn here (a short note points to them instead).
+_BACK_PADDLE_POS: dict[MacroSlot, tuple[int, int]] = {
+    MacroSlot.RK: (95, 38),    # right top-edge claw   (image-left)
+    MacroSlot.LK: (205, 38),   # left  top-edge claw   (image-right)
+    MacroSlot.RM: (122, 102),  # right upper paddle    (central-left)
+    MacroSlot.LM: (178, 102),  # left  upper paddle    (central-right)
+    MacroSlot.M2: (120, 144),  # right lower rear button (below RM)
+    MacroSlot.M1: (180, 144),  # left  lower rear button (below LM)
+}
+
+# Slots whose DRAWN position is the most approximate, so they carry a visible
+# "*" marker + the approx caption (honest §7). The two top-edge CLAWS sit on a
+# different physical plane (the top edge, by LB/RB) than the flat rear face, so
+# projecting them onto a flat back-view canvas is the one genuinely schematic
+# placement; the four rear-face slots (LM/RM/M1/M2) map directly. Empty would
+# simply hide the approx caption (the honest framing note stays unconditional).
+_BACK_PADDLE_APPROX: frozenset[MacroSlot] = frozenset({MacroSlot.LK, MacroSlot.RK})
 
 
 def _on_drag_point_edit(shell, side: str, anchor: int, sender) -> None:
@@ -735,6 +783,7 @@ def _render_axis_inversion(shell) -> None:
 
 def _render_buttons_tab(shell) -> None:
     _render_loading_hint(shell)
+    _render_current_bindings_section(shell)
     section_title(t("controller.buttons.title"))
     dpg.add_text(t("controller.buttons.helper"), color=shell.COLORS["muted"], wrap=620)
     dpg.add_combo(
@@ -755,6 +804,189 @@ def _render_buttons_tab(shell) -> None:
     dpg.add_button(label=t("controller.buttons.apply"), width=220, callback=lambda: shell.apply_button_binding())
     dpg.add_text(t("controller.buttons.note"), color=shell.COLORS["muted"], wrap=700)
     _render_back_paddles_section(shell)
+    # Back-view paddle map sits with the Back Paddles section it explains, so a
+    # user can see which physical paddle each slot name maps to.
+    _render_controller_diagram_panel(shell)
+
+
+# Glyph shown for a button slot that the controller failed to read back (it is
+# ABSENT from the snapshot's ``button_bindings`` dict — never None-valued). An em
+# dash + tooltip, never a fabricated identity default: honest abstention is the
+# project's core principle (cf. the axis_inversion fake-default incident).
+_UNKNOWN_BINDING_GLYPH = "—"
+
+
+def _slot_identity_target(slot: ButtonSlot) -> ControllerButtonTarget | None:
+    """The target that means "this slot is unremapped" (e.g. A→A, UP→UP).
+
+    Derived by NAME, never by hardcoded hex: ``ButtonSlot`` and
+    ``ControllerButtonTarget`` share member names, so a slot's identity target is
+    the target with the same name. Returns ``None`` only if no same-named target
+    exists (defensive; all 16 current slots have one).
+    """
+
+    return ControllerButtonTarget.__members__.get(slot.name)
+
+
+def _render_current_bindings_section(shell) -> None:
+    """Read-only display of the controller's CURRENT per-button bindings.
+
+    Surfaces the remaps already read into ``button_bindings`` (HID cat 0x02) so
+    users can see their setup, not just the source→target picker below. Pure
+    display: no device I/O, no write path.
+
+    Each row's cell is built ONCE with stable-tagged widgets whose
+    value/colour/visibility are then updated in place by
+    :func:`refresh_current_bindings` — so an in-tab Apply Binding or a snapshot
+    refresh updates the list without recreating any widget, and without the user
+    leaving and re-entering the Buttons tab.
+    """
+
+    section_title(t("controller.buttons.current.title"))
+    snapshot = shell.last_controller_snapshot
+    if snapshot is None:
+        # Never read yet — don't fabricate rows; tell the user how to populate it.
+        dpg.add_text(
+            t("controller.buttons.current.not_read"),
+            color=shell.COLORS["muted"],
+            wrap=620,
+        )
+        dpg.add_spacer(height=SPACE_MD)
+        dpg.add_separator()
+        dpg.add_spacer(height=SPACE_MD)
+        return
+
+    bindings = snapshot.button_bindings or {}
+    for slot in ButtonSlot:
+        with dpg.group(horizontal=True, tag=f"current_binding_row_{slot.name}"):
+            dpg.add_text(slot.name, color=shell.COLORS["text"])
+            dpg.add_text("→", color=shell.COLORS["muted"])
+            _render_current_binding_target(shell, slot, bindings.get(slot))
+    dpg.add_spacer(height=SPACE_MD)
+    dpg.add_separator()
+    dpg.add_spacer(height=SPACE_MD)
+
+
+def refresh_current_bindings(shell) -> None:
+    """Update the read-only Current Bindings list in place from the current
+    snapshot.
+
+    Writes only widget VALUES / colours / visibility (no widget creation), so it
+    is safe to call from the value-only hydrate/refresh paths as well as after an
+    in-tab Apply Binding — the list then reflects the device without the user
+    leaving and re-entering the Buttons tab. Per-slot no-op when the row isn't
+    mounted (a different screen/tab is active, or nothing has been read yet so no
+    rows were built); those cases pick up the fresh snapshot when the Buttons tab
+    is next built.
+    """
+
+    snapshot = shell.last_controller_snapshot
+    bindings = (snapshot.button_bindings or {}) if snapshot is not None else {}
+    for slot in ButtonSlot:
+        _apply_current_binding_target_state(shell, slot, bindings.get(slot))
+
+
+def _render_current_binding_target(shell, slot: ButtonSlot, mapping) -> None:
+    """Build one slot's current-target cell as a FIXED set of stable-tagged
+    widgets, then paint the current state.
+
+    The cell is always the same three widgets — the target text, the
+    couldn't-read tooltip, and the "(remapped)" tag — regardless of state, so
+    :func:`_apply_current_binding_target_state` can switch between the
+    absent/default/remap/raw states with value + visibility writes alone (no
+    create/destroy). That is what keeps the live-refresh path free of widget
+    creation, so it can run from the value-only hydrate/refresh code paths.
+    """
+
+    target_tag = f"current_binding_target_{slot.name}"
+    target_item = dpg.add_text("", tag=target_tag)
+    # Tooltip explaining an unreadable slot. Always built; shown only in the
+    # absent state (toggled by the state applier below).
+    with dpg.tooltip(target_item, tag=f"current_binding_tip_{slot.name}"):
+        dpg.add_text(t("controller.buttons.current.unknown_tooltip"), wrap=320)
+    # The "(remapped)" tag. Always built; its VALUE is set to the tag text only
+    # for a real remap and blanked otherwise, so a default/absent row carries no
+    # stray "(remapped)" label even though the widget persists for live updates.
+    dpg.add_text(
+        "",
+        color=shell.COLORS["accent"],
+        tag=f"current_binding_remap_{slot.name}",
+    )
+    _apply_current_binding_target_state(shell, slot, mapping)
+
+
+def _apply_current_binding_target_state(shell, slot: ButtonSlot, mapping) -> None:
+    """Paint one slot's current-target cell for ``mapping`` using value / colour
+    / visibility writes only (no widget creation).
+
+    Honest absent/default/remap/raw states, identical to the build-time
+    rendering, but expressed as in-place updates so the same logic serves both
+    the first render and every live refresh. The leading ``does_item_exist``
+    guard makes it a safe no-op when the slot's row isn't mounted.
+    """
+
+    target_tag = f"current_binding_target_{slot.name}"
+    if not dpg.does_item_exist(target_tag):
+        return
+    tip_tag = f"current_binding_tip_{slot.name}"
+    remap_tag = f"current_binding_remap_{slot.name}"
+
+    def _show_tip(show: bool) -> None:
+        if dpg.does_item_exist(tip_tag):
+            dpg.configure_item(tip_tag, show=show)
+
+    def _set_remap_tag(text: str) -> None:
+        if dpg.does_item_exist(remap_tag):
+            dpg.set_value(remap_tag, text)
+
+    if mapping is None:
+        # Slot absent from the snapshot ⇒ it failed to read (timeout / over the
+        # read budget). Honest unknown — NEVER a default for an unread slot.
+        dpg.set_value(target_tag, _UNKNOWN_BINDING_GLYPH)
+        dpg.configure_item(target_tag, color=shell.COLORS["muted"])
+        _show_tip(True)
+        _set_remap_tag("")
+        return
+
+    _show_tip(False)
+    if mapping.target_kind != 0x01 or mapping.target_low != 0x00:
+        # Read succeeded, but this slot holds a mapping KIND LegendCTL doesn't
+        # model — a keyboard / macro / vendor kind set by the official app or a
+        # future firmware. Its target_value byte can collide with a controller-
+        # button value (B == 0x10 == ButtonMapping's default), so naming it would
+        # FABRICATE a remap we never actually read. Show the raw bytes with no
+        # "(remapped)" claim — honest-abstention over a pretty-but-wrong label.
+        # Mirrors restore_field_formatting / app_shell / snapshot_codec, which all
+        # gate the button name on kind 0x01 + low 0x00.
+        dpg.set_value(
+            target_tag,
+            f"kind=0x{mapping.target_kind:02X} "
+            f"low=0x{mapping.target_low:02X} "
+            f"val=0x{mapping.target_value:02X}",
+        )
+        dpg.configure_item(target_tag, color=shell.COLORS["accent"])
+        _set_remap_tag("")
+        return
+    try:
+        target = ControllerButtonTarget(mapping.target_value)
+    except ValueError:
+        # Read succeeded but the device returned a target byte we don't model.
+        # Show the raw byte rather than crashing or inventing a name.
+        dpg.set_value(target_tag, f"0x{mapping.target_value:02X}")
+        dpg.configure_item(target_tag, color=shell.COLORS["accent"])
+        _set_remap_tag("")
+        return
+
+    identity = _slot_identity_target(slot)
+    is_remap = identity is None or target.value != identity.value
+    dpg.set_value(target_tag, target.name)
+    if is_remap:
+        # Real remap — emphasize so it pops against the muted defaults.
+        dpg.configure_item(target_tag, color=shell.COLORS["accent"])
+        _set_remap_tag(t("controller.buttons.current.remapped_tag"))
+    else:
+        dpg.configure_item(target_tag, color=shell.COLORS["muted"])
+        _set_remap_tag("")
 
 
 def _render_back_paddles_section(shell) -> None:
@@ -762,6 +994,19 @@ def _render_back_paddles_section(shell) -> None:
     dpg.add_spacer(height=12)
     section_title(t("controller.back_paddles.title"))
     dpg.add_text(t("controller.back_paddles.subtitle"), color=shell.COLORS["muted"], wrap=680)
+    dpg.add_spacer(height=4)
+    # The key honest-display reframe: LegendCTL has NO read path for the
+    # controller's existing paddle/macro state (get_all_back_paddle_bindings()
+    # returns {}), so a row with no LegendCTL value must NEVER imply the device
+    # paddle is empty. This note states what we can't see, and that Apply
+    # OVERWRITES whatever is on the paddle — including a macro set elsewhere,
+    # which LegendCTL deliberately doesn't read or support. warn-coloured because
+    # it carries the destructive-overwrite caution, not just neutral context.
+    dpg.add_text(
+        t("controller.back_paddles.cannot_read_note"),
+        color=shell.COLORS["warn"],
+        wrap=720,
+    )
     dpg.add_spacer(height=4)
     dpg.add_text(
         t("controller.back_paddles.compatibility_note"),
@@ -777,14 +1022,30 @@ def _render_back_paddles_section(shell) -> None:
 
     for slot in MacroSlot:
         binding = bindings.get(slot)
-        target = binding.target if binding is not None else None
+        # Slot ABSENT from the snapshot => no LegendCTL-set value this session,
+        # and we can't read the device's real paddle state. Show an honest
+        # placeholder, NOT "Unbound" (which would falsely claim the device paddle
+        # is empty). "Unbound" stays in the dropdown as an explicit clear ACTION;
+        # a binding that IS present with target=None means the user picked Unbound
+        # here this session, so that genuinely-known state still shows "Unbound".
+        if binding is None:
+            default_value = t("controller.back_paddles.not_set_here")
+        else:
+            default_value = _back_paddle_target_label(binding.target)
         with dpg.group(horizontal=True, tag=f"back_paddle_row_{slot.name}"):
             dpg.add_text(slot.name, color=shell.COLORS["text"])
             dpg.add_combo(
                 items=target_options,
-                default_value=_back_paddle_target_label(target),
-                width=180,
+                default_value=default_value,
+                width=220,
                 tag=f"back_paddle_combo_{slot.name}",
+                # Touching a row's dropdown lights up that paddle on the back-view
+                # diagram below — the v1 highlight-on-select interaction (pure UI;
+                # the spec-blessed fallback to fiddly DPG hover handlers). slot
+                # rides ``user_data`` and ``shell`` is a free var, so the 3-arg
+                # DPG dispatch form preserves both (test_dpg_callback_signature_audit).
+                user_data=slot,
+                callback=lambda _sender, _app_data, user_data: refresh_diagram_paddle_highlight(shell, user_data),
             )
             dpg.add_button(
                 label=t("actions.apply"),
@@ -806,6 +1067,105 @@ def _back_paddle_target_label(target: ControllerButtonTarget | None) -> str:
     if target is None:
         return t("controller.back_paddles.unbound")
     return t(f"controller.back_paddles.target.{target.name}")
+
+
+def _render_controller_diagram_panel(shell) -> None:
+    """Compact, code-drawn BACK-view map of the six back macro slots.
+
+    Each back slot is a tagged hotspot circle (``diagram_paddle_{slot.name}``)
+    plus a tagged label (``diagram_paddle_label_{slot.name}``) drawn at its
+    mirrored §6 position, sitting on a low-fidelity controller-body silhouette.
+    M3/M4 are FRONT buttons (beside the sticks) and are deliberately NOT drawn —
+    a short note points to them instead.
+
+    Pure UI. The highlight (:func:`refresh_diagram_paddle_highlight`) recolors a
+    hotspot in place via ``configure_item`` — the same proven live-refresh model
+    as ``_apply_current_binding_target_state`` and the live_verify circularity
+    plot — and reflects the back-paddle ROW the user is touching, never a device
+    read (LegendCTL can't read the device's real paddle state). An always-on
+    honest note states exactly that; any slot whose drawn position is the most
+    schematic (``_BACK_PADDLE_APPROX``) gets a "*" marker + the approx caption.
+    """
+
+    dpg.add_spacer(height=12)
+    section_title(t("controller.buttons.diagram.title"))
+    with dpg.drawlist(width=_DIAGRAM_W, height=_DIAGRAM_H, tag="diagram_back_drawlist"):
+        # Low-fidelity controller back silhouette so the hotspots read as
+        # sitting on a controller, not floating. Subtle (panel_alt) so the
+        # labelled hotspots stay the focus; rounded body + two angled grip hints.
+        body = shell.COLORS["panel_alt"]
+        dpg.draw_rectangle((22, 22), (278, 176), color=body, thickness=2, rounding=26)
+        dpg.draw_line((62, 174), (44, 208), color=body, thickness=2)
+        dpg.draw_line((238, 174), (256, 208), color=body, thickness=2)
+
+        for slot, (cx, cy) in _BACK_PADDLE_POS.items():
+            label = f"{slot.name}*" if slot in _BACK_PADDLE_APPROX else slot.name
+            # Hotspot ring — recolored in place on highlight (default = muted).
+            dpg.draw_circle(
+                (cx, cy),
+                _PADDLE_R,
+                color=shell.COLORS["muted"],
+                thickness=2.0,
+                tag=f"diagram_paddle_{slot.name}",
+            )
+            # Label centred in the hotspot. draw_text anchors at the text's
+            # top-left, so offset by ~half the estimated text extent (a few px of
+            # drift is invisible on a schematic). Stays ``text``-coloured; only
+            # the ring carries the highlight state.
+            tx = cx - len(label) * _DIAGRAM_LABEL_SIZE * 0.25
+            ty = cy - _DIAGRAM_LABEL_SIZE * 0.5
+            dpg.draw_text(
+                (tx, ty),
+                label,
+                color=shell.COLORS["text"],
+                size=_DIAGRAM_LABEL_SIZE,
+                tag=f"diagram_paddle_label_{slot.name}",
+            )
+
+    # Honest framing (ALWAYS shown): the layout is manufacturer-spec, mirrored,
+    # and the highlight reflects YOUR selection — never a read of the device.
+    dpg.add_text(
+        t("controller.buttons.diagram.note"),
+        color=shell.COLORS["muted"],
+        wrap=720,
+    )
+    # M3/M4 are front buttons — explain why they aren't on the back view.
+    dpg.add_text(
+        t("controller.buttons.diagram.front_note"),
+        color=shell.COLORS["muted"],
+        wrap=720,
+    )
+    # Approx footnote only when some slot is flagged approximate (honest §7).
+    if _BACK_PADDLE_APPROX:
+        dpg.add_text(
+            t("controller.buttons.diagram.approx_note"),
+            color=shell.COLORS["muted"],
+            wrap=720,
+        )
+
+
+def refresh_diagram_paddle_highlight(shell, slot_or_none) -> None:
+    """Recolor the back-view diagram so the SELECTED back slot reads as accent
+    and every other reads as muted — value-only, guarded, no widget creation.
+
+    Mirrors ``_apply_current_binding_target_state``'s ``does_item_exist``-guarded
+    in-place refresh: each slot whose hotspot tag isn't mounted is simply
+    skipped, so this is a safe no-op when the Buttons tab (and so the diagram)
+    isn't on screen, and it never recreates a widget. ``slot_or_none=None``
+    clears the highlight (all muted). Pure UI — reflects the touched row, not a
+    device read. M3/M4 have no hotspot tag, so the loop skips them.
+    """
+
+    for slot in MacroSlot:
+        tag = f"diagram_paddle_{slot.name}"
+        if not dpg.does_item_exist(tag):
+            continue
+        selected = slot is slot_or_none
+        dpg.configure_item(
+            tag,
+            color=shell.COLORS["accent"] if selected else shell.COLORS["muted"],
+            thickness=3.0 if selected else 2.0,
+        )
 
 
 def _render_lighting_tab(shell) -> None:
@@ -850,6 +1210,15 @@ def _render_profiles_tab(shell) -> None:
     profiles = shell.list_wrapper_profiles()
     section_title(t("controller.profiles.title"))
     dpg.add_text(t("controller.profiles.subtitle"), color=shell.COLORS["muted"], wrap=700)
+    # Disambiguate the two profile namespaces: this tab lists LegendCTL-LOCAL
+    # profiles (real names, stored on this PC); the controller's four on-device
+    # slots are positional "Profile 1-4" whose names we can't read. Never let a
+    # user read a local profile as living on the device, or vice versa.
+    dpg.add_text(
+        t("controller.profiles.device_distinction_note"),
+        color=shell.COLORS["muted"],
+        wrap=700,
+    )
     skipped_count_fn = getattr(shell, "wrapper_profiles_skipped_count", None)
     skipped_count = skipped_count_fn() if callable(skipped_count_fn) else 0
     if skipped_count:
