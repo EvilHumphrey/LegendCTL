@@ -27,6 +27,7 @@ from zd_app.services._log_entry import (
     render_log_entry,
     render_log_message,
 )
+from zd_app.services.path_scrub import scrub_paths
 
 
 # Absolute path to pnputil.exe (avoids a PATH search-order hijack).
@@ -266,7 +267,7 @@ class DeviceService:
             logger.debug("crash_reporter.record_log_entry failed", exc_info=True)
 
     def recent_events(self, limit: int = 8) -> list[str]:
-        return [render_log_entry(entry) for entry in list(self.event_log)[:limit]]
+        return [scrub_paths(render_log_entry(entry)) for entry in list(self.event_log)[:limit]]
 
     def clear_event_log(self) -> None:
         self.event_log.clear()
@@ -287,7 +288,11 @@ class DeviceService:
             label = self._summary_source_label(source)
             if len(fields) == 4:
                 return label
-            return f"{label} ({', '.join(fields)})"
+            return t(
+                "diagnostics.summary_source.source_for",
+                source=label,
+                fields=", ".join(fields),
+            )
 
         parts = []
         for source, fields in grouped.items():

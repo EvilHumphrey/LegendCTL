@@ -57,6 +57,7 @@ from zd_app.storage.module_passport_models import (
     STATUS_WATCH,
     STATUS_WEAR_OBSERVED,
 )
+from zd_app.ui import diagnostic_bundle_preview
 from zd_app.ui.typography import helper_text, screen_title, section_title
 
 
@@ -2269,6 +2270,57 @@ def _on_generate_zip(shell) -> None:
         shell.rebuild_current_screen()
         return
     _read_export_form(state)
+    _open_zip_preview(shell, bundle, state)
+
+
+def _open_zip_preview(
+    shell,
+    bundle: DiagnosticBundleService,
+    state: ModulesScreenState,
+) -> None:
+    try:
+        manifest = bundle.preview_bundle_manifest(
+            include_archived=bool(state.export_include_archived),
+            health_report_limit=int(state.export_health_limit),
+            wear_ledger_days=int(state.export_wear_window_days),
+            device_identity=_device_identity(shell),
+        )
+    except Exception:  # noqa: BLE001 — surface as generate_failed
+        logger.exception("modules.export: preview manifest raised")
+        state.status_text = t("modules.export.generate_failed")
+        state.status_kind = "warn"
+        _close_export_modal()
+        shell.rebuild_current_screen()
+        return
+
+    def _open() -> None:
+        diagnostic_bundle_preview.open_preview_modal(
+            shell,
+            manifest,
+            on_export=lambda: _finish_generate_zip(shell, bundle, state),
+            on_cancel=lambda: shell.rebuild_current_screen(),
+        )
+
+    modal_swap = getattr(shell, "_defer_modal_swap", None)
+    if callable(modal_swap):
+        modal_swap(
+            _open,
+            delete_tags=(
+                TAG_EXPORT_MODAL,
+                diagnostic_bundle_preview.PREVIEW_MODAL_TAG,
+            ),
+            key="modules_export_zip_preview",
+        )
+    else:
+        _close_export_modal()
+        _open()
+
+
+def _finish_generate_zip(
+    shell,
+    bundle: DiagnosticBundleService,
+    state: ModulesScreenState,
+) -> None:
     target = _generate_zip(shell, bundle, state)
     if target is None:
         state.status_text = t("modules.export.generate_failed")
@@ -2280,7 +2332,6 @@ def _on_generate_zip(shell) -> None:
         )
         state.status_kind = "info"
         _try_open_explorer(target.parent)
-    _close_export_modal()
     shell.rebuild_current_screen()
 
 

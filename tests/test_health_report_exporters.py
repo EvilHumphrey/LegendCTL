@@ -310,6 +310,28 @@ class ExportPathScrubbingTests(unittest.TestCase):
         self.assertNotIn("Doe", md)
         self.assertNotIn(r"C:\Users", md)
 
+    def test_markdown_escapes_freeform_device_table_cells(self) -> None:
+        base = _fixture_report()
+        report = dataclasses.replace(
+            base,
+            device=dataclasses.replace(
+                base.device,
+                controller_name="ZD | [link](file:///x) `tick`\nnext",
+                profile_name="Apex | [link](file:///profile) `profile`\nline",
+            ),
+        )
+
+        md = to_markdown(report)
+
+        self.assertIn(r"ZD \| \[link\]\(file:/x\) \`tick\` next", md)
+        self.assertIn(
+            r"Apex \| \[link\]\(file:/profile\) \`profile\` line",
+            md,
+        )
+        self.assertNotIn("[link](file:///x)", md)
+        self.assertNotIn("`tick`", md)
+        self.assertNotIn("\nnext", md)
+
     def test_json_scrubs_profile_name_path(self) -> None:
         report = self._report_with_profile(r"C:\Users\Jane Doe\evil")
         raw = to_json(report)

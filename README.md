@@ -102,11 +102,11 @@ can and can't do.
 
 **Live Verify** reads both sticks straight from XInput. Start a stick test and sweep — each stick's trace fills its circle, sweep-coverage climbs, and the per-stick circularity settles to a percentage, so you can see how round your sticks really are and catch a flat spot or off-center rest. Everything runs locally; no network, no telemetry.
 
-<!-- TODO(operator): Add current v2.1.0 screenshots under assets/screenshots/ and reference them here. -->
+<!-- TODO(operator): Add current v2.2.0 screenshots under assets/screenshots/ and reference them here. -->
 
 ## Features
 
-v2.1.0 — feature-complete for normal use.
+v2.2.0 — feature-complete for normal use.
 
 Controller settings (all written as standard HID feature reports; a normal Apply
 reports each field's write outcome and refreshes the on-screen state from the
@@ -182,7 +182,7 @@ how releases are (will be) signed.
 Two ways to get it — the **portable ZIP is the simplest** and needs no admin
 rights; the installer adds Start-Menu/uninstaller integration if you prefer it.
 Both ship the exact same wrapper executable. (In the download names below,
-`<version>` is just the release number — e.g. `2.1.0` in the current release.)
+`<version>` is just the release number — e.g. `2.2.0` in the current release.)
 
 > **A note on names.** The project is named **LegendCTL**, but the application
 > window, Start Menu entry, and executable still carry the legacy name *ZD

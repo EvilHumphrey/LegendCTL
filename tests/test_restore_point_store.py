@@ -207,6 +207,20 @@ class ListTests(unittest.TestCase):
             # The schema error should surface explicitly (not just "parse error").
             self.assertIn("schema_version", skipped[0].error.lower())
 
+    def test_skipped_file_error_scrubs_full_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = RestorePointStore(tmp)
+            bad_path = Path(tmp) / "20260524-200000_manual_dddddd.json"
+            bad_path.write_text("[" * 70 + "]" * 70, encoding="utf-8")
+
+            valid, skipped = store.list()
+
+            self.assertEqual(valid, [])
+            self.assertEqual(len(skipped), 1)
+            self.assertNotIn(str(bad_path), skipped[0].error)
+            self.assertNotIn(str(Path(tmp)), skipped[0].error)
+            self.assertIn(bad_path.name, skipped[0].error)
+
 
 class ListVanishedFileTests(unittest.TestCase):
     def test_file_deleted_between_glob_and_read_skips_silently(self) -> None:

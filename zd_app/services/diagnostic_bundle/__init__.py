@@ -30,6 +30,8 @@ from zd_app.services.diagnostic_bundle.boundary import (
 from zd_app.services.diagnostic_bundle.service import (
     APP_DATA_PLACEHOLDER,
     BUNDLE_DIRNAME,
+    DiagnosticBundlePreviewItem,
+    DiagnosticBundlePreviewManifest,
     DiagnosticBundleService,
 )
 
@@ -39,5 +41,7 @@ __all__ = [
     "BUNDLE_DIRNAME",
     "CLAIM_BOUNDARY_PARAGRAPH",
     "CLAIM_BOUNDARY_SHORT",
+    "DiagnosticBundlePreviewItem",
+    "DiagnosticBundlePreviewManifest",
     "DiagnosticBundleService",
 ]

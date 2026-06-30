@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from zd_app.services.settings_service import ControllerSnapshot
+from zd_app.storage._import_guards import read_guarded_json
 from zd_app.storage.settings_store import initialize_user_data_dir
 from zd_app.storage.snapshot_codec import snapshot_from_dict, snapshot_to_dict
 
@@ -158,15 +159,18 @@ class LastAppliedStore:
 
         path = self.path
         try:
-            raw = path.read_text(encoding="utf-8")
+            payload = read_guarded_json(path)
         except FileNotFoundError:
             return None
         except OSError as exc:
             logger.warning("could not read last-applied record %s: %s", path, exc)
             return None
+        except (ValueError, RecursionError, json.JSONDecodeError) as exc:
+            logger.warning("corrupt last-applied record %s: %s", path, exc)
+            return None
         try:
-            return record_from_dict(json.loads(raw))
-        except (json.JSONDecodeError, ValueError) as exc:
+            return record_from_dict(payload)
+        except ValueError as exc:
             logger.warning("corrupt last-applied record %s: %s", path, exc)
             return None
 

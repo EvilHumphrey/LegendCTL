@@ -24,11 +24,22 @@ from unittest.mock import MagicMock, patch
 
 import dearpygui.dearpygui as dpg
 
-from tests.r2_shell_test_helpers import make_shell
+from tests.r2_shell_test_helpers import empty_snapshot, make_shell
 from zd_app import i18n
 from zd_app.models import AppSettings, DeviceState
-from zd_app.services.diagnostic_bundle import DiagnosticBundleService
-from zd_app.services.settings_service import ControllerButtonTarget, StickDeadzones
+from zd_app.services.diagnostic_bundle import (
+    DiagnosticBundlePreviewItem,
+    DiagnosticBundlePreviewManifest,
+    DiagnosticBundleService,
+)
+from zd_app.services.settings_service import (
+    BackPaddleBinding,
+    ButtonMapping,
+    ButtonSlot,
+    ControllerButtonTarget,
+    MacroSlot,
+    StickDeadzones,
+)
 from zd_app.services.xinput_poll_service import XInputSnapshot
 from zd_app.ui import components, typography
 from zd_app.ui.app_shell import AppShell
@@ -186,6 +197,42 @@ def _last_configure(fake, tag):
     return None
 
 
+def _configure_calls(fake, tag) -> list[dict]:
+    return [
+        call.kwargs
+        for call in fake.configure_item.call_args_list
+        if call.args and call.args[0] == tag
+    ]
+
+
+def _bounds_center(bounds):
+    (x1, y1), (x2, y2) = bounds
+    return ((x1 + x2) / 2, (y1 + y2) / 2)
+
+
+def _rects_overlap(a, b) -> bool:
+    return (
+        a[0][0] < b[1][0]
+        and a[1][0] > b[0][0]
+        and a[0][1] < b[1][1]
+        and a[1][1] > b[0][1]
+    )
+
+
+def _rect_overlaps_circle(rect, center, radius: float) -> bool:
+    closest_x = min(max(center[0], rect[0][0]), rect[1][0])
+    closest_y = min(max(center[1], rect[0][1]), rect[1][1])
+    dx = center[0] - closest_x
+    dy = center[1] - closest_y
+    return dx * dx + dy * dy < radius * radius
+
+
+def _circle_overlaps_circle(a_center, a_radius: float, b_center, b_radius: float) -> bool:
+    dx = a_center[0] - b_center[0]
+    dy = a_center[1] - b_center[1]
+    return dx * dx + dy * dy < (a_radius + b_radius) * (a_radius + b_radius)
+
+
 def _collect_labels(root) -> list[str]:
     labels: list[str] = []
     stack = [root]
@@ -260,6 +307,10 @@ class LiveVerifyScreenBuildTests(unittest.TestCase):
         # Player-slot override row (multi-slot selection) builds in every state.
         self.assertTrue(dpg.does_item_exist(live_verify.PLAYER_SELECT_COMBO_TAG))
         self.assertTrue(dpg.does_item_exist(live_verify.PLAYER_ACTIVE_TAG))
+        self.assertTrue(dpg.does_item_exist(live_verify.LIVE_VERIFY_VIEW_FRONT_BUTTON_TAG))
+        self.assertTrue(dpg.does_item_exist(live_verify.LIVE_VERIFY_VIEW_BACK_BUTTON_TAG))
+        self.assertTrue(dpg.does_item_exist(live_verify.LIVE_VERIFY_VIEW_TOP_BUTTON_TAG))
+        self.assertTrue(dpg.does_item_exist(live_verify.LIVE_VERIFY_SHOW_BINDINGS_TAG))
         self.assertTrue(dpg.does_item_exist(live_verify._test_button_tag("left")))
         self.assertTrue(dpg.does_item_exist(live_verify._test_button_tag("right")))
         self.assertTrue(
@@ -319,7 +370,7 @@ class LiveVerifyScreenBuildTests(unittest.TestCase):
         dpg.create_context()
         try:
             self._build_full_screen(_live_snap())
-            self.assertTrue(dpg.does_item_exist("diagram_face_drawlist"))
+            self.assertTrue(dpg.does_item_exist(live_verify.DIAGRAM_FACE_DRAWLIST_TAG))
             for target in live_verify._BUTTON_CHIP_ORDER:
                 with self.subTest(target=target.name):
                     self.assertTrue(
@@ -342,6 +393,222 @@ class LiveVerifyScreenBuildTests(unittest.TestCase):
                         dpg.does_item_exist(live_verify._face_stick_dot_tag(side)),
                         side,
                     )
+            for target in live_verify._FRONT_BINDING_BADGE_TARGETS:
+                with self.subTest(badge=target.name):
+                    self.assertTrue(
+                        dpg.does_item_exist(live_verify._face_binding_badge_tag(target)),
+                        target.name,
+                    )
+        finally:
+            dpg.destroy_context()
+
+    def test_face_hotspot_geometry_is_distinct_and_non_overlapping(self) -> None:
+        rects = {
+            **live_verify._FACE_TRIGGER_RECTS,
+            **live_verify._FACE_BUMPER_RECTS,
+        }
+        for target, rect in live_verify._FACE_TRIGGER_RECTS.items():
+            bumper = (
+                ControllerButtonTarget.LB
+                if target is ControllerButtonTarget.LT
+                else ControllerButtonTarget.RB
+            )
+            with self.subTest(trigger=target.name, bumper=bumper.name):
+                self.assertLess(
+                    rect[1][1],
+                    live_verify._FACE_BUMPER_RECTS[bumper][0][1],
+                )
+
+        rect_items = list(rects.items())
+        for index, (left_target, left_rect) in enumerate(rect_items):
+            for right_target, right_rect in rect_items[index + 1 :]:
+                with self.subTest(left=left_target.name, right=right_target.name):
+                    self.assertFalse(_rects_overlap(left_rect, right_rect))
+
+        circle_targets = [
+            target
+            for target in live_verify._BUTTON_CHIP_ORDER
+            if target not in live_verify._FACE_BUMPER_RECTS
+        ]
+        for rect_target, rect in rects.items():
+            for circle_target in circle_targets:
+                radius = (
+                    live_verify._FACE_STICK_R
+                    if circle_target
+                    in (ControllerButtonTarget.LS, ControllerButtonTarget.RS)
+                    else live_verify._FACE_BUTTON_R
+                )
+                with self.subTest(rect=rect_target.name, circle=circle_target.name):
+                    self.assertFalse(
+                        _rect_overlaps_circle(
+                            rect,
+                            live_verify._FACE_BUTTON_POS[circle_target],
+                            radius,
+                        )
+                    )
+
+        for index, left in enumerate(circle_targets):
+            left_radius = (
+                live_verify._FACE_STICK_R
+                if left in (ControllerButtonTarget.LS, ControllerButtonTarget.RS)
+                else live_verify._FACE_BUTTON_R
+            )
+            for right in circle_targets[index + 1 :]:
+                right_radius = (
+                    live_verify._FACE_STICK_R
+                    if right in (ControllerButtonTarget.LS, ControllerButtonTarget.RS)
+                    else live_verify._FACE_BUTTON_R
+                )
+                with self.subTest(left=left.name, right=right.name):
+                    self.assertFalse(
+                        _circle_overlaps_circle(
+                            live_verify._FACE_BUTTON_POS[left],
+                            left_radius,
+                            live_verify._FACE_BUTTON_POS[right],
+                            right_radius,
+                        )
+                    )
+
+    def test_top_hotspot_geometry_is_distinct_correctly_sided(self) -> None:
+        left_labels = ("L1", "L2", "LK")
+        right_labels = ("R1", "R2", "RK")
+        for label in left_labels:
+            with self.subTest(left=label):
+                self.assertLess(live_verify._top_control_center(label)[0], 280)
+        for label in right_labels:
+            with self.subTest(right=label):
+                self.assertGreater(live_verify._top_control_center(label)[0], 280)
+
+        rect_items = [
+            (label, live_verify._top_control_bounds(label))
+            for label in live_verify._TOP_CONTROLS
+        ]
+        for index, (left_label, left_rect) in enumerate(rect_items):
+            for right_label, right_rect in rect_items[index + 1 :]:
+                with self.subTest(left=left_label, right=right_label):
+                    self.assertFalse(_rects_overlap(left_rect, right_rect))
+
+        self.assertTrue(live_verify._top_is_source_only("LK"))
+        self.assertTrue(live_verify._top_is_source_only("RK"))
+        self.assertFalse(live_verify._top_is_source_only("L1"))
+        self.assertFalse(live_verify._top_is_source_only("R2"))
+
+    def test_contour_smoothing_helpers_generate_stable_high_segment_shapes(self) -> None:
+        anchors = [(0.0, 0.0), (20.0, 0.0), (20.0, 12.0), (0.0, 12.0)]
+        smoothed = live_verify._smooth_closed_points(anchors, samples=4)
+        self.assertEqual(len(smoothed), len(anchors) * 4)
+        self.assertEqual(smoothed[0], anchors[0])
+        self.assertEqual(smoothed[4], anchors[1])
+
+        rounded = live_verify._rounded_rect_points((10, 20), (50, 60), 8, segments=4)
+        self.assertGreater(len(rounded), 16)
+        xs = [point[0] for point in rounded]
+        ys = [point[1] for point in rounded]
+        self.assertAlmostEqual(min(xs), 10)
+        self.assertAlmostEqual(max(xs), 50)
+        self.assertAlmostEqual(min(ys), 20)
+        self.assertAlmostEqual(max(ys), 60)
+
+    def test_back_layout_matches_manual_top_claws_and_inner_paddles(self) -> None:
+        pos = live_verify.BACK_PADDLE_POS
+        self.assertEqual(
+            set(live_verify._BACK_TOP_CLAW_SLOTS),
+            {MacroSlot.RK, MacroSlot.LK},
+        )
+        self.assertLess(pos[MacroSlot.RK][0], 150)
+        self.assertGreater(pos[MacroSlot.LK][0], 150)
+        self.assertLess(pos[MacroSlot.RK][1], pos[MacroSlot.RM][1])
+        self.assertLess(pos[MacroSlot.LK][1], pos[MacroSlot.LM][1])
+        self.assertEqual(
+            live_verify._BACK_UPPER_PADDLE_SLOTS,
+            (MacroSlot.RM, MacroSlot.LM),
+        )
+        self.assertEqual(
+            live_verify._BACK_LOWER_PADDLE_SLOTS,
+            (MacroSlot.M2, MacroSlot.M1),
+        )
+        self.assertLess(pos[MacroSlot.RM][1], pos[MacroSlot.M2][1])
+        self.assertLess(pos[MacroSlot.LM][1], pos[MacroSlot.M1][1])
+        self.assertLess(pos[MacroSlot.RM][0], pos[MacroSlot.LM][0])
+        self.assertLess(pos[MacroSlot.M2][0], pos[MacroSlot.M1][0])
+
+    def test_front_binding_badges_anchor_to_redesigned_hotspots(self) -> None:
+        self.assertEqual(
+            live_verify._front_binding_badge_pos(ControllerButtonTarget.LT),
+            (216, 22),
+        )
+        self.assertEqual(
+            live_verify._front_binding_badge_pos(ControllerButtonTarget.LB),
+            (192, 66),
+        )
+        for target in (
+            ControllerButtonTarget.LT,
+            ControllerButtonTarget.LB,
+            ControllerButtonTarget.A,
+            ControllerButtonTarget.LS,
+        ):
+            with self.subTest(target=target.name):
+                _p1, p2 = live_verify._face_hotspot_bounds(target)
+                badge_x, _badge_y = live_verify._front_binding_badge_pos(target)
+                self.assertGreater(badge_x, p2[0])
+
+    def test_back_view_prebuilds_static_paddle_tags_and_badges(self) -> None:
+        dpg.create_context()
+        try:
+            self._build_full_screen(_live_snap())
+            self.assertTrue(dpg.does_item_exist(live_verify.DIAGRAM_BACK_DRAWLIST_TAG))
+            for slot in live_verify._BACK_PADDLE_SLOTS:
+                with self.subTest(slot=slot.name):
+                    self.assertTrue(dpg.does_item_exist(live_verify._back_hotspot_tag(slot)))
+                    self.assertTrue(dpg.does_item_exist(live_verify._back_label_tag(slot)))
+                    self.assertTrue(
+                        dpg.does_item_exist(live_verify._back_binding_badge_tag(slot))
+                    )
+        finally:
+            dpg.destroy_context()
+
+    def test_top_view_prebuilds_live_and_source_only_hotspots(self) -> None:
+        dpg.create_context()
+        try:
+            self._build_full_screen(_live_snap())
+            self.assertTrue(dpg.does_item_exist(live_verify.DIAGRAM_TOP_DRAWLIST_TAG))
+            for label in live_verify._TOP_CONTROLS:
+                with self.subTest(label=label):
+                    self.assertTrue(dpg.does_item_exist(live_verify._top_hotspot_tag(label)))
+                    self.assertTrue(dpg.does_item_exist(live_verify._top_label_tag(label)))
+                    self.assertTrue(
+                        dpg.does_item_exist(live_verify._top_binding_badge_tag(label))
+                    )
+        finally:
+            dpg.destroy_context()
+
+    def test_inspector_builds_stable_widgets_and_selectors(self) -> None:
+        dpg.create_context()
+        try:
+            self._build_full_screen(_live_snap())
+            for tag in (
+                live_verify.LIVE_VERIFY_INSPECTOR_HINT_TAG,
+                live_verify.LIVE_VERIFY_INSPECTOR_IDENTITY_TAG,
+                live_verify.LIVE_VERIFY_INSPECTOR_LIVE_TAG,
+                live_verify.LIVE_VERIFY_INSPECTOR_LIVE_BAR_TAG,
+                live_verify.LIVE_VERIFY_INSPECTOR_BINDING_TAG,
+                live_verify.LIVE_VERIFY_INSPECTOR_BINDING_TIP_TAG,
+                live_verify.LIVE_VERIFY_INSPECTOR_REMAP_TAG,
+                live_verify.LIVE_VERIFY_INSPECTOR_EXPLANATION_TAG,
+                live_verify.LIVE_VERIFY_INSPECTOR_EDIT_TAG,
+                live_verify._control_selectable_tag(ControllerButtonTarget.A),
+                live_verify._control_selectable_tag(MacroSlot.M1),
+            ):
+                with self.subTest(tag=tag):
+                    self.assertTrue(dpg.does_item_exist(tag), tag)
+            self.assertEqual(
+                dpg.get_value(live_verify.LIVE_VERIFY_INSPECTOR_HINT_TAG),
+                i18n.t("diagnostics.live_verify.inspector.select_hint"),
+            )
+            self.assertEqual(
+                dpg.get_value(live_verify.LIVE_VERIFY_INSPECTOR_EXPLANATION_TAG),
+                i18n.t("diagnostics.live_verify.face_diagram.note"),
+            )
         finally:
             dpg.destroy_context()
 
@@ -358,6 +625,44 @@ class LiveVerifyScreenBuildTests(unittest.TestCase):
                 i18n.t("diagnostics.live_verify.face_diagram.note"),
                 labels,
             )
+            self.assertTrue(
+                dpg.does_item_exist(live_verify.DIAGRAM_FACE_SOURCE_NOTE_TAG)
+            )
+            self.assertIn(
+                i18n.t("diagnostics.live_verify.back_diagram.note"),
+                labels,
+            )
+            self.assertIn(
+                i18n.t("diagnostics.live_verify.top_diagram.title"),
+                labels,
+            )
+            self.assertIn(
+                i18n.t("diagnostics.live_verify.top_diagram.note"),
+                labels,
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_on_device_binding_guide_renders_manual_combos(self) -> None:
+        dpg.create_context()
+        try:
+            self._build_full_screen(_live_snap())
+            labels = _collect_labels(live_verify.LIVE_VERIFY_ROOT_TAG)
+            for key in (
+                "diagnostics.live_verify.binding_guide.title",
+                "diagnostics.live_verify.binding_guide.framing",
+                "diagnostics.live_verify.binding_guide.assign",
+                "diagnostics.live_verify.binding_guide.clear",
+                "diagnostics.live_verify.binding_guide.profiles",
+            ):
+                with self.subTest(key=key):
+                    self.assertIn(i18n.t(key), labels)
+            rendered = "\n".join(labels)
+            self.assertIn(
+                "Mode + [LK / RK / LM / RM / M1 / M2 / M3 / M4]",
+                rendered,
+            )
+            self.assertIn("START + D-Pad Up / Left / Down / Right", rendered)
         finally:
             dpg.destroy_context()
 
@@ -519,6 +824,22 @@ class LiveVerifyFrameCallbackTests(unittest.TestCase):
         ), patch.object(components, "dpg", fake):
             cb()
 
+    def _click_model(self, shell, fake, view: str, point) -> None:
+        origin = (23, 41)
+        fake.get_mouse_pos.return_value = [
+            origin[0] + point[0],
+            origin[1] + point[1],
+        ]
+        fake.get_item_rect_min.return_value = [origin[0], origin[1]]
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._handle_diagram_click(shell, view)
+
+    def _set_view(self, shell, fake, view: str) -> None:
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._set_workspace_view(shell, view)
+        fake.configure_item.reset_mock()
+        fake.set_value.reset_mock()
+
     def test_build_registers_chain_and_starts_service(self) -> None:
         _shell, service, fake = self._build_with_fake(_live_snap())
         self.assertEqual(len(fake._registered), 1)
@@ -655,10 +976,57 @@ class LiveVerifyFrameCallbackTests(unittest.TestCase):
         self.assertEqual(left_dot["fill"], shell.COLORS["good"])
         self.assertEqual(right_dot["color"], shell.COLORS["good"])
         self.assertEqual(right_dot["fill"], shell.COLORS["good"])
-        self.assertAlmostEqual(left_dot["center"][0], 126.0, places=2)
-        self.assertAlmostEqual(left_dot["center"][1], 78.0, places=2)
-        self.assertAlmostEqual(right_dot["center"][0], 230.0, places=2)
-        self.assertAlmostEqual(right_dot["center"][1], 176.0, places=2)
+        left_cx, left_cy = live_verify._FACE_STICK_CENTERS["left"]
+        right_cx, right_cy = live_verify._FACE_STICK_CENTERS["right"]
+        self.assertAlmostEqual(
+            left_dot["center"][0],
+            left_cx + _live_snap(left_stick_x=32767).left_stick_normalized[0] * live_verify._FACE_STICK_DOT_TRAVEL,
+            places=2,
+        )
+        self.assertAlmostEqual(
+            left_dot["center"][1],
+            left_cy - _live_snap(left_stick_y=32767).left_stick_normalized[1] * live_verify._FACE_STICK_DOT_TRAVEL,
+            places=2,
+        )
+        self.assertAlmostEqual(
+            right_dot["center"][0],
+            right_cx + _live_snap(right_stick_x=-32768).right_stick_normalized[0] * live_verify._FACE_STICK_DOT_TRAVEL,
+            places=2,
+        )
+        self.assertAlmostEqual(
+            right_dot["center"][1],
+            right_cy - _live_snap(right_stick_y=-32768).right_stick_normalized[1] * live_verify._FACE_STICK_DOT_TRAVEL,
+            places=2,
+        )
+
+    def test_live_lt_highlight_does_not_light_lb_bumper(self) -> None:
+        shell, _service, fake = self._build_with_fake(
+            _live_snap(
+                buttons=frozenset(),
+                left_trigger=255,
+                right_trigger=0,
+                left_stick_x=0,
+                left_stick_y=0,
+                right_stick_x=0,
+                right_stick_y=0,
+            )
+        )
+        self._tick(fake)
+
+        self.assertEqual(
+            _last_configure(
+                fake, live_verify._face_hotspot_tag(ControllerButtonTarget.LT)
+            )["color"],
+            shell.COLORS["good"],
+        )
+        lb_calls = _configure_calls(
+            fake, live_verify._face_hotspot_tag(ControllerButtonTarget.LB)
+        )
+        self.assertTrue(lb_calls)
+        self.assertFalse(
+            any(call.get("color") == shell.COLORS["good"] for call in lb_calls)
+        )
+        self.assertEqual(lb_calls[-1]["color"], shell.COLORS["muted"])
 
     def test_face_trigger_display_threshold_mutes_resting_noise(self) -> None:
         shell, service, fake = self._build_with_fake(
@@ -738,6 +1106,633 @@ class LiveVerifyFrameCallbackTests(unittest.TestCase):
         self.assertEqual(deflected_dot["fill"], shell.COLORS["good"])
         self.assertAlmostEqual(deflected_dot["center"][0], expected_x, places=2)
         self.assertAlmostEqual(deflected_dot["center"][1], cy, places=2)
+
+    def test_segmented_switch_toggles_prebuilt_view_visibility(self) -> None:
+        shell, _service, fake = self._build_with_fake(_live_snap())
+        fake.configure_item.reset_mock()
+
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._set_workspace_view(shell, live_verify._WORKSPACE_VIEW_BACK)
+
+        self.assertFalse(
+            _last_configure(fake, live_verify.DIAGRAM_FACE_DRAWLIST_TAG)["show"]
+        )
+        self.assertTrue(
+            _last_configure(fake, live_verify.DIAGRAM_BACK_DRAWLIST_TAG)["show"]
+        )
+        self.assertFalse(
+            _last_configure(fake, live_verify.DIAGRAM_TOP_DRAWLIST_TAG)["show"]
+        )
+
+        fake.configure_item.reset_mock()
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._set_workspace_view(shell, live_verify._WORKSPACE_VIEW_TOP)
+
+        self.assertFalse(
+            _last_configure(fake, live_verify.DIAGRAM_FACE_DRAWLIST_TAG)["show"]
+        )
+        self.assertFalse(
+            _last_configure(fake, live_verify.DIAGRAM_BACK_DRAWLIST_TAG)["show"]
+        )
+        self.assertTrue(
+            _last_configure(fake, live_verify.DIAGRAM_TOP_DRAWLIST_TAG)["show"]
+        )
+
+        fake.configure_item.reset_mock()
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._set_workspace_view(shell, live_verify._WORKSPACE_VIEW_FRONT)
+
+        self.assertTrue(
+            _last_configure(fake, live_verify.DIAGRAM_FACE_DRAWLIST_TAG)["show"]
+        )
+        self.assertFalse(
+            _last_configure(fake, live_verify.DIAGRAM_BACK_DRAWLIST_TAG)["show"]
+        )
+        self.assertFalse(
+            _last_configure(fake, live_verify.DIAGRAM_TOP_DRAWLIST_TAG)["show"]
+        )
+
+    def test_back_view_is_not_live_lit_by_frame_refresh(self) -> None:
+        shell, _service, fake = self._build_with_fake(
+            _live_snap(buttons=frozenset({ControllerButtonTarget.A}))
+        )
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._set_workspace_view(shell, live_verify._WORKSPACE_VIEW_BACK)
+        fake.configure_item.reset_mock()
+
+        self._tick(fake)
+
+        back_tags = {
+            live_verify._back_hotspot_tag(slot)
+            for slot in live_verify._BACK_PADDLE_SLOTS
+        }
+        touched = [
+            call.args[0]
+            for call in fake.configure_item.call_args_list
+            if call.args and call.args[0] in back_tags
+        ]
+        self.assertEqual(touched, [])
+
+    def test_top_view_lights_live_outputs_but_not_source_only_claws(self) -> None:
+        shell, _service, fake = self._build_with_fake(
+            _live_snap(
+                buttons=frozenset(
+                    {
+                        ControllerButtonTarget.LB,
+                        ControllerButtonTarget.RB,
+                    }
+                ),
+                left_trigger=255,
+                right_trigger=0,
+            )
+        )
+        fake.configure_item.reset_mock()
+
+        self._tick(fake)
+
+        self.assertEqual(
+            _last_configure(fake, live_verify._top_hotspot_tag("L1"))["color"],
+            shell.COLORS["good"],
+        )
+        self.assertEqual(
+            _last_configure(fake, live_verify._top_hotspot_tag("R1"))["color"],
+            shell.COLORS["good"],
+        )
+        self.assertEqual(
+            _last_configure(fake, live_verify._top_hotspot_tag("L2"))["color"],
+            shell.COLORS["good"],
+        )
+        self.assertEqual(
+            _last_configure(fake, live_verify._top_hotspot_tag("R2"))["color"],
+            shell.COLORS["muted"],
+        )
+        source_tags = {
+            live_verify._top_hotspot_tag("LK"),
+            live_verify._top_hotspot_tag("RK"),
+        }
+        touched = [
+            call.args[0]
+            for call in fake.configure_item.call_args_list
+            if call.args and call.args[0] in source_tags
+        ]
+        self.assertEqual(touched, [])
+
+    def test_front_binding_badges_show_real_remaps_only(self) -> None:
+        shell, _service, fake = self._build_with_fake(_live_snap())
+        shell.last_controller_snapshot = empty_snapshot(
+            button_bindings={
+                ButtonSlot.A: ButtonMapping.controller_button(ControllerButtonTarget.B),
+                ButtonSlot.B: ButtonMapping.controller_button(ControllerButtonTarget.B),
+                ButtonSlot.X: ButtonMapping(
+                    target_kind=0x02,
+                    target_low=0x00,
+                    target_value=ControllerButtonTarget.A.value,
+                ),
+            }
+        )
+        fake.set_value.reset_mock()
+        fake.configure_item.reset_mock()
+
+        with patch.object(live_verify, "dpg", fake):
+            live_verify.refresh_binding_overlays(shell)
+
+        self.assertEqual(
+            _last_set_value(
+                fake,
+                live_verify._face_binding_badge_tag(ControllerButtonTarget.A),
+            ),
+            f"{live_verify._BINDING_BADGE_ARROW}B",
+        )
+        self.assertTrue(
+            _last_configure(fake, live_verify._face_binding_badge_tag(ControllerButtonTarget.A))["show"]
+        )
+        for target in (ControllerButtonTarget.B, ControllerButtonTarget.X, ControllerButtonTarget.Y):
+            with self.subTest(target=target.name):
+                self.assertEqual(
+                    _last_set_value(
+                        fake,
+                        live_verify._face_binding_badge_tag(target),
+                    ),
+                    "",
+                )
+                self.assertFalse(
+                    _last_configure(fake, live_verify._face_binding_badge_tag(target))["show"]
+                )
+
+    def test_show_bindings_toggle_flips_badge_visibility(self) -> None:
+        shell, _service, fake = self._build_with_fake(_live_snap())
+        shell.last_controller_snapshot = empty_snapshot(
+            button_bindings={
+                ButtonSlot.A: ButtonMapping.controller_button(ControllerButtonTarget.B)
+            }
+        )
+        with patch.object(live_verify, "dpg", fake):
+            live_verify.refresh_binding_overlays(shell)
+
+        fake.configure_item.reset_mock()
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._set_binding_badges_visible(shell, False)
+        self.assertFalse(
+            _last_configure(fake, live_verify._face_binding_badge_tag(ControllerButtonTarget.A))["show"]
+        )
+
+        fake.configure_item.reset_mock()
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._set_binding_badges_visible(shell, True)
+        self.assertTrue(
+            _last_configure(fake, live_verify._face_binding_badge_tag(ControllerButtonTarget.A))["show"]
+        )
+
+    def test_back_binding_badges_are_session_only_or_not_set_here(self) -> None:
+        shell, _service, fake = self._build_with_fake(_live_snap())
+        shell.last_controller_snapshot = empty_snapshot(
+            back_paddle_bindings={
+                MacroSlot.M1: BackPaddleBinding(target=ControllerButtonTarget.A),
+                MacroSlot.M2: BackPaddleBinding(target=None),
+            }
+        )
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._set_workspace_view(shell, live_verify._WORKSPACE_VIEW_BACK)
+        fake.set_value.reset_mock()
+        fake.configure_item.reset_mock()
+
+        with patch.object(live_verify, "dpg", fake):
+            live_verify.refresh_binding_overlays(shell)
+
+        self.assertEqual(
+            _last_set_value(fake, live_verify._back_binding_badge_tag(MacroSlot.M1)),
+            f"{live_verify._BINDING_BADGE_ARROW}A",
+        )
+        self.assertEqual(
+            _last_set_value(fake, live_verify._back_binding_badge_tag(MacroSlot.M2)),
+            f"{live_verify._BINDING_BADGE_ARROW}{i18n.t('controller.back_paddles.unbound')}",
+        )
+        self.assertEqual(
+            _last_set_value(fake, live_verify._back_binding_badge_tag(MacroSlot.LM)),
+            i18n.t("controller.back_paddles.not_set_here"),
+        )
+        for slot in (MacroSlot.M1, MacroSlot.M2, MacroSlot.LM):
+            with self.subTest(slot=slot.name):
+                self.assertTrue(
+                    _last_configure(fake, live_verify._back_binding_badge_tag(slot))["show"]
+                )
+
+    def test_select_control_updates_inspector_binding_and_face_highlight(self) -> None:
+        shell, _service, fake = self._build_with_fake(_live_snap())
+        shell.last_controller_snapshot = empty_snapshot(
+            button_bindings={
+                ButtonSlot.A: ButtonMapping.controller_button(ControllerButtonTarget.B)
+            }
+        )
+
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._select_control(shell, ControllerButtonTarget.A)
+
+        self.assertEqual(
+            _last_set_value(fake, live_verify.LIVE_VERIFY_INSPECTOR_IDENTITY_TAG),
+            "A",
+        )
+        self.assertEqual(
+            _last_set_value(fake, live_verify.LIVE_VERIFY_INSPECTOR_BINDING_TAG),
+            "A -> B",
+        )
+        self.assertEqual(
+            _last_set_value(fake, live_verify.LIVE_VERIFY_INSPECTOR_REMAP_TAG),
+            "(remapped)",
+        )
+        self.assertEqual(
+            _last_configure(fake, live_verify._face_hotspot_tag(ControllerButtonTarget.A))["color"],
+            shell.COLORS["accent_hover"],
+        )
+
+    def test_front_model_click_selects_control_through_row_button_path(self) -> None:
+        shell, _service, fake = self._build_with_fake(_live_snap())
+        point = _bounds_center(
+            live_verify._face_hotspot_bounds(ControllerButtonTarget.A)
+        )
+
+        with patch.object(
+            live_verify,
+            "_select_control",
+            wraps=live_verify._select_control,
+        ) as select_spy:
+            self._click_model(shell, fake, live_verify._WORKSPACE_VIEW_FRONT, point)
+
+        select_spy.assert_called_once_with(shell, ControllerButtonTarget.A)
+        self.assertIs(
+            shell._live_verify_state.selected_control,
+            ControllerButtonTarget.A,
+        )
+        self.assertEqual(
+            _last_set_value(fake, live_verify.LIVE_VERIFY_INSPECTOR_IDENTITY_TAG),
+            "A",
+        )
+        self.assertFalse(
+            _last_configure(
+                fake,
+                live_verify._control_selectable_tag(ControllerButtonTarget.A),
+            )["enabled"]
+        )
+        self.assertEqual(
+            _last_configure(
+                fake,
+                live_verify._face_hotspot_tag(ControllerButtonTarget.A),
+            )["color"],
+            shell.COLORS["accent_hover"],
+        )
+
+    def test_back_model_click_selects_paddle_through_row_button_path(self) -> None:
+        shell, _service, fake = self._build_with_fake(_live_snap())
+        self._set_view(shell, fake, live_verify._WORKSPACE_VIEW_BACK)
+
+        with patch.object(
+            live_verify,
+            "_select_control",
+            wraps=live_verify._select_control,
+        ) as select_spy:
+            self._click_model(
+                shell,
+                fake,
+                live_verify._WORKSPACE_VIEW_BACK,
+                live_verify._back_paddle_center(MacroSlot.M1),
+            )
+
+        select_spy.assert_called_once_with(shell, MacroSlot.M1)
+        self.assertIs(shell._live_verify_state.selected_control, MacroSlot.M1)
+        self.assertEqual(
+            _last_set_value(fake, live_verify.LIVE_VERIFY_INSPECTOR_IDENTITY_TAG),
+            live_verify._control_identity(MacroSlot.M1),
+        )
+        self.assertFalse(
+            _last_configure(
+                fake,
+                live_verify._control_selectable_tag(MacroSlot.M1),
+            )["enabled"]
+        )
+        self.assertEqual(
+            _last_configure(fake, live_verify._back_hotspot_tag(MacroSlot.M1)),
+            {"color": shell.COLORS["accent_hover"], "thickness": 4.0},
+        )
+
+    def test_top_model_click_selects_output_through_row_button_path(self) -> None:
+        shell, _service, fake = self._build_with_fake(
+            _live_snap(buttons=frozenset(), left_trigger=0)
+        )
+        self._set_view(shell, fake, live_verify._WORKSPACE_VIEW_TOP)
+
+        with patch.object(
+            live_verify,
+            "_select_control",
+            wraps=live_verify._select_control,
+        ) as select_spy:
+            self._click_model(
+                shell,
+                fake,
+                live_verify._WORKSPACE_VIEW_TOP,
+                live_verify._top_control_center("L2"),
+            )
+
+        select_spy.assert_called_once_with(shell, ControllerButtonTarget.LT)
+        self.assertIs(
+            shell._live_verify_state.selected_control,
+            ControllerButtonTarget.LT,
+        )
+        self.assertEqual(
+            _last_set_value(fake, live_verify.LIVE_VERIFY_INSPECTOR_IDENTITY_TAG),
+            "LT",
+        )
+        self.assertFalse(
+            _last_configure(
+                fake,
+                live_verify._control_selectable_tag(ControllerButtonTarget.LT),
+            )["enabled"]
+        )
+        self.assertEqual(
+            _last_configure(fake, live_verify._top_hotspot_tag("L2")),
+            {"color": shell.COLORS["accent_hover"], "thickness": 4.0},
+        )
+
+    def test_top_model_click_on_source_claw_selects_paddle_not_output(self) -> None:
+        shell, _service, fake = self._build_with_fake(_live_snap(buttons=frozenset()))
+        self._set_view(shell, fake, live_verify._WORKSPACE_VIEW_TOP)
+
+        with patch.object(
+            live_verify,
+            "_select_control",
+            wraps=live_verify._select_control,
+        ) as select_spy:
+            self._click_model(
+                shell,
+                fake,
+                live_verify._WORKSPACE_VIEW_TOP,
+                live_verify._top_control_center("LK"),
+            )
+
+        select_spy.assert_called_once_with(shell, MacroSlot.LK)
+        self.assertIs(shell._live_verify_state.selected_control, MacroSlot.LK)
+        self.assertEqual(
+            _last_set_value(fake, live_verify.LIVE_VERIFY_INSPECTOR_IDENTITY_TAG),
+            live_verify._control_identity(MacroSlot.LK),
+        )
+        self.assertFalse(
+            _last_configure(
+                fake,
+                live_verify._control_selectable_tag(MacroSlot.LK),
+            )["enabled"]
+        )
+        self.assertEqual(
+            _last_configure(fake, live_verify._top_hotspot_tag("LK")),
+            {"color": shell.COLORS["accent_hover"], "thickness": 4.0},
+        )
+
+    def test_empty_model_click_does_nothing_in_each_view(self) -> None:
+        for view in live_verify._WORKSPACE_VIEWS:
+            with self.subTest(view=view):
+                shell, _service, fake = self._build_with_fake(_live_snap())
+                with patch.object(live_verify, "dpg", fake):
+                    live_verify._select_control(shell, ControllerButtonTarget.A)
+                self._set_view(shell, fake, view)
+                fake.configure_item.reset_mock()
+                fake.set_value.reset_mock()
+
+                with patch.object(
+                    live_verify,
+                    "_select_control",
+                    wraps=live_verify._select_control,
+                ) as select_spy:
+                    self._click_model(shell, fake, view, (10, 10))
+
+                select_spy.assert_not_called()
+                self.assertIs(
+                    shell._live_verify_state.selected_control,
+                    ControllerButtonTarget.A,
+                )
+                fake.set_value.assert_not_called()
+                fake.configure_item.assert_not_called()
+
+    def test_selecting_lt_highlights_only_lt_not_lb(self) -> None:
+        shell, _service, fake = self._build_with_fake(
+            _live_snap(buttons=frozenset(), left_trigger=0, right_trigger=0)
+        )
+
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._select_control(shell, ControllerButtonTarget.LT)
+
+        self.assertEqual(
+            _last_configure(
+                fake, live_verify._face_hotspot_tag(ControllerButtonTarget.LT)
+            ),
+            {"color": shell.COLORS["accent_hover"], "thickness": 4.0},
+        )
+        lb_calls = _configure_calls(
+            fake, live_verify._face_hotspot_tag(ControllerButtonTarget.LB)
+        )
+        self.assertFalse(
+            any(
+                call.get("color") == shell.COLORS["accent_hover"]
+                for call in lb_calls
+            )
+        )
+        self.assertEqual(lb_calls[-1], {"thickness": 2.0})
+        self.assertFalse(
+            _last_configure(
+                fake,
+                live_verify._control_selectable_tag(ControllerButtonTarget.LT),
+            )["enabled"]
+        )
+        self.assertTrue(
+            _last_configure(
+                fake,
+                live_verify._control_selectable_tag(ControllerButtonTarget.LB),
+            )["enabled"]
+        )
+
+    def test_inspector_live_block_shows_pressed_for_selected_button(self) -> None:
+        shell, _service, fake = self._build_with_fake(
+            _live_snap(buttons=frozenset({ControllerButtonTarget.A}))
+        )
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._select_control(shell, ControllerButtonTarget.A)
+
+        self._tick(fake)
+
+        self.assertEqual(
+            _last_set_value(fake, live_verify.LIVE_VERIFY_INSPECTOR_LIVE_TAG),
+            i18n.t("diagnostics.live_verify.inspector.pressed"),
+        )
+        self.assertEqual(
+            _last_configure(fake, live_verify.LIVE_VERIFY_INSPECTOR_LIVE_TAG)["color"],
+            shell.COLORS["good"],
+        )
+
+    def test_inspector_live_block_never_fakes_released_for_paddle(self) -> None:
+        shell, _service, fake = self._build_with_fake(_live_snap(buttons=frozenset()))
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._select_control(shell, MacroSlot.M1)
+
+        self._tick(fake)
+
+        value = _last_set_value(fake, live_verify.LIVE_VERIFY_INSPECTOR_LIVE_TAG)
+        self.assertIn("Not readable live", value)
+        self.assertIn("XInput", value)
+        self.assertNotEqual(
+            value,
+            i18n.t("diagnostics.live_verify.inspector.released"),
+        )
+        self.assertEqual(
+            _last_configure(fake, live_verify.LIVE_VERIFY_INSPECTOR_LIVE_TAG)["color"],
+            shell.COLORS["muted"],
+        )
+
+    def test_inspector_binding_reproduces_absent_default_remap_raw_states(self) -> None:
+        cases = [
+            (
+                ControllerButtonTarget.LB,
+                {ButtonSlot.A: ButtonMapping.controller_button(ControllerButtonTarget.A)},
+                "LB -> —",
+                "",
+                True,
+            ),
+            (
+                ControllerButtonTarget.A,
+                {ButtonSlot.A: ButtonMapping.controller_button(ControllerButtonTarget.A)},
+                "A -> A",
+                "",
+                False,
+            ),
+            (
+                ControllerButtonTarget.A,
+                {ButtonSlot.A: ButtonMapping.controller_button(ControllerButtonTarget.B)},
+                "A -> B",
+                "(remapped)",
+                False,
+            ),
+            (
+                ControllerButtonTarget.A,
+                {
+                    ButtonSlot.A: ButtonMapping(
+                        target_kind=0x02,
+                        target_low=0x00,
+                        target_value=ControllerButtonTarget.B.value,
+                    )
+                },
+                "A -> kind=0x02 low=0x00 val=0x10",
+                "",
+                False,
+            ),
+        ]
+        for selected, bindings, expected, remap, tip_shown in cases:
+            with self.subTest(selected=selected.name, expected=expected):
+                shell, _service, fake = self._build_with_fake(_live_snap())
+                shell.last_controller_snapshot = empty_snapshot(button_bindings=bindings)
+                with patch.object(live_verify, "dpg", fake):
+                    live_verify._select_control(shell, selected)
+
+                self.assertEqual(
+                    _last_set_value(fake, live_verify.LIVE_VERIFY_INSPECTOR_BINDING_TAG),
+                    expected,
+                )
+                self.assertEqual(
+                    _last_set_value(fake, live_verify.LIVE_VERIFY_INSPECTOR_REMAP_TAG),
+                    remap,
+                )
+                self.assertEqual(
+                    _last_configure(fake, live_verify.LIVE_VERIFY_INSPECTOR_BINDING_TIP_TAG)["show"],
+                    tip_shown,
+                )
+
+    def test_inspector_binding_shows_paddle_not_set_here(self) -> None:
+        shell, _service, fake = self._build_with_fake(_live_snap())
+        shell.last_controller_snapshot = empty_snapshot(back_paddle_bindings={})
+
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._select_control(shell, MacroSlot.M1)
+
+        self.assertEqual(
+            _last_set_value(fake, live_verify.LIVE_VERIFY_INSPECTOR_BINDING_TAG),
+            f"M1 -> {i18n.t('controller.back_paddles.not_set_here')}",
+        )
+
+    def test_inspector_binding_shows_known_session_paddle_target(self) -> None:
+        shell, _service, fake = self._build_with_fake(_live_snap())
+        shell.last_controller_snapshot = empty_snapshot(
+            back_paddle_bindings={
+                MacroSlot.M1: BackPaddleBinding(target=ControllerButtonTarget.A)
+            }
+        )
+
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._select_control(shell, MacroSlot.M1)
+
+        self.assertEqual(
+            _last_set_value(fake, live_verify.LIVE_VERIFY_INSPECTOR_BINDING_TAG),
+            "M1 -> A",
+        )
+
+    def test_edit_binding_navigates_to_buttons_with_source_preselected(self) -> None:
+        shell, _service, fake = self._build_with_fake(_live_snap())
+        shell.switch_screen = MagicMock()
+        shell.on_binding_source_changed = MagicMock()
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._select_control(shell, ControllerButtonTarget.UP)
+
+        fake.set_value.reset_mock()
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._edit_selected_binding(shell)
+
+        self.assertEqual(shell.controller_active_tab, "buttons")
+        shell.switch_screen.assert_called_once_with("controller")
+        fake.set_value.assert_any_call("binding_source_combo", "Up")
+        shell.on_binding_source_changed.assert_called_once_with("Up")
+
+    def test_edit_binding_for_back_paddle_navigates_to_back_paddles_section(self) -> None:
+        shell, _service, fake = self._build_with_fake(_live_snap())
+        shell.switch_screen = MagicMock()
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._select_control(shell, MacroSlot.M1)
+
+        fake.set_value.reset_mock()
+        fake.focus_item.reset_mock()
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._edit_selected_binding(shell)
+
+        self.assertEqual(shell.controller_active_tab, "buttons")
+        shell.switch_screen.assert_called_once_with("controller")
+        fake.focus_item.assert_called_once_with("back_paddle_combo_M1")
+        self.assertFalse(
+            any(
+                call.args[:1] == ("binding_source_combo",)
+                for call in fake.set_value.call_args_list
+            )
+        )
+
+    def test_edit_binding_link_hides_for_non_bindable_selection(self) -> None:
+        shell, _service, fake = self._build_with_fake(_live_snap())
+        shell._live_verify_state.selected_control = object()
+        fake.configure_item.reset_mock()
+
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._refresh_inspector_static(shell)
+
+        cfg = _last_configure(fake, live_verify.LIVE_VERIFY_INSPECTOR_EDIT_TAG)
+        self.assertFalse(cfg["show"])
+        self.assertFalse(cfg["enabled"])
+
+    def test_inspector_refresh_guarded_no_throw_when_unmounted(self) -> None:
+        shell, _service, fake = self._build_with_fake(_live_snap())
+        fake._exists["v"] = False
+        shell._live_verify_state.selected_control = ControllerButtonTarget.A
+        fake.set_value.reset_mock()
+        fake.configure_item.reset_mock()
+
+        with patch.object(live_verify, "dpg", fake):
+            live_verify._refresh_inspector_live(shell, _live_snap())
+            live_verify.refresh_inspector_binding(shell)
+
+        # Only existence probes are expected; no value/config writes when all
+        # inspector tags are reported unmounted.
+        fake.set_value.assert_not_called()
+        fake.configure_item.assert_not_called()
 
     def test_face_refresh_guarded_no_throw_when_unmounted(self) -> None:
         shell = SimpleNamespace(COLORS={"good": (1, 2, 3, 255), "muted": (4, 5, 6, 255)})
@@ -958,16 +1953,54 @@ class ExportRichBundleTests(unittest.TestCase):
     def _bundle(self, *, result):
         bundle = MagicMock(spec=DiagnosticBundleService)
         bundle.base_dir = Path(tempfile.gettempdir())
+        bundle.preview_bundle_manifest.return_value = (
+            DiagnosticBundlePreviewManifest(
+                items=(
+                    DiagnosticBundlePreviewItem(
+                        key="report",
+                        count=1,
+                        member_count=1,
+                        member_paths=("report.md",),
+                    ),
+                ),
+                excluded_items=(),
+                member_paths=("report.md",),
+            )
+        )
         bundle.generate_bundle_zip.return_value = result
         return bundle
 
-    def test_export_calls_generate_bundle_zip_with_rich_args(self) -> None:
+    def test_export_opens_preview_before_writing_bundle(self) -> None:
         shell = _make_write_shell(settings_service=MagicMock())
         result = Path(tempfile.gettempdir()) / "diagnostic_bundle_test.zip"
         bundle = self._bundle(result=result)
         shell.diagnostic_bundle_service = bundle
-        with patch("zd_app.ui.app_shell.os.startfile", create=True):
+        with patch(
+            "zd_app.ui.app_shell.diagnostic_bundle_preview.open_preview_modal"
+        ) as open_preview:
             shell.export_rich_diagnostic_bundle()
+
+        bundle.preview_bundle_manifest.assert_called_once()
+        bundle.generate_bundle_zip.assert_not_called()
+        open_preview.assert_called_once()
+        self.assertIs(open_preview.call_args.args[0], shell)
+        self.assertIs(
+            open_preview.call_args.args[1],
+            bundle.preview_bundle_manifest.return_value,
+        )
+
+    def test_preview_export_calls_generate_bundle_zip_with_rich_args(self) -> None:
+        shell = _make_write_shell(settings_service=MagicMock())
+        result = Path(tempfile.gettempdir()) / "diagnostic_bundle_test.zip"
+        bundle = self._bundle(result=result)
+        shell.diagnostic_bundle_service = bundle
+        with patch(
+            "zd_app.ui.app_shell.diagnostic_bundle_preview.open_preview_modal"
+        ) as open_preview:
+            shell.export_rich_diagnostic_bundle()
+        on_export = open_preview.call_args.kwargs["on_export"]
+        with patch("zd_app.ui.app_shell.os.startfile", create=True):
+            on_export()
         bundle.generate_bundle_zip.assert_called_once()
         _args, kwargs = bundle.generate_bundle_zip.call_args
         self.assertTrue(kwargs.get("include_archived"))
@@ -979,8 +2012,13 @@ class ExportRichBundleTests(unittest.TestCase):
         shell = _make_write_shell(settings_service=MagicMock())
         bundle = self._bundle(result=None)
         shell.diagnostic_bundle_service = bundle
-        with patch("zd_app.ui.app_shell.os.startfile", create=True):
+        with patch(
+            "zd_app.ui.app_shell.diagnostic_bundle_preview.open_preview_modal"
+        ) as open_preview:
             shell.export_rich_diagnostic_bundle()
+        on_export = open_preview.call_args.kwargs["on_export"]
+        with patch("zd_app.ui.app_shell.os.startfile", create=True):
+            on_export()
         bundle.emit_generated_event.assert_not_called()
 
     def test_export_guards_missing_service(self) -> None:
@@ -1068,6 +2106,7 @@ class LiveVerifyI18nTests(unittest.TestCase):
             "diagnostics.live_verify.face_diagram.title",
             "diagnostics.live_verify.face_diagram.home",
             "diagnostics.live_verify.face_diagram.note",
+            "diagnostics.live_verify.face_diagram.source_note",
             "diagnostics.live_verify.deadzone.title",
             "diagnostics.live_verify.deadzone.note",
             "diagnostics.live_verify.deadzone.status.verified",
@@ -1087,6 +2126,41 @@ class LiveVerifyI18nTests(unittest.TestCase):
             "diagnostics.live_verify.player.slot",
             "diagnostics.live_verify.player.active",
             "diagnostics.live_verify.player.none",
+            "diagnostics.live_verify.workspace.title",
+            "diagnostics.live_verify.workspace.front_view",
+            "diagnostics.live_verify.workspace.back_view",
+            "diagnostics.live_verify.workspace.top_view",
+            "diagnostics.live_verify.workspace.show_bindings",
+            "diagnostics.live_verify.workspace.select_label",
+            "diagnostics.live_verify.workspace.paddles_label",
+            "diagnostics.live_verify.back_diagram.title",
+            "diagnostics.live_verify.back_diagram.note",
+            "diagnostics.live_verify.top_diagram.title",
+            "diagnostics.live_verify.top_diagram.note",
+            "diagnostics.live_verify.binding_guide.title",
+            "diagnostics.live_verify.binding_guide.framing",
+            "diagnostics.live_verify.binding_guide.assign",
+            "diagnostics.live_verify.binding_guide.clear",
+            "diagnostics.live_verify.binding_guide.profiles",
+            "diagnostics.live_verify.advanced.sticks",
+            "diagnostics.live_verify.advanced.buttons",
+            "diagnostics.live_verify.advanced.deadzone",
+            "diagnostics.live_verify.inspector.title",
+            "diagnostics.live_verify.inspector.select_hint",
+            "diagnostics.live_verify.inspector.identity",
+            "diagnostics.live_verify.inspector.live",
+            "diagnostics.live_verify.inspector.binding",
+            "diagnostics.live_verify.inspector.explanation",
+            "diagnostics.live_verify.inspector.paddle_identity",
+            "diagnostics.live_verify.inspector.pressed",
+            "diagnostics.live_verify.inspector.released",
+            "diagnostics.live_verify.inspector.trigger_value",
+            "diagnostics.live_verify.inspector.stick_value",
+            "diagnostics.live_verify.inspector.not_readable_live",
+            "diagnostics.live_verify.inspector.no_live_controller",
+            "diagnostics.live_verify.inspector.explanation_output",
+            "diagnostics.live_verify.inspector.explanation_paddle",
+            "diagnostics.live_verify.inspector.edit_binding",
         ]
         for key in required:
             with self.subTest(key=key):
@@ -1107,6 +2181,13 @@ class LiveVerifyI18nTests(unittest.TestCase):
                 self.assertIn("{pct}", zh[key])
         self.assertIn("{x}", en["diagnostics.live_verify.stick.axes"])
         self.assertIn("{y}", zh["diagnostics.live_verify.stick.axes"])
+        self.assertIn("{slot}", en["diagnostics.live_verify.inspector.paddle_identity"])
+        self.assertIn("{slot}", zh["diagnostics.live_verify.inspector.paddle_identity"])
+        self.assertIn("{value}", en["diagnostics.live_verify.inspector.trigger_value"])
+        self.assertIn("{value}", zh["diagnostics.live_verify.inspector.trigger_value"])
+        for token in ("{x}", "{y}", "{mag}"):
+            self.assertIn(token, en["diagnostics.live_verify.inspector.stick_value"])
+            self.assertIn(token, zh["diagnostics.live_verify.inspector.stick_value"])
 
     def test_trust_body_keeps_honest_reported_as_sent_wording(self) -> None:
         en, _zh = self._locales()
@@ -1117,6 +2198,57 @@ class LiveVerifyI18nTests(unittest.TestCase):
         self.assertIn("XInput output", en["diagnostics.live_verify.face_diagram.note"])
         self.assertIn("physical control", en["diagnostics.live_verify.face_diagram.note"])
         self.assertIn("XInput", zh["diagnostics.live_verify.face_diagram.note"])
+        self.assertIn(
+            "source labels",
+            en["diagnostics.live_verify.face_diagram.source_note"],
+        )
+        self.assertIn(
+            "不会实时亮起",
+            zh["diagnostics.live_verify.face_diagram.source_note"],
+        )
+        self.assertIn(
+            "Paddles aren't readable live",
+            en["diagnostics.live_verify.back_diagram.note"],
+        )
+        self.assertIn(
+            "unbound paddle press is invisible",
+            en["diagnostics.live_verify.back_diagram.note"],
+        )
+        self.assertIn("XInput output", en["diagnostics.live_verify.top_diagram.note"])
+        self.assertIn("source labels", en["diagnostics.live_verify.top_diagram.note"])
+        self.assertIn("不会实时亮起", zh["diagnostics.live_verify.top_diagram.note"])
+        self.assertIn(
+            "can't read paddle bindings back",
+            en["diagnostics.live_verify.binding_guide.framing"],
+        )
+        self.assertIn(
+            "steps below",
+            en["diagnostics.live_verify.binding_guide.framing"],
+        )
+        self.assertNotIn(
+            "can't read or change",
+            en["diagnostics.live_verify.binding_guide.framing"],
+        )
+        self.assertIn(
+            "Mode + [LK / RK / LM / RM / M1 / M2 / M3 / M4]",
+            en["diagnostics.live_verify.binding_guide.assign"],
+        )
+        self.assertIn(
+            "START + D-Pad Up / Left / Down / Right",
+            en["diagnostics.live_verify.binding_guide.profiles"],
+        )
+        self.assertIn(
+            "无法回读背键绑定",
+            zh["diagnostics.live_verify.binding_guide.framing"],
+        )
+        self.assertIn(
+            "下面步骤",
+            zh["diagnostics.live_verify.binding_guide.framing"],
+        )
+        self.assertNotIn(
+            "无法读取或更改",
+            zh["diagnostics.live_verify.binding_guide.framing"],
+        )
 
     def test_stale_warning_keys_match_pinned_constants(self) -> None:
         en, _zh = self._locales()

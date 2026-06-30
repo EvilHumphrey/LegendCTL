@@ -1005,6 +1005,48 @@ class ExportModalTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].details.get("format"), "zip")
 
+    def test_zip_export_opens_preview_before_writing(self) -> None:
+        state = modules_screen.ModulesScreenState()
+        shell = _shell_with(
+            self.service,
+            state=state,
+            diagnostic_bundle_service=self.bundle,
+        )
+
+        def _run_swap(open_fn, **_kwargs):
+            open_fn()
+
+        shell._defer_modal_swap = MagicMock(side_effect=_run_swap)
+        with patch(
+            "zd_app.ui.screens.modules.diagnostic_bundle_preview.open_preview_modal"
+        ) as open_preview:
+            modules_screen._open_zip_preview(shell, self.bundle, state)
+
+        shell._defer_modal_swap.assert_called_once()
+        self.assertIn(
+            modules_screen.TAG_EXPORT_MODAL,
+            shell._defer_modal_swap.call_args.kwargs["delete_tags"],
+        )
+        open_preview.assert_called_once()
+        events = self.ledger.read_events(
+            event_types=[DIAGNOSTIC_BUNDLE_GENERATED]
+        )
+        self.assertEqual(events, [])
+
+        open_preview.call_args.kwargs["on_cancel"]()
+        events = self.ledger.read_events(
+            event_types=[DIAGNOSTIC_BUNDLE_GENERATED]
+        )
+        self.assertEqual(events, [])
+
+        with patch("zd_app.ui.screens.modules.os.startfile", create=True):
+            open_preview.call_args.kwargs["on_export"]()
+        events = self.ledger.read_events(
+            event_types=[DIAGNOSTIC_BUNDLE_GENERATED]
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].details.get("format"), "zip")
+
     def test_export_state_defaults_are_sensible(self) -> None:
         state = modules_screen.ModulesScreenState()
         self.assertTrue(state.export_include_archived)

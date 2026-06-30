@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from zd_app.models import AppSettings
+from zd_app.storage._import_guards import read_guarded_json
 from zd_app.version import __app_id__
 
 
@@ -69,8 +70,8 @@ class SettingsStore:
         if not self.path.exists():
             return _settings_with_default_paths()
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            payload = read_guarded_json(self.path)
+        except (OSError, ValueError, RecursionError, json.JSONDecodeError):
             return _settings_with_default_paths()
         # A parseable-but-non-object root (``null`` / ``[]`` / ``42`` / a bare
         # string) would AttributeError on ``payload.get(...)`` below; bail to

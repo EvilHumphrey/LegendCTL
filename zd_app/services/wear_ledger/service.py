@@ -249,7 +249,7 @@ class WearLedgerService:
                             continue
                         try:
                             payload = json.loads(line)
-                        except json.JSONDecodeError:
+                        except (json.JSONDecodeError, RecursionError):
                             # Skip corrupted lines rather than aborting the
                             # entire read — partial recovery beats blank
                             # screen after a crash mid-write.

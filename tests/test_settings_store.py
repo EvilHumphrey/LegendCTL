@@ -12,6 +12,9 @@ from zd_app.models import AppSettings
 from zd_app.storage.settings_store import SettingsStore
 
 
+_DEEP_JSON = "[" * 20000 + "]" * 20000
+
+
 class AppSettingsModelTests(unittest.TestCase):
     def test_developer_panels_visible_default_false(self) -> None:
         settings = AppSettings()
@@ -153,6 +156,17 @@ class SettingsStoreCorruptionTests(unittest.TestCase):
             )
             store = self._store(tmp)
             settings = store.load()  # must not raise
+            self.assertIsInstance(settings, AppSettings)
+            self.assertEqual(settings.language, AppSettings().language)
+
+    def test_deeply_nested_settings_returns_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            (tmp / "settings.json").write_text(_DEEP_JSON, encoding="utf-8")
+            store = self._store(tmp)
+
+            settings = store.load()  # must not raise RecursionError
+
             self.assertIsInstance(settings, AppSettings)
             self.assertEqual(settings.language, AppSettings().language)
 

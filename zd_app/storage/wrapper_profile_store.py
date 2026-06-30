@@ -96,10 +96,14 @@ class WrapperProfileStore:
         skipped: list[Path] = []
         for path in self.base_dir.glob("*.json"):
             try:
-                profiles.append(
-                    WrapperProfile.from_dict(json.loads(path.read_text(encoding="utf-8")))
-                )
-            except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+                profiles.append(WrapperProfile.from_dict(read_guarded_json(path)))
+            except (
+                OSError,
+                ValueError,
+                RecursionError,
+                json.JSONDecodeError,
+                KeyError,
+            ) as exc:
                 logger.warning("Failed to load profile %s: %s", path.name, exc)
                 skipped.append(path)
         profiles.sort(key=lambda profile: profile.last_modified_at, reverse=True)
@@ -117,8 +121,8 @@ class WrapperProfileStore:
         if not path.exists():
             raise WrapperProfileError(f"Profile not found: {name!r}")
         try:
-            return WrapperProfile.from_dict(json.loads(path.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, KeyError, ValueError) as exc:
+            return WrapperProfile.from_dict(read_guarded_json(path))
+        except (OSError, ValueError, RecursionError, json.JSONDecodeError, KeyError) as exc:
             raise WrapperProfileError(f"Profile {name!r} is corrupted: {exc}") from exc
 
     def save(self, profile: WrapperProfile) -> Path:

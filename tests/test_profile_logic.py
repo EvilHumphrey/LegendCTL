@@ -15,6 +15,7 @@ from zd_app.storage.profile_store import (
     MAX_IMPORT_JSON_DEPTH,
     ProfileStore,
 )
+_DEEP_JSON = "[" * 20000 + "]" * 20000
 
 
 class ProfileServiceReadScopeTests(unittest.TestCase):
@@ -120,6 +121,23 @@ class ProfileStoreTests(unittest.TestCase):
         # (never a half-written <slug>.json).
         self.assertEqual(self.store.load("profile-atomic").display_name, "V1")
         json.loads(path.read_text(encoding="utf-8"))
+    def test_list_profiles_skips_deeply_nested_file(self) -> None:
+        good = create_default_profile(name="Tournament", origin="desktop")
+        good.profile_id = "profile-good"
+        self.store.save(good)
+        deep_path = Path(self.temp_dir.name) / "profile-deep.json"
+        deep_path.write_text(_DEEP_JSON, encoding="utf-8")
+
+        profiles = self.store.list_profiles()  # must not raise RecursionError
+
+        self.assertEqual([profile.profile_id for profile in profiles], ["profile-good"])
+
+    def test_load_deeply_nested_file_raises_clean_value_error(self) -> None:
+        deep_path = Path(self.temp_dir.name) / "profile-deep.json"
+        deep_path.write_text(_DEEP_JSON, encoding="utf-8")
+
+        with self.assertRaises(ValueError):
+            self.store.load("profile-deep")
 
 
 class ProfileStorePathSafetyTests(unittest.TestCase):

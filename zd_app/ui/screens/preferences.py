@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import dearpygui.dearpygui as dpg
 
 from zd_app.i18n import t
+from zd_app.storage.settings_store import _default_user_data_dir
 from zd_app.ui.components import card
 from zd_app.ui.fonts import font_for
 from zd_app.ui.typography import helper_text, screen_title, section_title
@@ -28,6 +32,54 @@ LOGGING_VERBOSITY_KEY_FOR: dict[str, str] = {
     "Normal": "settings.logging_verbosity.normal",
     "Verbose": "settings.logging_verbosity.verbose",
 }
+
+
+def diagnostics_bundle_dir_display_value(path_value: str) -> str:
+    expanded = Path(os.path.expandvars(path_value))
+    default_root = _default_user_data_dir()
+    env_root = _env_root_for_default(default_root)
+    if env_root is None:
+        return path_value
+
+    env_name, env_base = env_root
+    try:
+        relative_to_default = _resolved(expanded).relative_to(_resolved(default_root))
+        default_relative_to_env = _resolved(default_root).relative_to(_resolved(env_base))
+    except ValueError:
+        return path_value
+
+    parts = [f"%{env_name}%", *default_relative_to_env.parts, *relative_to_default.parts]
+    return "\\".join(parts)
+
+
+def diagnostics_bundle_dir_storage_value(display_value: str) -> str:
+    return os.path.expandvars(display_value)
+
+
+def diagnostics_bundle_dir_open_target(path_value: str) -> Path:
+    return Path(diagnostics_bundle_dir_storage_value(path_value)).expanduser()
+
+
+def _env_root_for_default(default_root: Path) -> tuple[str, Path] | None:
+    default_resolved = _resolved(default_root)
+    for env_name in ("APPDATA", "LOCALAPPDATA"):
+        env_value = os.environ.get(env_name)
+        if not env_value:
+            continue
+        env_root = Path(env_value)
+        try:
+            default_resolved.relative_to(_resolved(env_root))
+        except ValueError:
+            continue
+        return env_name, env_root
+    return None
+
+
+def _resolved(path: Path) -> Path:
+    try:
+        return path.resolve(strict=False)
+    except OSError:
+        return path.absolute()
 
 
 def build(shell, parent: str) -> None:
@@ -89,12 +141,25 @@ def build(shell, parent: str) -> None:
                 default_value=settings.auto_read_on_connect,
                 callback=lambda _s, value: shell.update_setting("auto_read_on_connect", value),
             )
-            dpg.add_input_text(
-                default_value=settings.diagnostics_bundle_dir,
-                label=t("settings.app.diagnostic_bundle_location"),
-                width=420,
-                callback=lambda _s, value: shell.update_setting("diagnostics_bundle_dir", value),
-            )
+            with dpg.group(horizontal=True):
+                dpg.add_input_text(
+                    default_value=diagnostics_bundle_dir_display_value(
+                        settings.diagnostics_bundle_dir
+                    ),
+                    label=t("settings.app.diagnostic_bundle_location"),
+                    width=420,
+                    tag="preferences_diagnostics_bundle_dir_input",
+                    callback=lambda _s, value: shell.update_setting(
+                        "diagnostics_bundle_dir",
+                        diagnostics_bundle_dir_storage_value(value),
+                    ),
+                )
+                dpg.add_button(
+                    label=t("settings.app.diagnostic_bundle_open_folder"),
+                    width=120,
+                    tag="preferences_diagnostics_bundle_open_folder_button",
+                    callback=lambda: shell.open_diagnostics_bundle_folder(),
+                )
             dpg.add_spacer(height=12)
             dpg.add_button(
                 label=t("settings.app.restore_defaults"),

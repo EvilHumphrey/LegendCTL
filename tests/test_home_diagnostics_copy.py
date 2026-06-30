@@ -160,6 +160,34 @@ class HomeDiagnosticsCopyTests(unittest.TestCase):
         finally:
             i18n.set_locale("en")
 
+    def test_diagnostics_connection_details_distinguish_missing_durations_from_zero(self) -> None:
+        state = DeviceState()
+        missing_snapshot = SimpleNamespace(
+            connection_mode="USB",
+            device_id="usb-test",
+            firmware_version="Unknown",
+            last_packet_timestamp=None,
+            last_read_duration_ms=None,
+            last_write_duration_ms=None,
+        )
+        measured_snapshot = SimpleNamespace(
+            connection_mode="USB",
+            device_id="usb-test",
+            firmware_version="Unknown",
+            last_packet_timestamp=None,
+            last_read_duration_ms=0.0,
+            last_write_duration_ms=1.5,
+        )
+
+        missing_text = diagnostics.connection_details_text(state, missing_snapshot, "Not verified")
+        measured_text = diagnostics.connection_details_text(state, measured_snapshot, "Not verified")
+
+        self.assertIn(i18n.t("diagnostics.connection.value.no_read_recorded"), missing_text)
+        self.assertIn(i18n.t("diagnostics.connection.value.no_write_recorded"), missing_text)
+        self.assertNotIn("0.00ms", missing_text)
+        self.assertIn("0.00ms", measured_text)
+        self.assertIn("1.50ms", measured_text)
+
     def test_diagnostics_connection_details_localize_in_zh_cn(self) -> None:
         state = DeviceState(
             connection_mode="USB",
@@ -180,7 +208,11 @@ class HomeDiagnosticsCopyTests(unittest.TestCase):
         try:
             text = diagnostics.connection_details_text(state, snapshot, "XInput (Battery)")
             self.assertIn(f"{i18n.t('diagnostics.connection.field.transport')}: USB", text)
-            self.assertIn(f"{i18n.t('diagnostics.connection.field.device_id')}: {state.stable_identifier}", text)
+            self.assertIn(
+                f"{i18n.t('diagnostics.connection.field.device_id')}: USB\\VID_413D&PID_2104",
+                text,
+            )
+            self.assertNotIn("ABC123", text)
             self.assertIn(f"{i18n.t('diagnostics.connection.field.firmware')}: {i18n.t('common.unknown')}", text)
             self.assertIn(f"{i18n.t('diagnostics.connection.field.sleep')}: {i18n.t('common.unknown')}", text)
             self.assertIn(
@@ -191,6 +223,7 @@ class HomeDiagnosticsCopyTests(unittest.TestCase):
                 f"{i18n.t('diagnostics.connection.field.summary_source')}: {i18n.t('diagnostics.connection.value.xinput_battery')}",
                 text,
             )
+            self.assertNotIn("XInput（电池）", text)
             self.assertIn("2026-05-07T06:02:44+00:00", text)
             self.assertIn("135.50ms", text)
             self.assertNotIn("Active Config:", text)

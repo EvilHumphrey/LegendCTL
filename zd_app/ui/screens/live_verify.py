@@ -7,9 +7,9 @@ Diagnostics section into its own nav screen so the whole surface fits one
 window without the cramped, hidden nested-scroll trap the in-Diagnostics
 version had.
 
-Reads controller input only (circularity, settings_service via the shell, the
-shell's xinput_poll_service); apart from the inline firmware-deadzone sliders it
-never writes to the controller.
+Imports only shipping modules (circularity, settings_service via the shell, the
+shell's xinput_poll_service) so the public-cut curation that strips the
+developer panels leaves this screen intact — NEVER draft_to_slot / WRITE_KIND.
 
 Scroll discipline (the whole reason for the move): the screen mounts ONE
 governing container (``LIVE_VERIFY_ROOT_TAG``, ``autosize_x`` + ``autosize_y``,
@@ -59,8 +59,23 @@ import math
 import dearpygui.dearpygui as dpg
 
 from zd_app.i18n import t
+from zd_app.services.button_binding_formatting import format_button_binding
 from zd_app.services.circularity import CircularitySweep
-from zd_app.services.settings_service import ControllerButtonTarget, StickDeadzones
+from zd_app.services.settings_service import (
+    BackPaddleBinding,
+    ButtonSlot,
+    ControllerButtonTarget,
+    MacroSlot,
+    StickDeadzones,
+)
+from zd_app.ui.controller_diagram_layout import (
+    BACK_DIAGRAM_H,
+    BACK_DIAGRAM_W,
+    BACK_LABEL_SIZE,
+    BACK_PADDLE_APPROX,
+    BACK_PADDLE_POS,
+    BACK_PADDLE_R,
+)
 from zd_app.ui.components import card
 from zd_app.ui.typography import screen_title, section_title
 
@@ -79,6 +94,32 @@ LIVE_VERIFY_AVAILABILITY_DOT_TAG = "diag_live_verify_availability_dot"
 DEADZONE_STATUS_TAG = "diag_live_verify_deadzone_status"
 TRIGGER_LEFT_BAR_TAG = "diag_live_verify_trigger_left"
 TRIGGER_RIGHT_BAR_TAG = "diag_live_verify_trigger_right"
+LIVE_VERIFY_INSPECTOR_HINT_TAG = "diag_live_verify_inspector_hint"
+LIVE_VERIFY_INSPECTOR_IDENTITY_TAG = "diag_live_verify_inspector_identity"
+LIVE_VERIFY_INSPECTOR_LIVE_TAG = "diag_live_verify_inspector_live"
+LIVE_VERIFY_INSPECTOR_LIVE_BAR_TAG = "diag_live_verify_inspector_live_bar"
+LIVE_VERIFY_INSPECTOR_BINDING_TAG = "diag_live_verify_inspector_binding"
+LIVE_VERIFY_INSPECTOR_BINDING_TIP_TAG = "diag_live_verify_inspector_binding_tip"
+LIVE_VERIFY_INSPECTOR_REMAP_TAG = "diag_live_verify_inspector_remap"
+LIVE_VERIFY_INSPECTOR_EXPLANATION_TAG = "diag_live_verify_inspector_explanation"
+LIVE_VERIFY_INSPECTOR_EDIT_TAG = "diag_live_verify_inspector_edit_binding"
+LIVE_VERIFY_VIEW_FRONT_BUTTON_TAG = "diag_live_verify_view_front"
+LIVE_VERIFY_VIEW_BACK_BUTTON_TAG = "diag_live_verify_view_back"
+LIVE_VERIFY_VIEW_TOP_BUTTON_TAG = "diag_live_verify_view_top"
+LIVE_VERIFY_SHOW_BINDINGS_TAG = "diag_live_verify_show_bindings"
+LIVE_VERIFY_FRONT_TITLE_TAG = "diag_live_verify_front_title"
+LIVE_VERIFY_FRONT_NOTE_TAG = "diag_live_verify_front_note"
+LIVE_VERIFY_BACK_TITLE_TAG = "diag_live_verify_back_title"
+LIVE_VERIFY_BACK_NOTE_TAG = "diag_live_verify_back_note"
+LIVE_VERIFY_TOP_TITLE_TAG = "diag_live_verify_top_title"
+LIVE_VERIFY_TOP_NOTE_TAG = "diag_live_verify_top_note"
+DIAGRAM_FACE_DRAWLIST_TAG = "diagram_face_drawlist"
+DIAGRAM_FACE_SOURCE_NOTE_TAG = "diag_live_verify_face_source_note"
+DIAGRAM_BACK_DRAWLIST_TAG = "diag_live_verify_back_drawlist"
+DIAGRAM_TOP_DRAWLIST_TAG = "diag_live_verify_top_drawlist"
+DIAGRAM_FACE_CLICK_HANDLER_TAG = "diag_live_verify_face_click_handler"
+DIAGRAM_BACK_CLICK_HANDLER_TAG = "diag_live_verify_back_click_handler"
+DIAGRAM_TOP_CLICK_HANDLER_TAG = "diag_live_verify_top_click_handler"
 
 # Player-slot override row: which XInput user index (0-3) the live tester reads.
 # The poll service owns the selection logic; these tags are just the combo the
@@ -174,51 +215,160 @@ _BUTTON_CHIP_ORDER = (
 )
 
 # Code-drawn front-face controller model (Phase 1 live visualizer).
-_FACE_DIAGRAM_W = 360
-_FACE_DIAGRAM_H = 260
-_FACE_BUTTON_R = 10
-_FACE_STICK_R = 23
-_FACE_STICK_DOT_R = 5
-_FACE_STICK_DOT_TRAVEL = 14
-_FACE_LABEL_SIZE = 13
+_WORKSPACE_MODEL_CARD_W = 640
+_WORKSPACE_INSPECTOR_W = 400
+_WORKSPACE_GAP = 18
+_INSPECTOR_WRAP = 360
+_WORKSPACE_VIEW_FRONT = "front"
+_WORKSPACE_VIEW_BACK = "back"
+_WORKSPACE_VIEW_TOP = "top"
+_WORKSPACE_VIEWS = (
+    _WORKSPACE_VIEW_FRONT,
+    _WORKSPACE_VIEW_BACK,
+    _WORKSPACE_VIEW_TOP,
+)
+_DIAGRAM_DRAWLIST_TAGS = {
+    _WORKSPACE_VIEW_FRONT: DIAGRAM_FACE_DRAWLIST_TAG,
+    _WORKSPACE_VIEW_BACK: DIAGRAM_BACK_DRAWLIST_TAG,
+    _WORKSPACE_VIEW_TOP: DIAGRAM_TOP_DRAWLIST_TAG,
+}
+_DIAGRAM_CLICK_HANDLER_TAGS = {
+    _WORKSPACE_VIEW_FRONT: DIAGRAM_FACE_CLICK_HANDLER_TAG,
+    _WORKSPACE_VIEW_BACK: DIAGRAM_BACK_CLICK_HANDLER_TAG,
+    _WORKSPACE_VIEW_TOP: DIAGRAM_TOP_CLICK_HANDLER_TAG,
+}
+
+_FACE_DIAGRAM_W = 560
+_FACE_DIAGRAM_H = 400
+_FACE_BUTTON_R = 18
+_FACE_STICK_R = 40
+_FACE_STICK_DOT_R = 8
+_FACE_STICK_DOT_TRAVEL = 25
+_FACE_LABEL_SIZE = 15
 _FACE_TRIGGER_LIGHT_THRESHOLD = 0.06
 _FACE_STICK_LIGHT_DEADZONE = 0.18
 
 _FACE_BUTTON_POS = {
-    ControllerButtonTarget.Y: (282, 88),
-    ControllerButtonTarget.X: (258, 114),
-    ControllerButtonTarget.B: (306, 114),
-    ControllerButtonTarget.A: (282, 140),
-    ControllerButtonTarget.LB: (66, 42),
-    ControllerButtonTarget.RB: (294, 42),
-    ControllerButtonTarget.BACK: (154, 122),
-    ControllerButtonTarget.START: (206, 122),
-    ControllerButtonTarget.LS: (112, 92),
-    ControllerButtonTarget.RS: (244, 162),
-    ControllerButtonTarget.UP: (92, 138),
-    ControllerButtonTarget.DOWN: (92, 174),
-    ControllerButtonTarget.LEFT: (74, 156),
-    ControllerButtonTarget.RIGHT: (110, 156),
+    ControllerButtonTarget.Y: (443, 150),
+    ControllerButtonTarget.X: (402, 190),
+    ControllerButtonTarget.B: (484, 190),
+    ControllerButtonTarget.A: (443, 230),
+    ControllerButtonTarget.LB: (128, 84),
+    ControllerButtonTarget.RB: (432, 84),
+    ControllerButtonTarget.BACK: (244, 204),
+    ControllerButtonTarget.START: (316, 204),
+    ControllerButtonTarget.LS: (176, 166),
+    ControllerButtonTarget.RS: (376, 276),
+    ControllerButtonTarget.UP: (140, 242),
+    ControllerButtonTarget.DOWN: (140, 306),
+    ControllerButtonTarget.LEFT: (108, 274),
+    ControllerButtonTarget.RIGHT: (172, 274),
+}
+
+_FACE_BUMPER_RECTS = {
+    ControllerButtonTarget.LB: ((72, 68), (184, 100)),
+    ControllerButtonTarget.RB: ((376, 68), (488, 100)),
 }
 
 _FACE_TRIGGER_RECTS = {
-    ControllerButtonTarget.LT: ((34, 12), (126, 30)),
-    ControllerButtonTarget.RT: ((234, 12), (326, 30)),
+    ControllerButtonTarget.LT: ((88, 24), (208, 54)),
+    ControllerButtonTarget.RT: ((352, 24), (472, 54)),
 }
 
 _FACE_STICK_CENTERS = {
     "left": _FACE_BUTTON_POS[ControllerButtonTarget.LS],
     "right": _FACE_BUTTON_POS[ControllerButtonTarget.RS],
 }
+_FACE_DPAD_TARGETS = frozenset(
+    {
+        ControllerButtonTarget.UP,
+        ControllerButtonTarget.DOWN,
+        ControllerButtonTarget.LEFT,
+        ControllerButtonTarget.RIGHT,
+    }
+)
 
 _FACE_LABEL_POS_OVERRIDES = {
-    ControllerButtonTarget.UP: (92, 118),
-    ControllerButtonTarget.DOWN: (92, 194),
-    ControllerButtonTarget.LEFT: (48, 156),
-    ControllerButtonTarget.RIGHT: (136, 156),
-    ControllerButtonTarget.BACK: (150, 145),
-    ControllerButtonTarget.START: (210, 145),
+    ControllerButtonTarget.UP: (140, 208),
+    ControllerButtonTarget.DOWN: (140, 338),
+    ControllerButtonTarget.LEFT: (66, 274),
+    ControllerButtonTarget.RIGHT: (218, 274),
+    ControllerButtonTarget.BACK: (236, 236),
+    ControllerButtonTarget.START: (324, 236),
 }
+
+_FACE_SOURCE_LABELS = {
+    "M3": (218, 128),
+    "M4": (340, 322),
+}
+
+_FACE_SELECTABLE_TARGETS = _BUTTON_CHIP_ORDER + (
+    ControllerButtonTarget.LT,
+    ControllerButtonTarget.RT,
+)
+
+_NON_LIVE_SELECTABLES = tuple(MacroSlot)
+_BUTTON_SLOT_LABELS = {
+    ButtonSlot.UP: "Up",
+    ButtonSlot.RIGHT: "Right",
+    ButtonSlot.DOWN: "Down",
+    ButtonSlot.LEFT: "Left",
+    ButtonSlot.A: "A",
+    ButtonSlot.B: "B",
+    ButtonSlot.X: "X",
+    ButtonSlot.Y: "Y",
+    ButtonSlot.LB: "LB",
+    ButtonSlot.RB: "RB",
+    ButtonSlot.LT: "LT",
+    ButtonSlot.RT: "RT",
+    ButtonSlot.BACK: "Back",
+    ButtonSlot.START: "Start",
+    ButtonSlot.LS: "LS",
+    ButtonSlot.RS: "RS",
+}
+
+_FRONT_BINDING_BADGE_TARGETS = _FACE_SELECTABLE_TARGETS
+_BINDING_BADGE_SIZE = 13
+_BINDING_BADGE_ARROW = "\u2192"
+
+_BACK_DIAGRAM_W = _FACE_DIAGRAM_W
+_BACK_DIAGRAM_H = _FACE_DIAGRAM_H
+_BACK_VIEW_SCALE = 1.45
+_BACK_VIEW_OFFSET = (
+    (_BACK_DIAGRAM_W - BACK_DIAGRAM_W * _BACK_VIEW_SCALE) / 2.0,
+    (_BACK_DIAGRAM_H - BACK_DIAGRAM_H * _BACK_VIEW_SCALE) / 2.0 + 8,
+)
+_BACK_PADDLE_SLOTS = tuple(BACK_PADDLE_POS)
+_BACK_TOP_CLAW_SLOTS = tuple(
+    slot for slot in _BACK_PADDLE_SLOTS if slot in BACK_PADDLE_APPROX
+)
+_BACK_UPPER_PADDLE_SLOTS = (MacroSlot.RM, MacroSlot.LM)
+_BACK_LOWER_PADDLE_SLOTS = (MacroSlot.M2, MacroSlot.M1)
+_BACK_BADGE_SIZE = 12
+
+_TOP_DIAGRAM_W = _FACE_DIAGRAM_W
+_TOP_DIAGRAM_H = _FACE_DIAGRAM_H
+_TOP_CONTROL_RECTS = {
+    "L2": ((78, 94), (218, 136)),
+    "L1": ((94, 152), (244, 194)),
+    "LK": ((192, 216), (252, 254)),
+    "R2": ((342, 94), (482, 136)),
+    "R1": ((316, 152), (466, 194)),
+    "RK": ((308, 216), (368, 254)),
+}
+_TOP_LIVE_TARGETS = {
+    "L1": ControllerButtonTarget.LB,
+    "L2": ControllerButtonTarget.LT,
+    "R1": ControllerButtonTarget.RB,
+    "R2": ControllerButtonTarget.RT,
+}
+_TOP_SOURCE_SLOTS = {
+    "LK": MacroSlot.LK,
+    "RK": MacroSlot.RK,
+}
+_TOP_CONTROLS = ("L1", "L2", "LK", "R1", "R2", "RK")
+_TOP_BADGE_SIZE = 12
+_CRYSTAL_BLUE = (46, 155, 255, 220)
 
 
 class _LiveVerifyState:
@@ -239,6 +389,12 @@ class _LiveVerifyState:
         # Until then a missing root means "not committed yet" (keep re-arming),
         # not "torn down" (stop the worker + end the chain) — item I.
         self.root_seen = False
+        self.selected_control = None
+        self.active_view = _WORKSPACE_VIEW_FRONT
+        self.show_binding_badges = True
+        self.front_badge_text: dict[ControllerButtonTarget, str] = {}
+        self.back_badge_text: dict[MacroSlot, str] = {}
+        self.top_badge_text: dict[str, str] = {}
 
     def sweep_for(self, side: str) -> CircularitySweep:
         return self.left_sweep if side == "left" else self.right_sweep
@@ -306,8 +462,36 @@ def _face_label_tag(target: ControllerButtonTarget) -> str:
     return f"diagram_face_label_{target.name}"
 
 
+def _face_binding_badge_tag(target: ControllerButtonTarget) -> str:
+    return f"diagram_face_binding_{target.name}"
+
+
 def _face_stick_dot_tag(side: str) -> str:
     return f"diagram_face_{side}_stick_dot"
+
+
+def _back_hotspot_tag(slot: MacroSlot) -> str:
+    return f"diag_live_verify_back_paddle_{slot.name}"
+
+
+def _back_label_tag(slot: MacroSlot) -> str:
+    return f"diag_live_verify_back_label_{slot.name}"
+
+
+def _back_binding_badge_tag(slot: MacroSlot) -> str:
+    return f"diag_live_verify_back_binding_{slot.name}"
+
+
+def _top_hotspot_tag(label: str) -> str:
+    return f"diag_live_verify_top_{label}"
+
+
+def _top_label_tag(label: str) -> str:
+    return f"diag_live_verify_top_label_{label}"
+
+
+def _top_binding_badge_tag(label: str) -> str:
+    return f"diag_live_verify_top_binding_{label}"
 
 
 def _deadzone_slider_tag(side: str, kind: str) -> str:
@@ -380,21 +564,9 @@ def build(shell, parent: str) -> None:
     ):
         _build_header(shell)
         dpg.add_spacer(height=6)
-        with dpg.group(horizontal=True):
-            _build_stick_block(shell, state, "left")
-            dpg.add_spacer(width=_STICK_CARD_GAP)
-            _build_stick_block(shell, state, "right")
-        dpg.add_text(
-            t("diagnostics.live_verify.circularity_help"),
-            color=shell.COLORS["muted"],
-            wrap=_SCREEN_WRAP,
-        )
-        # Tightened spacers (layout fit) so the whole screen fits the default
-        # window with little or no governing scroll.
+        _build_controller_workspace(shell)
         dpg.add_spacer(height=8)
-        _build_buttons_triggers_card(shell)
-        dpg.add_spacer(height=8)
-        _build_inline_deadzone_card(shell)
+        _build_demoted_live_cards(shell, state)
 
     _schedule_live_verify_refresh(shell, state)
 
@@ -541,6 +713,620 @@ def _call_selection(service, name: str, *args) -> None:
         logger.exception("Live-verify: %s%r failed", name, args)
 
 
+def _build_controller_workspace(shell) -> None:
+    """Two-pane controller workspace: enlarged front model + inspector."""
+
+    with dpg.group(horizontal=True):
+        with _fit_card(width=_WORKSPACE_MODEL_CARD_W):
+            section_title(t("diagnostics.live_verify.workspace.title"))
+            _build_workspace_controls(shell)
+            dpg.add_spacer(height=4)
+            _render_face_diagram(shell, show=True)
+            _render_back_diagram(shell, show=False)
+            _render_top_diagram(shell, show=False)
+            refresh_binding_overlays(shell)
+            dpg.add_spacer(height=6)
+            _build_control_selectors(shell)
+        dpg.add_spacer(width=_WORKSPACE_GAP)
+        with _fit_card(width=_WORKSPACE_INSPECTOR_W):
+            _build_inspector(shell)
+
+
+def _build_workspace_controls(shell) -> None:
+    with dpg.group(horizontal=True):
+        dpg.add_button(
+            label=t("diagnostics.live_verify.workspace.front_view"),
+            tag=LIVE_VERIFY_VIEW_FRONT_BUTTON_TAG,
+            width=90,
+            callback=lambda: _set_workspace_view(shell, _WORKSPACE_VIEW_FRONT),
+        )
+        dpg.add_button(
+            label=t("diagnostics.live_verify.workspace.back_view"),
+            tag=LIVE_VERIFY_VIEW_BACK_BUTTON_TAG,
+            width=90,
+            callback=lambda: _set_workspace_view(shell, _WORKSPACE_VIEW_BACK),
+        )
+        dpg.add_button(
+            label=t("diagnostics.live_verify.workspace.top_view"),
+            tag=LIVE_VERIFY_VIEW_TOP_BUTTON_TAG,
+            width=90,
+            callback=lambda: _set_workspace_view(shell, _WORKSPACE_VIEW_TOP),
+        )
+        dpg.add_spacer(width=18)
+        dpg.add_checkbox(
+            label=t("diagnostics.live_verify.workspace.show_bindings"),
+            default_value=True,
+            tag=LIVE_VERIFY_SHOW_BINDINGS_TAG,
+            callback=lambda _sender, value: _set_binding_badges_visible(
+                shell, bool(value)
+            ),
+        )
+    _refresh_workspace_view_buttons(shell)
+
+
+def _set_workspace_view(shell, view: str) -> None:
+    state = getattr(shell, "_live_verify_state", None)
+    if state is None or view not in _WORKSPACE_VIEWS:
+        return
+    state.active_view = view
+    front = view == _WORKSPACE_VIEW_FRONT
+    back = view == _WORKSPACE_VIEW_BACK
+    top = view == _WORKSPACE_VIEW_TOP
+    for tag, show in (
+        (LIVE_VERIFY_FRONT_TITLE_TAG, front),
+        (DIAGRAM_FACE_DRAWLIST_TAG, front),
+        (LIVE_VERIFY_FRONT_NOTE_TAG, front),
+        (LIVE_VERIFY_BACK_TITLE_TAG, back),
+        (DIAGRAM_BACK_DRAWLIST_TAG, back),
+        (LIVE_VERIFY_BACK_NOTE_TAG, back),
+        (LIVE_VERIFY_TOP_TITLE_TAG, top),
+        (DIAGRAM_TOP_DRAWLIST_TAG, top),
+        (LIVE_VERIFY_TOP_NOTE_TAG, top),
+    ):
+        if dpg.does_item_exist(tag):
+            dpg.configure_item(tag, show=show)
+    _refresh_workspace_view_buttons(shell)
+    _apply_binding_badge_visibility(shell)
+
+
+def _refresh_workspace_view_buttons(shell) -> None:
+    state = getattr(shell, "_live_verify_state", None)
+    active = getattr(state, "active_view", _WORKSPACE_VIEW_FRONT)
+    for tag, view in (
+        (LIVE_VERIFY_VIEW_FRONT_BUTTON_TAG, _WORKSPACE_VIEW_FRONT),
+        (LIVE_VERIFY_VIEW_BACK_BUTTON_TAG, _WORKSPACE_VIEW_BACK),
+        (LIVE_VERIFY_VIEW_TOP_BUTTON_TAG, _WORKSPACE_VIEW_TOP),
+    ):
+        if dpg.does_item_exist(tag):
+            dpg.configure_item(tag, enabled=active != view)
+
+
+def _build_demoted_live_cards(shell, state: "_LiveVerifyState") -> None:
+    """Keep the legacy numeric/live-write surfaces one disclosure below."""
+
+    with dpg.collapsing_header(
+        label=t("diagnostics.live_verify.binding_guide.title"),
+        default_open=False,
+    ):
+        _build_on_device_binding_guide(shell)
+    with dpg.collapsing_header(
+        label=t("diagnostics.live_verify.advanced.sticks"),
+        default_open=False,
+    ):
+        with dpg.group(horizontal=True):
+            _build_stick_block(shell, state, "left")
+            dpg.add_spacer(width=_STICK_CARD_GAP)
+            _build_stick_block(shell, state, "right")
+        dpg.add_text(
+            t("diagnostics.live_verify.circularity_help"),
+            color=shell.COLORS["muted"],
+            wrap=_SCREEN_WRAP,
+        )
+    with dpg.collapsing_header(
+        label=t("diagnostics.live_verify.advanced.buttons"),
+        default_open=False,
+    ):
+        _build_buttons_triggers_card(shell)
+    with dpg.collapsing_header(
+        label=t("diagnostics.live_verify.advanced.deadzone"),
+        default_open=False,
+    ):
+        _build_inline_deadzone_card(shell)
+
+
+def _build_on_device_binding_guide(shell) -> None:
+    """Manual on-controller binding workflow; display-only, no app action."""
+
+    with _fit_card():
+        dpg.add_text(
+            t("diagnostics.live_verify.binding_guide.framing"),
+            color=shell.COLORS["warn"],
+            wrap=_SCREEN_WRAP,
+        )
+        dpg.add_spacer(height=4)
+        for key in (
+            "diagnostics.live_verify.binding_guide.assign",
+            "diagnostics.live_verify.binding_guide.clear",
+            "diagnostics.live_verify.binding_guide.profiles",
+        ):
+            dpg.add_text(
+                t(key),
+                color=shell.COLORS["muted"],
+                wrap=_SCREEN_WRAP,
+            )
+            dpg.add_spacer(height=3)
+
+
+def _build_control_selectors(shell) -> None:
+    dpg.add_text(
+        t("diagnostics.live_verify.workspace.select_label"),
+        color=shell.COLORS["text"],
+    )
+    for row in _chunks(_FACE_SELECTABLE_TARGETS, 8):
+        with dpg.group(horizontal=True):
+            for target in row:
+                dpg.add_button(
+                    label=_control_label(target),
+                    tag=_control_selectable_tag(target),
+                    width=68,
+                    callback=lambda _sender, _app_data, user_data: _select_control(
+                        shell, user_data
+                    ),
+                    user_data=target,
+                )
+    dpg.add_spacer(height=4)
+    dpg.add_text(
+        t("diagnostics.live_verify.workspace.paddles_label"),
+        color=shell.COLORS["muted"],
+    )
+    for row in _chunks(_NON_LIVE_SELECTABLES, 8):
+        with dpg.group(horizontal=True):
+            for slot in row:
+                dpg.add_button(
+                    label=slot.name,
+                    tag=_control_selectable_tag(slot),
+                    width=68,
+                    callback=lambda _sender, _app_data, user_data: _select_control(
+                        shell, user_data
+                    ),
+                    user_data=slot,
+                )
+
+
+def _build_inspector(shell) -> None:
+    section_title(t("diagnostics.live_verify.inspector.title"))
+    dpg.add_text(
+        t("diagnostics.live_verify.inspector.select_hint"),
+        tag=LIVE_VERIFY_INSPECTOR_HINT_TAG,
+        color=shell.COLORS["muted"],
+        wrap=_INSPECTOR_WRAP,
+    )
+    dpg.add_spacer(height=6)
+    dpg.add_text(
+        t("diagnostics.live_verify.inspector.identity"),
+        color=shell.COLORS["muted"],
+    )
+    dpg.add_text(
+        "",
+        tag=LIVE_VERIFY_INSPECTOR_IDENTITY_TAG,
+        color=shell.COLORS["text"],
+        wrap=_INSPECTOR_WRAP,
+    )
+    dpg.add_spacer(height=6)
+    dpg.add_text(
+        t("diagnostics.live_verify.inspector.live"),
+        color=shell.COLORS["muted"],
+    )
+    dpg.add_text(
+        "",
+        tag=LIVE_VERIFY_INSPECTOR_LIVE_TAG,
+        color=shell.COLORS["muted"],
+        wrap=_INSPECTOR_WRAP,
+    )
+    dpg.add_progress_bar(
+        default_value=0.0,
+        width=260,
+        overlay="0",
+        tag=LIVE_VERIFY_INSPECTOR_LIVE_BAR_TAG,
+        show=False,
+    )
+    dpg.add_spacer(height=6)
+    dpg.add_text(
+        t("diagnostics.live_verify.inspector.binding"),
+        color=shell.COLORS["muted"],
+    )
+    binding_item = dpg.add_text(
+        "",
+        tag=LIVE_VERIFY_INSPECTOR_BINDING_TAG,
+        color=shell.COLORS["muted"],
+        wrap=_INSPECTOR_WRAP,
+    )
+    with dpg.tooltip(binding_item, tag=LIVE_VERIFY_INSPECTOR_BINDING_TIP_TAG):
+        dpg.add_text(t("controller.buttons.current.unknown_tooltip"), wrap=320)
+    dpg.add_text(
+        "",
+        color=shell.COLORS["accent"],
+        tag=LIVE_VERIFY_INSPECTOR_REMAP_TAG,
+    )
+    dpg.add_spacer(height=6)
+    dpg.add_text(
+        t("diagnostics.live_verify.inspector.explanation"),
+        color=shell.COLORS["muted"],
+    )
+    dpg.add_text(
+        t("diagnostics.live_verify.face_diagram.note"),
+        tag=LIVE_VERIFY_INSPECTOR_EXPLANATION_TAG,
+        color=shell.COLORS["muted"],
+        wrap=_INSPECTOR_WRAP,
+    )
+    dpg.add_spacer(height=8)
+    dpg.add_button(
+        label=t("diagnostics.live_verify.inspector.edit_binding"),
+        tag=LIVE_VERIFY_INSPECTOR_EDIT_TAG,
+        width=160,
+        show=False,
+        enabled=False,
+        callback=lambda: _edit_selected_binding(shell),
+    )
+    _refresh_inspector_static(shell)
+
+
+def _chunks(items, size: int):
+    for index in range(0, len(items), size):
+        yield items[index : index + size]
+
+
+def _control_key(control) -> str:
+    return control.name if hasattr(control, "name") else str(control)
+
+
+def _control_selectable_tag(control) -> str:
+    return f"diag_live_verify_select_{_control_key(control)}"
+
+
+def _control_label(control) -> str:
+    return _control_key(control)
+
+
+def _control_identity(control) -> str:
+    if isinstance(control, MacroSlot):
+        return t("diagnostics.live_verify.inspector.paddle_identity", slot=control.name)
+    return _control_label(control)
+
+
+def _select_control(shell, control) -> None:
+    """Select a control from the list, repainting inspector + face highlight."""
+
+    state = getattr(shell, "_live_verify_state", None)
+    if state is None:
+        return
+    state.selected_control = control
+    for item in _FACE_SELECTABLE_TARGETS + _NON_LIVE_SELECTABLES:
+        tag = _control_selectable_tag(item)
+        if dpg.does_item_exist(tag):
+            dpg.configure_item(tag, enabled=item != control)
+
+    snap = _current_snapshot(getattr(shell, "xinput_poll_service", None))
+    if snap is not None:
+        _refresh_live_face_highlights(shell, snap)
+        _refresh_live_top_highlights(shell, snap)
+    _refresh_selection_highlights(shell, reset_others=True)
+    _refresh_inspector_static(shell)
+    if snap is not None:
+        _refresh_inspector_live(shell, snap)
+
+
+def _refresh_selection_highlights(shell, *, reset_others: bool = False) -> None:
+    """Repaint visible model-selection accents from the shared selection state."""
+
+    _refresh_face_selection_highlight(shell, reset_others=reset_others)
+    _refresh_back_selection_highlight(shell, reset_others=reset_others)
+    _refresh_top_selection_highlight(shell, reset_others=reset_others)
+
+
+def _refresh_face_selection_highlight(shell, *, reset_others: bool = False) -> None:
+    """Recolor/thicken the selected front-face hotspot in place."""
+
+    state = getattr(shell, "_live_verify_state", None)
+    selected = getattr(state, "selected_control", None)
+    for target in _FACE_SELECTABLE_TARGETS:
+        tag = _face_hotspot_tag(target)
+        if not dpg.does_item_exist(tag):
+            continue
+        if selected == target:
+            dpg.configure_item(
+                tag,
+                color=shell.COLORS["accent_hover"],
+                thickness=4.0,
+            )
+        elif reset_others:
+            dpg.configure_item(tag, thickness=2.0)
+
+
+def _refresh_back_selection_highlight(shell, *, reset_others: bool = False) -> None:
+    state = getattr(shell, "_live_verify_state", None)
+    selected = getattr(state, "selected_control", None)
+    for slot in _BACK_PADDLE_SLOTS:
+        tag = _back_hotspot_tag(slot)
+        if not dpg.does_item_exist(tag):
+            continue
+        if selected == slot:
+            dpg.configure_item(
+                tag,
+                color=shell.COLORS["accent_hover"],
+                thickness=4.0,
+            )
+        elif reset_others:
+            dpg.configure_item(
+                tag,
+                color=shell.COLORS["muted"],
+                thickness=2.0,
+            )
+
+
+def _refresh_top_selection_highlight(shell, *, reset_others: bool = False) -> None:
+    state = getattr(shell, "_live_verify_state", None)
+    selected = getattr(state, "selected_control", None)
+    for label in _TOP_CONTROLS:
+        tag = _top_hotspot_tag(label)
+        if not dpg.does_item_exist(tag):
+            continue
+        if selected == _top_control_selection(label):
+            dpg.configure_item(
+                tag,
+                color=shell.COLORS["accent_hover"],
+                thickness=4.0,
+            )
+        elif reset_others:
+            if label in _TOP_SOURCE_SLOTS:
+                dpg.configure_item(
+                    tag,
+                    color=shell.COLORS["warn"],
+                    thickness=2.0,
+                )
+            else:
+                dpg.configure_item(tag, thickness=2.0)
+
+
+def _refresh_inspector_static(shell) -> None:
+    """Repaint identity, cached binding, and explanation for the selection."""
+
+    if not dpg.does_item_exist(LIVE_VERIFY_INSPECTOR_IDENTITY_TAG):
+        return
+    state = getattr(shell, "_live_verify_state", None)
+    selected = getattr(state, "selected_control", None)
+    _set_inspector_tip(False)
+    if selected is None:
+        _show_inspector_hint(True)
+        _set_edit_binding_action(False)
+        _lv_set(LIVE_VERIFY_INSPECTOR_IDENTITY_TAG, "")
+        _lv_set(LIVE_VERIFY_INSPECTOR_LIVE_TAG, "")
+        _lv_set(LIVE_VERIFY_INSPECTOR_BINDING_TAG, "")
+        _lv_set(LIVE_VERIFY_INSPECTOR_REMAP_TAG, "")
+        _lv_set(
+            LIVE_VERIFY_INSPECTOR_EXPLANATION_TAG,
+            t("diagnostics.live_verify.face_diagram.note"),
+        )
+        _set_inspector_live_bar(False)
+        return
+
+    _show_inspector_hint(False)
+    _set_edit_binding_action(_is_bindable_control(selected))
+    _lv_set(LIVE_VERIFY_INSPECTOR_IDENTITY_TAG, _control_identity(selected))
+    _lv_set(
+        LIVE_VERIFY_INSPECTOR_EXPLANATION_TAG,
+        t(
+            "diagnostics.live_verify.inspector.explanation_paddle"
+            if isinstance(selected, MacroSlot)
+            else "diagnostics.live_verify.inspector.explanation_output"
+        ),
+    )
+    _refresh_inspector_binding(shell)
+
+
+def _show_inspector_hint(show: bool) -> None:
+    if dpg.does_item_exist(LIVE_VERIFY_INSPECTOR_HINT_TAG):
+        dpg.configure_item(LIVE_VERIFY_INSPECTOR_HINT_TAG, show=show)
+
+
+def _set_inspector_tip(show: bool) -> None:
+    if dpg.does_item_exist(LIVE_VERIFY_INSPECTOR_BINDING_TIP_TAG):
+        dpg.configure_item(LIVE_VERIFY_INSPECTOR_BINDING_TIP_TAG, show=show)
+
+
+def _set_edit_binding_action(available: bool) -> None:
+    if dpg.does_item_exist(LIVE_VERIFY_INSPECTOR_EDIT_TAG):
+        dpg.configure_item(
+            LIVE_VERIFY_INSPECTOR_EDIT_TAG,
+            show=available,
+            enabled=available,
+        )
+
+
+def _is_bindable_control(control) -> bool:
+    return (
+        isinstance(control, MacroSlot)
+        or _button_slot_for_control(control) is not None
+    )
+
+
+def _button_slot_for_control(control) -> ButtonSlot | None:
+    if not isinstance(control, ControllerButtonTarget):
+        return None
+    return ButtonSlot.__members__.get(control.name)
+
+
+def _edit_selected_binding(shell) -> None:
+    state = getattr(shell, "_live_verify_state", None)
+    selected = getattr(state, "selected_control", None)
+    if isinstance(selected, MacroSlot):
+        _navigate_to_controller_buttons(shell)
+        tag = f"back_paddle_combo_{selected.name}"
+        if dpg.does_item_exist(tag) and hasattr(dpg, "focus_item"):
+            dpg.focus_item(tag)
+        return
+
+    slot = _button_slot_for_control(selected)
+    if slot is None:
+        return
+    _navigate_to_controller_buttons(shell)
+    label = _button_slot_label(slot)
+    if dpg.does_item_exist("binding_source_combo"):
+        dpg.set_value("binding_source_combo", label)
+    callback = getattr(shell, "on_binding_source_changed", None)
+    if callable(callback):
+        callback(label)
+
+
+def _navigate_to_controller_buttons(shell) -> None:
+    shell.controller_active_tab = "buttons"
+    switch_screen = getattr(shell, "switch_screen", None)
+    if callable(switch_screen):
+        switch_screen("controller")
+    else:
+        shell.current_screen = "controller"
+
+
+def _button_slot_label(slot: ButtonSlot) -> str:
+    return _BUTTON_SLOT_LABELS[slot]
+
+
+def _set_inspector_live_bar(
+    show: bool, value: float = 0.0, overlay: str = "0"
+) -> None:
+    if not dpg.does_item_exist(LIVE_VERIFY_INSPECTOR_LIVE_BAR_TAG):
+        return
+    dpg.configure_item(LIVE_VERIFY_INSPECTOR_LIVE_BAR_TAG, show=show, overlay=overlay)
+    dpg.set_value(LIVE_VERIFY_INSPECTOR_LIVE_BAR_TAG, max(0.0, min(1.0, value)))
+
+
+def _refresh_inspector_binding(shell) -> None:
+    if not dpg.does_item_exist(LIVE_VERIFY_INSPECTOR_BINDING_TAG):
+        return
+    state = getattr(shell, "_live_verify_state", None)
+    selected = getattr(state, "selected_control", None)
+    if selected is None:
+        return
+    snapshot = getattr(shell, "last_controller_snapshot", None)
+    _set_inspector_tip(False)
+    _lv_set(LIVE_VERIFY_INSPECTOR_REMAP_TAG, "")
+
+    if isinstance(selected, MacroSlot):
+        bindings = snapshot.back_paddle_bindings or {} if snapshot is not None else {}
+        binding = bindings.get(selected)
+        text, color_role = _format_paddle_binding(selected, binding)
+        _lv_set(LIVE_VERIFY_INSPECTOR_BINDING_TAG, text)
+        if dpg.does_item_exist(LIVE_VERIFY_INSPECTOR_BINDING_TAG):
+            dpg.configure_item(
+                LIVE_VERIFY_INSPECTOR_BINDING_TAG,
+                color=shell.COLORS[color_role],
+            )
+        return
+
+    slot = _button_slot_for_control(selected)
+    if slot is None:
+        _lv_set(LIVE_VERIFY_INSPECTOR_BINDING_TAG, "")
+        return
+    bindings = snapshot.button_bindings or {} if snapshot is not None else {}
+    display = format_button_binding(slot, bindings.get(slot))
+    _lv_set(LIVE_VERIFY_INSPECTOR_BINDING_TAG, f"{slot.name} -> {display.text}")
+    if dpg.does_item_exist(LIVE_VERIFY_INSPECTOR_BINDING_TAG):
+        dpg.configure_item(
+            LIVE_VERIFY_INSPECTOR_BINDING_TAG,
+            color=shell.COLORS[display.color_role],
+        )
+    _set_inspector_tip(display.show_unknown_tooltip)
+    _lv_set(LIVE_VERIFY_INSPECTOR_REMAP_TAG, display.remapped_tag)
+
+
+def _format_paddle_binding(
+    slot: MacroSlot, binding: BackPaddleBinding | None
+) -> tuple[str, str]:
+    if binding is None:
+        return (
+            f"{slot.name} -> {t('controller.back_paddles.not_set_here')}",
+            "muted",
+        )
+    if binding.target is None:
+        return f"{slot.name} -> {t('controller.back_paddles.unbound')}", "accent"
+    return f"{slot.name} -> {_control_label(binding.target)}", "accent"
+
+
+def _refresh_inspector_live(shell, snap) -> None:
+    if not dpg.does_item_exist(LIVE_VERIFY_INSPECTOR_LIVE_TAG):
+        return
+    state = getattr(shell, "_live_verify_state", None)
+    selected = getattr(state, "selected_control", None)
+    if selected is None:
+        return
+    if isinstance(selected, MacroSlot):
+        _set_inspector_live_text(
+            shell,
+            t("diagnostics.live_verify.inspector.not_readable_live"),
+            "muted",
+        )
+        _set_inspector_live_bar(False)
+        return
+    if not getattr(snap, "dll_available", False) or not getattr(snap, "connected", False):
+        _set_inspector_live_text(
+            shell,
+            t("diagnostics.live_verify.inspector.no_live_controller"),
+            "muted",
+        )
+        _set_inspector_live_bar(False)
+        return
+    if selected is ControllerButtonTarget.LT or selected is ControllerButtonTarget.RT:
+        value = snap.left_trigger if selected is ControllerButtonTarget.LT else snap.right_trigger
+        intensity = max(0.0, min(1.0, value / 255.0))
+        lit = intensity > _FACE_TRIGGER_LIGHT_THRESHOLD
+        _set_inspector_live_text(
+            shell,
+            t("diagnostics.live_verify.inspector.trigger_value", value=int(value)),
+            "good" if lit else "muted",
+        )
+        _set_inspector_live_bar(True, intensity, str(int(value)))
+        return
+    if selected is ControllerButtonTarget.LS or selected is ControllerButtonTarget.RS:
+        x, y = (
+            snap.left_stick_normalized
+            if selected is ControllerButtonTarget.LS
+            else snap.right_stick_normalized
+        )
+        mag = math.hypot(x, y)
+        _set_inspector_live_text(
+            shell,
+            t(
+                "diagnostics.live_verify.inspector.stick_value",
+                x=f"{x:+.5f}",
+                y=f"{y:+.5f}",
+                mag=f"{mag:.5f}",
+            ),
+            "good" if mag > _FACE_STICK_LIGHT_DEADZONE else "muted",
+        )
+        _set_inspector_live_bar(False)
+        return
+    pressed = selected in snap.buttons
+    _set_inspector_live_text(
+        shell,
+        t(
+            "diagnostics.live_verify.inspector.pressed"
+            if pressed
+            else "diagnostics.live_verify.inspector.released"
+        ),
+        "good" if pressed else "muted",
+    )
+    _set_inspector_live_bar(False)
+
+
+def _set_inspector_live_text(shell, text: str, color_role: str) -> None:
+    _lv_set(LIVE_VERIFY_INSPECTOR_LIVE_TAG, text)
+    if dpg.does_item_exist(LIVE_VERIFY_INSPECTOR_LIVE_TAG):
+        dpg.configure_item(
+            LIVE_VERIFY_INSPECTOR_LIVE_TAG,
+            color=shell.COLORS[color_role],
+        )
+
+
 def _build_stick_block(shell, state: "_LiveVerifyState", side: str) -> None:
     """One stick card: header(label + avg-error %) + centered polar plot +
     5-dec axes + Start/Stop + coverage.
@@ -650,13 +1436,9 @@ def _build_buttons_triggers_card(shell) -> None:
     with _fit_card():
         section_title(t("diagnostics.live_verify.buttons_triggers_title"))
         dpg.add_spacer(height=4)
-        with dpg.group(horizontal=True):
-            with dpg.group():
-                _build_button_chip_row(shell)
-                dpg.add_spacer(height=8)
-                _build_trigger_bars(shell)
-            dpg.add_spacer(width=24)
-            _render_face_diagram(shell)
+        _build_button_chip_row(shell)
+        dpg.add_spacer(height=8)
+        _build_trigger_bars(shell)
 
 
 def _build_button_chip_row(shell) -> None:
@@ -683,7 +1465,7 @@ def _build_trigger_bars(shell) -> None:
         dpg.add_progress_bar(default_value=0.0, width=240, overlay="0", tag=TRIGGER_RIGHT_BAR_TAG)
 
 
-def _render_face_diagram(shell) -> None:
+def _render_face_diagram(shell, *, show: bool = True) -> None:
     """Code-drawn FRONT-face live model for XInput output state.
 
     The model deliberately lights XInput outputs only: physical paddle/source
@@ -692,20 +1474,22 @@ def _render_face_diagram(shell) -> None:
     only recolors / moves items in place.
     """
 
-    dpg.add_text(t("diagnostics.live_verify.face_diagram.title"), color=shell.COLORS["muted"])
+    dpg.add_text(
+        t("diagnostics.live_verify.face_diagram.title"),
+        tag=LIVE_VERIFY_FRONT_TITLE_TAG,
+        color=shell.COLORS["muted"],
+        show=show,
+    )
     with dpg.drawlist(
         width=_FACE_DIAGRAM_W,
         height=_FACE_DIAGRAM_H,
-        tag="diagram_face_drawlist",
+        tag=DIAGRAM_FACE_DRAWLIST_TAG,
+        show=show,
     ):
-        body = shell.COLORS["panel_alt"]
         muted = shell.COLORS["muted"]
         text = shell.COLORS["text"]
-        dpg.draw_rectangle((34, 46), (326, 214), color=body, thickness=2, rounding=36)
-        dpg.draw_line((72, 198), (48, 246), color=body, thickness=2)
-        dpg.draw_line((288, 198), (312, 246), color=body, thickness=2)
-        dpg.draw_circle((112, 92), 48, color=body, thickness=2)
-        dpg.draw_circle((244, 162), 48, color=body, thickness=2)
+        source = shell.COLORS["warn"]
+        _draw_face_shell(shell)
 
         for target, (p1, p2) in _FACE_TRIGGER_RECTS.items():
             dpg.draw_rectangle(
@@ -723,34 +1507,69 @@ def _render_face_diagram(shell) -> None:
                 text,
             )
 
-        dpg.draw_circle((180, 122), 8, color=muted, thickness=1)
+        for target, (p1, p2) in _FACE_BUMPER_RECTS.items():
+            dpg.draw_rectangle(
+                p1,
+                p2,
+                color=muted,
+                fill=_with_alpha(muted, 22),
+                thickness=2,
+                rounding=9,
+                tag=_face_hotspot_tag(target),
+            )
+            _draw_centered_label(
+                target.name,
+                ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2),
+                text,
+                tag=_face_label_tag(target),
+            )
+
+        dpg.draw_circle((280, 188), 12, color=muted, thickness=1)
         _draw_centered_label(
             t("diagnostics.live_verify.face_diagram.home"),
-            (180, 109),
+            (280, 168),
             text,
-            size=11,
+            size=13,
         )
-        _draw_centered_label("M3", (136, 75), muted, size=11)
-        _draw_centered_label("M4", (218, 182), muted, size=11)
+        for label, (cx, cy) in _FACE_SOURCE_LABELS.items():
+            dpg.draw_rectangle(
+                (cx - 20, cy - 11),
+                (cx + 20, cy + 11),
+                color=source,
+                fill=_with_alpha(source, 20),
+                thickness=1,
+                rounding=5,
+            )
+            _draw_centered_label(label, (cx, cy), source, size=13)
+        dpg.draw_text(
+            (166, 360),
+            t("diagnostics.live_verify.face_diagram.source_note"),
+            color=muted,
+            size=12,
+            tag=DIAGRAM_FACE_SOURCE_NOTE_TAG,
+        )
 
         for target, (cx, cy) in _FACE_BUTTON_POS.items():
+            if target in _FACE_BUMPER_RECTS:
+                continue
             radius = (
                 _FACE_STICK_R
                 if target in (ControllerButtonTarget.LS, ControllerButtonTarget.RS)
                 else _FACE_BUTTON_R
             )
-            dpg.draw_circle(
-                (cx, cy),
-                radius,
-                color=muted,
-                fill=(
-                    _with_alpha(muted, 34)
-                    if radius == _FACE_BUTTON_R
-                    else (0, 0, 0, 0)
-                ),
-                thickness=2.0,
-                tag=_face_hotspot_tag(target),
-            )
+            if target in _FACE_DPAD_TARGETS:
+                _draw_dpad_facet(target, (cx, cy), muted)
+            elif target in (ControllerButtonTarget.LS, ControllerButtonTarget.RS):
+                _draw_stick_collar((cx, cy), muted, _face_hotspot_tag(target))
+            else:
+                dpg.draw_circle(
+                    (cx, cy),
+                    radius,
+                    color=muted,
+                    fill=_with_alpha(muted, 34),
+                    thickness=2.0,
+                    tag=_face_hotspot_tag(target),
+                )
             _draw_centered_label(
                 target.name,
                 _FACE_LABEL_POS_OVERRIDES.get(target, (cx, cy - radius - 13)),
@@ -767,11 +1586,830 @@ def _render_face_diagram(shell) -> None:
                 tag=_face_stick_dot_tag(side),
             )
 
+        for target in _FRONT_BINDING_BADGE_TARGETS:
+            dpg.draw_text(
+                _front_binding_badge_pos(target),
+                "",
+                color=shell.COLORS["accent"],
+                size=_BINDING_BADGE_SIZE,
+                show=False,
+                tag=_face_binding_badge_tag(target),
+            )
+
+    _bind_diagram_click_handler(shell, _WORKSPACE_VIEW_FRONT)
+
     dpg.add_text(
         t("diagnostics.live_verify.face_diagram.note"),
+        tag=LIVE_VERIFY_FRONT_NOTE_TAG,
         color=shell.COLORS["muted"],
         wrap=_FACE_DIAGRAM_W,
+        show=show,
     )
+
+
+def _render_back_diagram(shell, *, show: bool = False) -> None:
+    """Code-drawn BACK view: static paddle slots + cached binding badges only."""
+
+    dpg.add_text(
+        t("diagnostics.live_verify.back_diagram.title"),
+        tag=LIVE_VERIFY_BACK_TITLE_TAG,
+        color=shell.COLORS["muted"],
+        show=show,
+    )
+    with dpg.drawlist(
+        width=_BACK_DIAGRAM_W,
+        height=_BACK_DIAGRAM_H,
+        tag=DIAGRAM_BACK_DRAWLIST_TAG,
+        show=show,
+    ):
+        muted = shell.COLORS["muted"]
+        text = shell.COLORS["text"]
+        _draw_back_shell(shell)
+
+        label_size = int(BACK_LABEL_SIZE * _BACK_VIEW_SCALE)
+        for slot in _BACK_PADDLE_SLOTS:
+            cx, cy = _back_paddle_center(slot)
+            label = f"{slot.name}*" if slot in BACK_PADDLE_APPROX else slot.name
+            if slot in BACK_PADDLE_APPROX:
+                _draw_smooth_polygon(
+                    _back_view_points(_back_claw_points(slot)),
+                    color=muted,
+                    fill=_with_alpha(muted, 28),
+                    thickness=2.0,
+                    tag=_back_hotspot_tag(slot),
+                )
+                dpg.draw_line(
+                    _back_view_point(
+                        (
+                            BACK_PADDLE_POS[slot][0] - 18,
+                            BACK_PADDLE_POS[slot][1] + 12,
+                        )
+                    ),
+                    _back_view_point(
+                        (
+                            BACK_PADDLE_POS[slot][0] + 18,
+                            BACK_PADDLE_POS[slot][1] + 12,
+                        )
+                    ),
+                    color=_with_alpha(muted, 120),
+                    thickness=1.0,
+                )
+            else:
+                p1, p2 = _back_paddle_bounds(slot)
+                _draw_rounded_polygon(
+                    _back_view_point(p1),
+                    _back_view_point(p2),
+                    10 * _BACK_VIEW_SCALE,
+                    color=muted,
+                    fill=_with_alpha(muted, 26),
+                    thickness=2.0,
+                    tag=_back_hotspot_tag(slot),
+                )
+            dpg.draw_text(
+                (
+                    cx - len(label) * label_size * 0.25,
+                    cy - label_size * 0.5,
+                ),
+                label,
+                color=text,
+                size=label_size,
+                tag=_back_label_tag(slot),
+            )
+            dpg.draw_text(
+                _back_binding_badge_pos(slot),
+                "",
+                color=muted,
+                size=_BACK_BADGE_SIZE,
+                show=False,
+                tag=_back_binding_badge_tag(slot),
+            )
+
+    _bind_diagram_click_handler(shell, _WORKSPACE_VIEW_BACK)
+
+    dpg.add_text(
+        t("diagnostics.live_verify.back_diagram.note"),
+        tag=LIVE_VERIFY_BACK_NOTE_TAG,
+        color=shell.COLORS["muted"],
+        wrap=_BACK_DIAGRAM_W,
+        show=show,
+    )
+
+
+def _render_top_diagram(shell, *, show: bool = False) -> None:
+    """Code-drawn TOP view: live shoulders/triggers + source-only claws."""
+
+    dpg.add_text(
+        t("diagnostics.live_verify.top_diagram.title"),
+        tag=LIVE_VERIFY_TOP_TITLE_TAG,
+        color=shell.COLORS["muted"],
+        show=show,
+    )
+    with dpg.drawlist(
+        width=_TOP_DIAGRAM_W,
+        height=_TOP_DIAGRAM_H,
+        tag=DIAGRAM_TOP_DRAWLIST_TAG,
+        show=show,
+    ):
+        muted = shell.COLORS["muted"]
+        text = shell.COLORS["text"]
+        source = shell.COLORS["warn"]
+        _draw_top_shell(shell)
+        for label in _TOP_CONTROLS:
+            p1, p2 = _top_control_bounds(label)
+            source_only = label in _TOP_SOURCE_SLOTS
+            color = source if source_only else muted
+            _draw_rounded_polygon(
+                p1,
+                p2,
+                10,
+                color=color,
+                fill=_with_alpha(color, 24 if source_only else 30),
+                thickness=2,
+                tag=_top_hotspot_tag(label),
+            )
+            if source_only:
+                dpg.draw_line(
+                    (p1[0] + 10, p2[1] - 8),
+                    (p2[0] - 10, p2[1] - 8),
+                    color=source,
+                    thickness=1,
+                )
+            _draw_centered_label(
+                label,
+                ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2),
+                text,
+                tag=_top_label_tag(label),
+            )
+            dpg.draw_text(
+                _top_binding_badge_pos(label),
+                "",
+                color=shell.COLORS["accent"],
+                size=_TOP_BADGE_SIZE,
+                show=False,
+                tag=_top_binding_badge_tag(label),
+            )
+
+    _bind_diagram_click_handler(shell, _WORKSPACE_VIEW_TOP)
+
+    dpg.add_text(
+        t("diagnostics.live_verify.top_diagram.note"),
+        tag=LIVE_VERIFY_TOP_NOTE_TAG,
+        color=shell.COLORS["muted"],
+        wrap=_TOP_DIAGRAM_W,
+        show=show,
+    )
+
+
+def _draw_face_shell(shell) -> None:
+    glass_edge = (232, 244, 255, 166)
+    glass_fill = (244, 249, 255, 32)
+    inner_fill = (244, 249, 255, 18)
+    panel_shadow = _with_alpha(shell.COLORS["panel_alt"], 70)
+    accent = _CRYSTAL_BLUE
+    body = [
+        (78, 92),
+        (138, 56),
+        (222, 46),
+        (280, 62),
+        (338, 46),
+        (422, 56),
+        (482, 92),
+        (522, 186),
+        (505, 306),
+        (458, 376),
+        (408, 370),
+        (361, 304),
+        (315, 312),
+        (280, 288),
+        (245, 312),
+        (199, 304),
+        (152, 370),
+        (102, 376),
+        (55, 306),
+        (38, 186),
+    ]
+    inner = [
+        (92, 106),
+        (152, 74),
+        (223, 64),
+        (280, 80),
+        (337, 64),
+        (408, 74),
+        (468, 106),
+        (496, 190),
+        (480, 294),
+        (446, 346),
+        (412, 342),
+        (374, 286),
+        (318, 294),
+        (280, 270),
+        (242, 294),
+        (186, 286),
+        (148, 342),
+        (114, 346),
+        (80, 294),
+        (64, 190),
+    ]
+    _draw_smooth_polygon(body, color=panel_shadow, fill=panel_shadow, thickness=1)
+    _draw_smooth_polygon(body, color=glass_edge, fill=glass_fill, thickness=2.2)
+    _draw_smooth_polygon(inner, color=(255, 255, 255, 56), fill=inner_fill, thickness=1.0)
+    _draw_smooth_polygon(
+        [(78, 66), (96, 34), (207, 34), (220, 60), (190, 112), (72, 110)],
+        color=glass_edge,
+        fill=(244, 249, 255, 22),
+        thickness=1.6,
+    )
+    _draw_smooth_polygon(
+        [(482, 66), (464, 34), (353, 34), (340, 60), (370, 112), (488, 110)],
+        color=glass_edge,
+        fill=(244, 249, 255, 22),
+        thickness=1.6,
+    )
+    _draw_smooth_polygon(
+        [(205, 64), (280, 82), (355, 64), (370, 110), (190, 110)],
+        color=(232, 244, 255, 120),
+        fill=(244, 249, 255, 18),
+        thickness=1.4,
+    )
+    _draw_segmented_line(
+        [(166, 338), (188, 296), (204, 242), (218, 190), (238, 146)],
+        accent,
+        2.4,
+    )
+    _draw_segmented_line(
+        [(394, 338), (372, 296), (356, 242), (342, 190), (322, 146)],
+        accent,
+        2.4,
+    )
+    _draw_segmented_line(
+        [(236, 126), (258, 112), (280, 108), (302, 112), (324, 126)],
+        accent,
+        2.0,
+    )
+
+
+def _draw_top_shell(shell) -> None:
+    glass_edge = (232, 244, 255, 160)
+    glass_fill = (244, 249, 255, 30)
+    accent = _CRYSTAL_BLUE
+    _draw_smooth_polygon(
+        [
+            (62, 112),
+            (92, 78),
+            (226, 68),
+            (280, 86),
+            (334, 68),
+            (468, 78),
+            (498, 112),
+            (510, 272),
+            (462, 312),
+            (336, 298),
+            (280, 314),
+            (224, 298),
+            (98, 312),
+            (50, 272),
+        ],
+        color=glass_edge,
+        fill=glass_fill,
+        thickness=2,
+    )
+    _draw_smooth_polygon(
+        [
+            (112, 82),
+            (216, 78),
+            (280, 94),
+            (344, 78),
+            (448, 82),
+            (470, 150),
+            (452, 258),
+            (352, 278),
+            (280, 294),
+            (208, 278),
+            (108, 258),
+            (90, 150),
+        ],
+        color=(255, 255, 255, 52),
+        fill=(244, 249, 255, 14),
+        thickness=1,
+    )
+    _draw_segmented_line([(154, 272), (196, 286), (244, 286)], accent, 2.2)
+    _draw_segmented_line([(406, 272), (364, 286), (316, 286)], accent, 2.2)
+    _draw_segmented_line([(236, 96), (258, 104), (280, 106), (302, 104), (324, 96)], accent, 2.0)
+
+
+def _draw_back_shell(shell) -> None:
+    glass_edge = (232, 244, 255, 160)
+    glass_fill = (244, 249, 255, 30)
+    inner_fill = (244, 249, 255, 15)
+    panel_shadow = _with_alpha(shell.COLORS["panel_alt"], 70)
+    muted = shell.COLORS["muted"]
+    accent = _CRYSTAL_BLUE
+    body = [
+        (34, 54),
+        (62, 22),
+        (108, 10),
+        (150, 24),
+        (192, 10),
+        (238, 22),
+        (266, 54),
+        (286, 112),
+        (278, 162),
+        (244, 210),
+        (218, 206),
+        (196, 170),
+        (174, 164),
+        (150, 182),
+        (126, 164),
+        (104, 170),
+        (82, 206),
+        (56, 210),
+        (22, 162),
+        (14, 112),
+    ]
+    inner = [
+        (48, 62),
+        (72, 34),
+        (110, 24),
+        (150, 38),
+        (190, 24),
+        (228, 34),
+        (252, 62),
+        (270, 112),
+        (262, 154),
+        (236, 190),
+        (214, 188),
+        (194, 154),
+        (170, 150),
+        (150, 166),
+        (130, 150),
+        (106, 154),
+        (86, 188),
+        (64, 190),
+        (38, 154),
+        (30, 112),
+    ]
+    _draw_smooth_polygon(
+        _back_view_points(body),
+        color=panel_shadow,
+        fill=panel_shadow,
+        thickness=1,
+    )
+    _draw_smooth_polygon(
+        _back_view_points(body),
+        color=glass_edge,
+        fill=glass_fill,
+        thickness=2.0,
+    )
+    _draw_smooth_polygon(
+        _back_view_points(inner),
+        color=(255, 255, 255, 50),
+        fill=inner_fill,
+        thickness=1.0,
+    )
+    _draw_smooth_polygon(
+        _back_view_points(
+            [
+                (64, 24),
+                (108, 8),
+                (150, 22),
+                (192, 8),
+                (236, 24),
+                (222, 48),
+                (78, 48),
+            ]
+        ),
+        color=(232, 244, 255, 120),
+        fill=(244, 249, 255, 16),
+        thickness=1.2,
+    )
+    _draw_segmented_line(
+        _back_view_points([(70, 178), (92, 150), (108, 118), (124, 86)]),
+        accent,
+        2.1,
+    )
+    _draw_segmented_line(
+        _back_view_points([(230, 178), (208, 150), (192, 118), (176, 86)]),
+        accent,
+        2.1,
+    )
+    _draw_segmented_line(
+        _back_view_points([(114, 54), (136, 44), (150, 42), (164, 44), (186, 54)]),
+        accent,
+        1.8,
+    )
+    dpg.draw_circle(
+        _back_view_point((150, 42)),
+        4.8 * _BACK_VIEW_SCALE,
+        color=muted,
+        fill=_with_alpha(muted, 36),
+        thickness=1.0,
+    )
+    for p1, p2 in (((46, 70), (78, 77)), ((222, 70), (254, 77))):
+        dpg.draw_rectangle(
+            _back_view_point(p1),
+            _back_view_point(p2),
+            color=_with_alpha(muted, 130),
+            fill=_with_alpha(muted, 18),
+            thickness=1.0,
+            rounding=2 * _BACK_VIEW_SCALE,
+        )
+
+
+def _back_view_points(
+    points: list[tuple[float, float]]
+) -> list[tuple[float, float]]:
+    return [_back_view_point(point) for point in points]
+
+
+def _back_claw_points(slot: MacroSlot) -> list[tuple[float, float]]:
+    cx, cy = BACK_PADDLE_POS[slot]
+    if slot is MacroSlot.RK:
+        return [
+            (cx - 29, cy - 3),
+            (cx - 20, cy - 15),
+            (cx + 20, cy - 14),
+            (cx + 30, cy),
+            (cx + 17, cy + 15),
+            (cx - 21, cy + 11),
+        ]
+    return [
+        (cx - 30, cy),
+        (cx - 20, cy - 14),
+        (cx + 20, cy - 15),
+        (cx + 29, cy - 3),
+        (cx + 21, cy + 11),
+        (cx - 17, cy + 15),
+    ]
+
+
+def _back_paddle_bounds(
+    slot: MacroSlot,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    cx, cy = BACK_PADDLE_POS[slot]
+    width, height = (42, 26) if slot in _BACK_UPPER_PADDLE_SLOTS else (38, 30)
+    return ((cx - width / 2, cy - height / 2), (cx + width / 2, cy + height / 2))
+
+
+def _draw_segmented_line(
+    points: list[tuple[float, float]],
+    color,
+    thickness: float,
+) -> None:
+    smooth_points = _smooth_open_points(points)
+    for p1, p2 in zip(smooth_points, smooth_points[1:]):
+        dpg.draw_line(p1, p2, color=_with_alpha(color, 42), thickness=thickness + 3)
+        dpg.draw_line(p1, p2, color=color, thickness=thickness)
+
+
+def _draw_smooth_polygon(
+    points: list[tuple[float, float]],
+    *,
+    color,
+    fill,
+    thickness: float,
+    tag=0,
+) -> None:
+    dpg.draw_polygon(
+        _smooth_closed_points(points),
+        color=color,
+        fill=fill,
+        thickness=thickness,
+        tag=tag,
+    )
+
+
+def _draw_rounded_polygon(
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    radius: float,
+    *,
+    color,
+    fill,
+    thickness: float,
+    tag=0,
+) -> None:
+    dpg.draw_polygon(
+        _rounded_rect_points(p1, p2, radius),
+        color=color,
+        fill=fill,
+        thickness=thickness,
+        tag=tag,
+    )
+
+
+def _smooth_closed_points(
+    points: list[tuple[float, float]],
+    *,
+    samples: int = 8,
+) -> list[tuple[float, float]]:
+    if len(points) < 3:
+        return points
+    smoothed: list[tuple[float, float]] = []
+    count = len(points)
+    for index, point in enumerate(points):
+        p0 = points[(index - 1) % count]
+        p1 = point
+        p2 = points[(index + 1) % count]
+        p3 = points[(index + 2) % count]
+        for step in range(samples):
+            smoothed.append(_catmull_rom_point(p0, p1, p2, p3, step / samples))
+    return smoothed
+
+
+def _smooth_open_points(
+    points: list[tuple[float, float]],
+    *,
+    samples: int = 8,
+) -> list[tuple[float, float]]:
+    if len(points) < 3:
+        return points
+    smoothed: list[tuple[float, float]] = []
+    last = len(points) - 1
+    for index in range(last):
+        p0 = points[index - 1] if index > 0 else points[index]
+        p1 = points[index]
+        p2 = points[index + 1]
+        p3 = points[index + 2] if index + 2 <= last else points[index + 1]
+        for step in range(samples):
+            smoothed.append(_catmull_rom_point(p0, p1, p2, p3, step / samples))
+    smoothed.append(points[-1])
+    return smoothed
+
+
+def _catmull_rom_point(
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    p3: tuple[float, float],
+    t_value: float,
+) -> tuple[float, float]:
+    t2 = t_value * t_value
+    t3 = t2 * t_value
+    return (
+        0.5
+        * (
+            (2 * p1[0])
+            + (-p0[0] + p2[0]) * t_value
+            + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2
+            + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3
+        ),
+        0.5
+        * (
+            (2 * p1[1])
+            + (-p0[1] + p2[1]) * t_value
+            + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2
+            + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3
+        ),
+    )
+
+
+def _rounded_rect_points(
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    radius: float,
+    *,
+    segments: int = 6,
+) -> list[tuple[float, float]]:
+    x1, y1 = p1
+    x2, y2 = p2
+    left, right = sorted((x1, x2))
+    top, bottom = sorted((y1, y2))
+    radius = max(0.0, min(radius, (right - left) / 2, (bottom - top) / 2))
+    corners = (
+        ((left + radius, top + radius), 180, 270),
+        ((right - radius, top + radius), 270, 360),
+        ((right - radius, bottom - radius), 0, 90),
+        ((left + radius, bottom - radius), 90, 180),
+    )
+    points: list[tuple[float, float]] = []
+    for (cx, cy), start, end in corners:
+        for step in range(segments + 1):
+            angle = math.radians(start + (end - start) * step / segments)
+            points.append((cx + math.cos(angle) * radius, cy + math.sin(angle) * radius))
+    return points
+
+
+def _draw_dpad_facet(
+    target: ControllerButtonTarget,
+    center: tuple[float, float],
+    color,
+) -> None:
+    cx, cy = center
+    if target is ControllerButtonTarget.UP:
+        points = [(cx, cy - 24), (cx + 27, cy + 2), (cx + 10, cy + 22), (cx - 10, cy + 22), (cx - 27, cy + 2)]
+    elif target is ControllerButtonTarget.DOWN:
+        points = [(cx, cy + 24), (cx + 27, cy - 2), (cx + 10, cy - 22), (cx - 10, cy - 22), (cx - 27, cy - 2)]
+    elif target is ControllerButtonTarget.LEFT:
+        points = [(cx - 24, cy), (cx + 2, cy - 27), (cx + 22, cy - 10), (cx + 22, cy + 10), (cx + 2, cy + 27)]
+    else:
+        points = [(cx + 24, cy), (cx - 2, cy - 27), (cx - 22, cy - 10), (cx - 22, cy + 10), (cx - 2, cy + 27)]
+    dpg.draw_polygon(
+        points,
+        color=color,
+        fill=_with_alpha(color, 34),
+        thickness=2,
+        tag=_face_hotspot_tag(target),
+    )
+    dpg.draw_line(points[0], points[2], color=_with_alpha((255, 255, 255, 180), 90), thickness=1)
+
+
+def _draw_stick_collar(
+    center: tuple[float, float],
+    color,
+    tag: str,
+) -> None:
+    dpg.draw_polygon(
+        _octagon_points(center, _FACE_STICK_R),
+        color=color,
+        fill=(244, 249, 255, 18),
+        thickness=2.2,
+        tag=tag,
+    )
+    dpg.draw_polygon(
+        _octagon_points(center, _FACE_STICK_R - 11),
+        color=_with_alpha((255, 255, 255, 180), 90),
+        fill=(0, 0, 0, 0),
+        thickness=1.1,
+    )
+    dpg.draw_circle(center, _FACE_STICK_R - 18, color=color, fill=_with_alpha(color, 26), thickness=1.4)
+
+
+def _octagon_points(
+    center: tuple[float, float],
+    radius: float,
+) -> list[tuple[float, float]]:
+    cx, cy = center
+    return [
+        (
+            cx + math.cos(math.radians(22.5 + index * 45)) * radius,
+            cy + math.sin(math.radians(22.5 + index * 45)) * radius,
+        )
+        for index in range(8)
+    ]
+
+
+def _face_hotspot_bounds(
+    target: ControllerButtonTarget,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    if target in _FACE_TRIGGER_RECTS:
+        return _FACE_TRIGGER_RECTS[target]
+    if target in _FACE_BUMPER_RECTS:
+        return _FACE_BUMPER_RECTS[target]
+    cx, cy = _FACE_BUTTON_POS[target]
+    radius = (
+        _FACE_STICK_R
+        if target in (ControllerButtonTarget.LS, ControllerButtonTarget.RS)
+        else _FACE_BUTTON_R
+    )
+    return ((cx - radius, cy - radius), (cx + radius, cy + radius))
+
+
+def _front_binding_badge_pos(target: ControllerButtonTarget) -> tuple[float, float]:
+    p1, p2 = _face_hotspot_bounds(target)
+    return (p2[0] + 8, p1[1] - 2)
+
+
+def _top_control_bounds(label: str) -> tuple[tuple[float, float], tuple[float, float]]:
+    return _TOP_CONTROL_RECTS[label]
+
+
+def _top_control_center(label: str) -> tuple[float, float]:
+    p1, p2 = _top_control_bounds(label)
+    return ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2)
+
+
+def _top_binding_badge_pos(label: str) -> tuple[float, float]:
+    p1, p2 = _top_control_bounds(label)
+    return (p2[0] + 8, p1[1] - 1)
+
+
+def _top_is_source_only(label: str) -> bool:
+    return label in _TOP_SOURCE_SLOTS
+
+
+def _top_control_selection(label: str):
+    if label in _TOP_SOURCE_SLOTS:
+        return _TOP_SOURCE_SLOTS[label]
+    return _TOP_LIVE_TARGETS[label]
+
+
+def _bind_diagram_click_handler(shell, view: str) -> None:
+    drawlist_tag = _DIAGRAM_DRAWLIST_TAGS[view]
+    handler_tag = _DIAGRAM_CLICK_HANDLER_TAGS[view]
+    if dpg.does_item_exist(handler_tag):
+        dpg.delete_item(handler_tag)
+    with dpg.item_handler_registry(tag=handler_tag):
+        dpg.add_item_clicked_handler(
+            callback=_on_diagram_clicked,
+            user_data=(shell, view),
+        )
+    dpg.bind_item_handler_registry(drawlist_tag, handler_tag)
+
+
+def _on_diagram_clicked(_sender=None, _app_data=None, user_data=None) -> None:
+    if not user_data:
+        return
+    shell, view = user_data
+    _handle_diagram_click(shell, view)
+
+
+def _handle_diagram_click(shell, view: str) -> None:
+    state = getattr(shell, "_live_verify_state", None)
+    if state is None or getattr(state, "active_view", None) != view:
+        return
+    drawlist_tag = _DIAGRAM_DRAWLIST_TAGS.get(view)
+    if not drawlist_tag:
+        return
+    point = _diagram_local_mouse_pos(drawlist_tag)
+    if point is None:
+        return
+    control = _diagram_control_at_point(view, point)
+    if control is None:
+        return
+    _select_control(shell, control)
+
+
+def _diagram_local_mouse_pos(drawlist_tag: str) -> tuple[float, float] | None:
+    try:
+        mouse = dpg.get_mouse_pos(local=True)
+        origin = dpg.get_item_rect_min(drawlist_tag)
+    except Exception:  # noqa: BLE001 - a click should never crash the screen
+        return None
+    if not mouse or not origin:
+        return None
+    return (float(mouse[0]) - float(origin[0]), float(mouse[1]) - float(origin[1]))
+
+
+def _diagram_control_at_point(view: str, point: tuple[float, float]):
+    if view == _WORKSPACE_VIEW_FRONT:
+        return _front_control_at_point(point)
+    if view == _WORKSPACE_VIEW_BACK:
+        return _back_control_at_point(point)
+    if view == _WORKSPACE_VIEW_TOP:
+        return _top_control_at_point(point)
+    return None
+
+
+def _front_control_at_point(point: tuple[float, float]):
+    for target in _FACE_SELECTABLE_TARGETS:
+        if _point_in_bounds(point, _face_hotspot_bounds(target)):
+            return target
+    return None
+
+
+def _back_control_at_point(point: tuple[float, float]):
+    for slot in _BACK_PADDLE_SLOTS:
+        if slot in _BACK_TOP_CLAW_SLOTS:
+            bounds = _bounds_for_points(_back_view_points(_back_claw_points(slot)))
+        else:
+            p1, p2 = _back_paddle_bounds(slot)
+            bounds = (_back_view_point(p1), _back_view_point(p2))
+        if _point_in_bounds(point, bounds):
+            return slot
+    return None
+
+
+def _top_control_at_point(point: tuple[float, float]):
+    for label in _TOP_CONTROLS:
+        if _point_in_bounds(point, _top_control_bounds(label)):
+            return _top_control_selection(label)
+    return None
+
+
+def _point_in_bounds(
+    point: tuple[float, float],
+    bounds: tuple[tuple[float, float], tuple[float, float]],
+) -> bool:
+    x, y = point
+    (x1, y1), (x2, y2) = bounds
+    left, right = sorted((x1, x2))
+    top, bottom = sorted((y1, y2))
+    return left <= x <= right and top <= y <= bottom
+
+
+def _bounds_for_points(
+    points: list[tuple[float, float]],
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return ((min(xs), min(ys)), (max(xs), max(ys)))
+
+
+def _back_view_point(point: tuple[float, float]) -> tuple[float, float]:
+    return (
+        _BACK_VIEW_OFFSET[0] + point[0] * _BACK_VIEW_SCALE,
+        _BACK_VIEW_OFFSET[1] + point[1] * _BACK_VIEW_SCALE,
+    )
+
+
+def _back_paddle_center(slot: MacroSlot) -> tuple[float, float]:
+    return _back_view_point(BACK_PADDLE_POS[slot])
+
+
+def _back_binding_badge_pos(slot: MacroSlot) -> tuple[float, float]:
+    cx, cy = _back_paddle_center(slot)
+    radius = BACK_PADDLE_R * _BACK_VIEW_SCALE
+    return (cx + radius + 10, cy - _BACK_BADGE_SIZE * 0.5)
 
 
 def _draw_centered_label(
@@ -797,19 +2435,29 @@ def _with_alpha(color, alpha: int):
 
 
 def _device_write_supported(shell) -> bool:
-    """True when the connected controller is an allowlisted ZD Ultimate Legend."""
+    """True when the connected controller is an allowlisted ZD Ultimate Legend.
+
+    The firmware-deadzone card is the one WRITE surface on this otherwise
+    read-only screen, so it gates on the same capability the shell's write paths
+    do. Reads ``device_service.state.write_supported`` and defaults True for stub
+    shells that lack the flag, so headless build-smoke tests are unaffected.
+    """
 
     state = getattr(getattr(shell, "device_service", None), "state", None)
     return bool(getattr(state, "write_supported", True))
 
 
 def _build_inline_deadzone_card(shell) -> None:
-    """Inline firmware-deadzone tuning card.
+    """Inline firmware-deadzone tuning card. On an allowlisted ZD these sliders
+    write the REAL controller ``StickDeadzones`` (debounced + read-back-verified
+    via the shell), which is what makes the circularity envelope move. Hydrated
+    from a live ``get_deadzones()`` read; callbacks are inert until that read
+    succeeds so a read-miss can never clobber the controller with a default.
 
-    On an allowlisted ZD these sliders write the REAL controller
-    ``StickDeadzones`` (debounced + read-back-verified via the shell). On any
-    other XInput controller the live tester still runs, but this write surface is
-    read-only and never issues a firmware deadzone read or write.
+    On a non-ZD / unverified controller the card is read-only: we never even
+    issue the firmware read, the sliders stay disabled, and the status + note say
+    so plainly. The live tester above (sticks / circularity / buttons / triggers)
+    still runs for any XInput pad — only this write surface is gated.
 
     _fit_card() (auto_resize_y) fits its content so it never overflows / grows its
     own scrollbar (layout fit); a fitted card has no scroll range, so any wheel
@@ -818,22 +2466,29 @@ def _build_inline_deadzone_card(shell) -> None:
     """
 
     write_supported = _device_write_supported(shell)
+    # Skip the firmware read entirely on a non-allowlisted controller — never
+    # attempt a ZD HID read on hardware whose protocol is unverified.
     current = _read_current_deadzones(shell) if write_supported else None
     hydrated = current is not None
     shell._diag_deadzone_hydrated = hydrated
     defaults = current if current is not None else StickDeadzones(0, 0, 0, 0)
-    if write_supported:
+
+    if not write_supported:
+        status_key = "diagnostics.live_verify.deadzone.status.unverified_device"
+        note_key = "diagnostics.live_verify.deadzone.note_unverified"
+    else:
         status_key = (
             "diagnostics.live_verify.deadzone.status.idle"
             if hydrated
             else "diagnostics.live_verify.deadzone.status.unavailable"
         )
         note_key = "diagnostics.live_verify.deadzone.note"
-        shell._diag_deadzone_status_key = "idle" if hydrated else "unavailable"
-    else:
-        status_key = "diagnostics.live_verify.deadzone.status.unverified_device"
-        note_key = "diagnostics.live_verify.deadzone.note_unverified"
-        shell._diag_deadzone_status_key = "unverified_device"
+    # Pin the live-tick status so the per-frame _refresh_deadzone_status keeps
+    # showing the right line (it reads this key every tick); on a non-ZD pad the
+    # write path is refused before it can change the key, so it stays "read-only".
+    shell._diag_deadzone_status_key = (
+        "unverified_device" if not write_supported else ("idle" if hydrated else "unavailable")
+    )
 
     with _fit_card():
         section_title(t("diagnostics.live_verify.deadzone.title"))
@@ -1069,9 +2724,11 @@ def _refresh_live_verify(shell, state: "_LiveVerifyState") -> None:
     _lv_set(PLAYER_ACTIVE_TAG, _player_active_text(snap))
     if not snap.dll_available:
         _set_availability(shell, "unavailable")
+        _refresh_inspector_live(shell, snap)
         return
     if not snap.connected:
         _set_availability(shell, "no_controller")
+        _refresh_inspector_live(shell, snap)
         return
     _set_availability(shell, "live")
     lx, ly = snap.left_stick_normalized
@@ -1080,8 +2737,145 @@ def _refresh_live_verify(shell, state: "_LiveVerifyState") -> None:
     _refresh_stick(shell, state, "right", rx, ry)
     _refresh_buttons(shell, snap)
     _refresh_live_face_highlights(shell, snap)
+    _refresh_live_top_highlights(shell, snap)
+    _refresh_selection_highlights(shell)
+    _refresh_inspector_live(shell, snap)
     _refresh_triggers(shell, snap)
     _refresh_deadzone_status(shell)
+
+
+def refresh_inspector_binding(shell) -> None:
+    """Refresh Live Verify cached binding surfaces, if mounted."""
+
+    _refresh_inspector_binding(shell)
+    refresh_binding_overlays(shell)
+
+
+def refresh_binding_overlays(shell) -> None:
+    """Refresh static on-model binding badges from the cached snapshot."""
+
+    state = getattr(shell, "_live_verify_state", None)
+    if state is None:
+        return
+    snapshot = getattr(shell, "last_controller_snapshot", None)
+    button_bindings = snapshot.button_bindings or {} if snapshot is not None else {}
+    back_paddle_bindings = (
+        snapshot.back_paddle_bindings or {} if snapshot is not None else {}
+    )
+
+    for target in _FRONT_BINDING_BADGE_TARGETS:
+        slot = _button_slot_for_control(target)
+        text = _front_binding_badge_text(
+            slot, button_bindings.get(slot) if slot else None
+        )
+        state.front_badge_text[target] = text
+        tag = _face_binding_badge_tag(target)
+        if dpg.does_item_exist(tag):
+            dpg.set_value(tag, text)
+            dpg.configure_item(tag, color=shell.COLORS["accent"])
+
+    for slot in _BACK_PADDLE_SLOTS:
+        binding = back_paddle_bindings.get(slot)
+        text, color_role = _back_binding_badge_text(binding)
+        state.back_badge_text[slot] = text
+        tag = _back_binding_badge_tag(slot)
+        if dpg.does_item_exist(tag):
+            dpg.set_value(tag, text)
+            dpg.configure_item(tag, color=shell.COLORS[color_role])
+
+    for label in _TOP_CONTROLS:
+        if label in _TOP_LIVE_TARGETS:
+            target = _TOP_LIVE_TARGETS[label]
+            slot = _button_slot_for_control(target)
+            text = _front_binding_badge_text(
+                slot, button_bindings.get(slot) if slot else None
+            )
+            color_role = "accent"
+        else:
+            slot = _TOP_SOURCE_SLOTS[label]
+            binding = back_paddle_bindings.get(slot)
+            text, color_role = _back_binding_badge_text(binding)
+        state.top_badge_text[label] = text
+        tag = _top_binding_badge_tag(label)
+        if dpg.does_item_exist(tag):
+            dpg.set_value(tag, text)
+            dpg.configure_item(tag, color=shell.COLORS[color_role])
+
+    _apply_binding_badge_visibility(shell)
+
+
+def _front_binding_badge_text(
+    slot: ButtonSlot | None,
+    mapping,
+) -> str:
+    if slot is None:
+        return ""
+    display = format_button_binding(slot, mapping)
+    if not display.remapped_tag:
+        return ""
+    return f"{_BINDING_BADGE_ARROW}{display.text}"
+
+
+def _back_binding_badge_text(binding: BackPaddleBinding | None) -> tuple[str, str]:
+    if binding is None:
+        return t("controller.back_paddles.not_set_here"), "muted"
+    if binding.target is None:
+        return f"{_BINDING_BADGE_ARROW}{t('controller.back_paddles.unbound')}", "accent"
+    return f"{_BINDING_BADGE_ARROW}{_control_label(binding.target)}", "accent"
+
+
+def _set_binding_badges_visible(shell, show: bool) -> None:
+    state = getattr(shell, "_live_verify_state", None)
+    if state is None:
+        return
+    state.show_binding_badges = show
+    _apply_binding_badge_visibility(shell)
+
+
+def _apply_binding_badge_visibility(shell) -> None:
+    state = getattr(shell, "_live_verify_state", None)
+    if state is None:
+        return
+    show_badges = bool(getattr(state, "show_binding_badges", True))
+    front_active = (
+        getattr(state, "active_view", _WORKSPACE_VIEW_FRONT)
+        == _WORKSPACE_VIEW_FRONT
+    )
+    back_active = (
+        getattr(state, "active_view", _WORKSPACE_VIEW_FRONT)
+        == _WORKSPACE_VIEW_BACK
+    )
+    top_active = (
+        getattr(state, "active_view", _WORKSPACE_VIEW_FRONT)
+        == _WORKSPACE_VIEW_TOP
+    )
+    for target in _FRONT_BINDING_BADGE_TARGETS:
+        tag = _face_binding_badge_tag(target)
+        if dpg.does_item_exist(tag):
+            dpg.configure_item(
+                tag,
+                show=show_badges
+                and front_active
+                and bool(state.front_badge_text.get(target)),
+            )
+    for slot in _BACK_PADDLE_SLOTS:
+        tag = _back_binding_badge_tag(slot)
+        if dpg.does_item_exist(tag):
+            dpg.configure_item(
+                tag,
+                show=show_badges
+                and back_active
+                and bool(state.back_badge_text.get(slot)),
+            )
+    for label in _TOP_CONTROLS:
+        tag = _top_binding_badge_tag(label)
+        if dpg.does_item_exist(tag):
+            dpg.configure_item(
+                tag,
+                show=show_badges
+                and top_active
+                and bool(state.top_badge_text.get(label)),
+            )
 
 
 # Availability state -> (i18n key, COLORS key for the text + dot).
@@ -1197,6 +2991,29 @@ def _refresh_live_face_highlights(shell, snap) -> None:
             )
 
 
+def _refresh_live_top_highlights(shell, snap) -> None:
+    for label, target in _TOP_LIVE_TARGETS.items():
+        tag = _top_hotspot_tag(label)
+        if not dpg.does_item_exist(tag):
+            continue
+        if target is ControllerButtonTarget.LT:
+            value = snap.left_trigger
+            intensity = max(0.0, min(1.0, value / 255.0))
+            lit = intensity > _FACE_TRIGGER_LIGHT_THRESHOLD
+        elif target is ControllerButtonTarget.RT:
+            value = snap.right_trigger
+            intensity = max(0.0, min(1.0, value / 255.0))
+            lit = intensity > _FACE_TRIGGER_LIGHT_THRESHOLD
+        else:
+            intensity = 1.0 if target in snap.buttons else 0.0
+            lit = target in snap.buttons
+        color = shell.COLORS["good"] if lit else shell.COLORS["muted"]
+        fill_alpha = 32
+        if lit:
+            fill_alpha = 72 if intensity <= 0.0 else int(52 + 128 * intensity)
+        dpg.configure_item(tag, color=color, fill=_with_alpha(color, fill_alpha))
+
+
 def _refresh_triggers(shell, snap) -> None:
     for value, bar_tag in (
         (snap.left_trigger, TRIGGER_LEFT_BAR_TAG),
@@ -1227,6 +3044,9 @@ _DEADZONE_STATUS_DISPLAY = {
     "sent_unverified": ("diagnostics.live_verify.deadzone.status.sent_unverified", "warn"),
     "failed": ("diagnostics.live_verify.deadzone.status.failed", "bad"),
     "unavailable": ("diagnostics.live_verify.deadzone.status.unavailable", "warn"),
+    # Non-ZD / unverified controller: the deadzone write surface is read-only.
+    # Pinned at build and never overwritten (the write path is refused before it
+    # can set another key), so the live tick keeps showing the honest line.
     "unverified_device": (
         "diagnostics.live_verify.deadzone.status.unverified_device",
         "warn",

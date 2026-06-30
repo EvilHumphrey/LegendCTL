@@ -20,6 +20,7 @@ Layout choices:
 from __future__ import annotations
 
 from zd_app.services.health_report.boundary import CLAIM_BOUNDARY_PARAGRAPH
+from zd_app.services.markdown_safety import escape_markdown
 from zd_app.services.path_scrub import scrub_value
 from zd_app.services.health_report.models import (
     HealthReport,
@@ -114,11 +115,12 @@ def _section_claim_boundary() -> str:
 def _section_device(report: HealthReport) -> str:
     device = report.device
     # controller_name / profile_name are freeform — profile_name in particular
-    # is operator text that can be an absolute path. Scrub before they land in
-    # the standalone export (also copied to clipboard and embedded in the
-    # diagnostic bundle). scrub_value returns "" for None, so the fallbacks hold.
-    controller = scrub_value(device.controller_name) or "(unknown)"
-    profile = scrub_value(device.profile_name) or "(none)"
+    # is operator text that can be an absolute path. Scrub, then escape Markdown
+    # table syntax before the standalone export (also copied to clipboard and
+    # embedded in the diagnostic bundle). scrub_value returns "" for None, so the
+    # fallbacks hold.
+    controller = escape_markdown(scrub_value(device.controller_name)) or "(unknown)"
+    profile = escape_markdown(scrub_value(device.profile_name)) or "(none)"
     polling = (
         f"{device.configured_polling_hz} Hz" if device.configured_polling_hz else "(unknown)"
     )

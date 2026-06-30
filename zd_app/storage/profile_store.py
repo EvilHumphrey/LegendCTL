@@ -53,14 +53,14 @@ class ProfileStore:
 
     def load(self, profile_id: str) -> Profile:
         path = self._path_for_id(profile_id)
-        return Profile.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        return Profile.from_dict(read_guarded_json(path))
 
     def list_profiles(self) -> list[Profile]:
         profiles: list[Profile] = []
         for path in sorted(self.base_dir.glob("*.json"), reverse=True):
             try:
-                profiles.append(Profile.from_dict(json.loads(path.read_text(encoding="utf-8"))))
-            except (OSError, ValueError):
+                profiles.append(Profile.from_dict(read_guarded_json(path)))
+            except (OSError, ValueError, RecursionError, json.JSONDecodeError):
                 # json.JSONDecodeError is a ValueError; Profile.from_dict now
                 # normalizes all wrong-shape errors to ValueError too, so a
                 # corrupt or malformed profile file is skipped, not fatal.

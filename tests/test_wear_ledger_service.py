@@ -44,6 +44,9 @@ from zd_app.services.wear_ledger.service import (
 )
 
 
+_DEEP_JSON = "[" * 20000 + "]" * 20000
+
+
 def _frozen_clock(start: datetime) -> Callable[[], datetime]:
     """Return a callable that advances by 1 second per call."""
 
@@ -192,6 +195,29 @@ class WearLedgerSchemaTests(unittest.TestCase):
         events = self.service.read_events()
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].summary, "ok")
+
+    def test_deeply_nested_line_is_skipped_without_consuming_limit(self) -> None:
+        active = self.base / ACTIVE_FILENAME
+        older = json.dumps(
+            {
+                "ts": "2026-05-26T00:00:00Z",
+                "event_type": SESSION_START,
+                "summary": "older",
+            }
+        )
+        newer = json.dumps(
+            {
+                "ts": "2026-05-26T00:00:01Z",
+                "event_type": SESSION_END,
+                "summary": "newer",
+            }
+        )
+        active.write_text(f"{_DEEP_JSON}\n{older}\n{newer}\n", encoding="utf-8")
+
+        events = self.service.read_events(limit=1)  # must not raise RecursionError
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].summary, "newer")
 
     def test_all_event_types_are_writable(self) -> None:
         for event_type in EVENT_TYPES:

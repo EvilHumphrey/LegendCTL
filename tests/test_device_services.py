@@ -227,6 +227,20 @@ class DeviceServiceEventLogTests(unittest.TestCase):
 
         self.assertTrue(service.recent_events(1)[0].endswith("Legacy raw event."))
 
+    def test_recent_events_scrubs_paths_before_display_and_clipboard_sinks(self) -> None:
+        service = DeviceService(clock=lambda: 0.0)
+        service.log_i18n_event(
+            "log.diagnostics.exported_bundle",
+            path=r"C:\Users\Jane Doe\diagnostics\bundle.json",
+        )
+
+        event = service.recent_events(1)[0]
+
+        self.assertNotIn("Jane", event)
+        self.assertNotIn("Doe", event)
+        self.assertNotIn(r"C:\Users", event)
+        self.assertIn("bundle.json", event)
+
     def test_i18n_log_entry_preserves_format_args(self) -> None:
         service = DeviceService(clock=lambda: 0.0)
         service.log_i18n_event(
@@ -310,8 +324,16 @@ class DeviceServiceSummaryPrecedenceTests(unittest.TestCase):
         with self.assertLogs("zd_app.services.device_service", level="WARNING") as captured:
             summary = self.service.summary_source_summary()
 
-        self.assertEqual(summary, "Unknown (Config)")
+        self.assertEqual(summary, "Unknown (source for: Config)")
         self.assertIn("Unmapped summary source label requested: bluetooth_bridge", captured.output[0])
+
+    def test_summary_source_summary_disambiguates_single_source_partial_fields(self) -> None:
+        self.service.state.summary_sources["battery"] = "xinput"
+
+        summary = self.service.summary_source_summary()
+
+        self.assertEqual(summary, "XInput (source for: Battery)")
+        self.assertNotEqual(summary, "XInput (Battery)")
 
     def test_summary_source_label_localizes_in_zh_cn(self) -> None:
         try:

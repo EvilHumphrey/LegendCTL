@@ -7,6 +7,7 @@ import logging
 import dearpygui.dearpygui as dpg
 
 from zd_app.i18n import t
+from zd_app.services.diagnostics_service import _redact_instance_id
 from zd_app.ui import support_reference, trust_labels
 from zd_app.ui.typography import screen_title, section_title
 
@@ -268,7 +269,7 @@ def connection_details_text(state, snapshot, summary_source_summary: str) -> str
     return "\n".join(
         (
             _connection_row("transport", _connection_value_text(snapshot.connection_mode)),
-            _connection_row("device_id", snapshot.device_id),
+            _connection_row("device_id", _redact_instance_id(snapshot.device_id)),
             _connection_row("firmware", _connection_value_text(snapshot.firmware_version)),
             _connection_row("sleep", _connection_value_text(state.sleep_setting)),
             _connection_row("active_config", active_config_status_text(state)),
@@ -277,8 +278,14 @@ def connection_details_text(state, snapshot, summary_source_summary: str) -> str
                 "last_packet",
                 snapshot.last_packet_timestamp or t("transport.path.none"),
             ),
-            _connection_row("last_read", f"{snapshot.last_read_duration_ms or 0:.2f}ms"),
-            _connection_row("last_write", f"{snapshot.last_write_duration_ms or 0:.2f}ms"),
+            _connection_row(
+                "last_read",
+                _duration_or_none(snapshot.last_read_duration_ms, "no_read_recorded"),
+            ),
+            _connection_row(
+                "last_write",
+                _duration_or_none(snapshot.last_write_duration_ms, "no_write_recorded"),
+            ),
         )
     )
 
@@ -287,11 +294,18 @@ def _connection_row(field_key: str, value: str) -> str:
     return f"{t(f'diagnostics.connection.field.{field_key}')}: {value}"
 
 
+def _duration_or_none(value: float | None, missing_key: str) -> str:
+    if value is None:
+        return t(f"diagnostics.connection.value.{missing_key}")
+    return f"{value:.2f}ms"
+
+
 def _connection_value_text(value: str) -> str:
     value_key = {
         "Unknown": "common.unknown",
         "Not verified": "profile.config_state.not_verified",
         "XInput (Battery)": "diagnostics.connection.value.xinput_battery",
+        "XInput (source for: Battery)": "diagnostics.connection.value.xinput_battery",
     }.get(value)
     if value_key is not None:
         return t(value_key)

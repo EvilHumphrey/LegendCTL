@@ -39,6 +39,9 @@ from zd_app.storage.last_applied_store import (
 )
 
 
+_DEEP_JSON = "[" * 20000 + "]" * 20000
+
+
 def _snap(**kw) -> ControllerSnapshot:
     base = dict(
         polling_rate=None,
@@ -165,6 +168,13 @@ class LoadFailurePolicyTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             store = LastAppliedStore(base_dir=tmp)
             store.path.write_text("{not json", encoding="utf-8")
+            with self.assertLogs("zd_app.storage.last_applied_store", level="WARNING"):
+                self.assertIsNone(store.load())
+
+    def test_deeply_nested_json_loads_none_with_warning(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = LastAppliedStore(base_dir=tmp)
+            store.path.write_text(_DEEP_JSON, encoding="utf-8")
             with self.assertLogs("zd_app.storage.last_applied_store", level="WARNING"):
                 self.assertIsNone(store.load())
 

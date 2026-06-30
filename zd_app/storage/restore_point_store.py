@@ -26,6 +26,7 @@ import re
 from pathlib import Path
 from typing import Iterable, Optional
 
+from zd_app.services.path_scrub import scrub_paths
 from zd_app.storage._import_guards import read_guarded_json
 from zd_app.storage.restore_point_models import (
     KIND,
@@ -161,7 +162,7 @@ class RestorePointStore:
                 RestorePointParseError,
             ) as exc:
                 logger.warning("could not load restore point %s: %s", path.name, exc)
-                skipped.append(SkippedFile(path=str(path), error=str(exc)))
+                skipped.append(SkippedFile(path=str(path), error=scrub_paths(str(exc))))
                 continue
             valid.append(rp)
         valid.sort(key=lambda rp: rp.created_at, reverse=True)

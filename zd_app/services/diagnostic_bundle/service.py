@@ -35,11 +35,13 @@ import json
 import logging
 import re
 import zipfile
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from zd_app.services.diagnostic_bundle.boundary import CLAIM_BOUNDARY_PARAGRAPH
+from zd_app.services.markdown_safety import escape_markdown
 from zd_app.services.path_scrub import APP_DATA_PLACEHOLDER, scrub_value
 from zd_app.services.module_passport import ModulePassportService
 from zd_app.services.wear_ledger import WearLedgerService
@@ -63,6 +65,7 @@ from zd_app.storage.module_passport_models import (
     ModuleFingerprint,
     ModulePassport,
 )
+from zd_app.storage._import_guards import read_guarded_json
 from zd_app.version import __build_commit__, __version__
 
 
@@ -90,6 +93,34 @@ HEADING_MODULE_PASSPORTS = "## Module Passports"
 HEADING_RECENT_HEALTH_REPORTS = "## Recent Health Reports"
 HEADING_LIFECYCLE_SUMMARY = "## Lifecycle summary (Wear Ledger)"
 HEADING_NOT_INCLUDED = "## What was NOT included"
+
+
+@dataclass(frozen=True)
+class DiagnosticBundlePreviewItem:
+    """One artifact class surfaced in the pre-export preview."""
+
+    key: str
+    count: int
+    member_count: int
+    member_paths: tuple[str, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DiagnosticBundlePreviewManifest:
+    """Share-safe preview of the ZIP bundle before it is written."""
+
+    items: tuple[DiagnosticBundlePreviewItem, ...]
+    excluded_items: tuple[DiagnosticBundlePreviewItem, ...]
+    member_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _BundleMember:
+    path: str
+    text: str
+    class_key: str
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _utc_now_iso(now_fn: Callable[[], datetime]) -> str:
@@ -213,40 +244,22 @@ class DiagnosticBundleService:
         """
 
         target_path = Path(target_path)
-        markdown = self.generate_markdown(
-            include_archived=include_archived,
-            health_report_limit=health_report_limit,
-            wear_ledger_days=wear_ledger_days,
-            device_identity=device_identity,
-        )
-
-        wear_ledger_summary = self._wear_ledger_summary(
-            wear_ledger_days=wear_ledger_days
-        )
 
         try:
+            members = self._bundle_members(
+                include_archived=include_archived,
+                health_report_limit=health_report_limit,
+                wear_ledger_days=wear_ledger_days,
+                device_identity=device_identity,
+            )
             target_path.parent.mkdir(parents=True, exist_ok=True)
             with zipfile.ZipFile(
                 target_path,
                 mode="w",
                 compression=zipfile.ZIP_DEFLATED,
             ) as zf:
-                zf.writestr("report.md", markdown)
-                self._write_module_passports_to_zip(
-                    zf, include_archived=include_archived
-                )
-                self._write_health_reports_to_zip(
-                    zf, limit=health_report_limit
-                )
-                zf.writestr(
-                    "wear_ledger_summary.json",
-                    json.dumps(
-                        wear_ledger_summary,
-                        indent=2,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    ),
-                )
+                for member in members:
+                    zf.writestr(member.path, member.text)
         except (OSError, zipfile.BadZipFile, ValueError):
             logger.exception(
                 "DiagnosticBundleService: ZIP write failed at %r",
@@ -255,6 +268,32 @@ class DiagnosticBundleService:
             return None
 
         return target_path
+
+    def preview_bundle_manifest(
+        self,
+        *,
+        include_archived: bool = True,
+        health_report_limit: int = DEFAULT_HEALTH_REPORT_LIMIT,
+        wear_ledger_days: int = DEFAULT_WEAR_LEDGER_DAYS,
+        device_identity: Optional[Mapping[str, Any]] = None,
+    ) -> DiagnosticBundlePreviewManifest:
+        """Return the artifact classes the ZIP writer would include.
+
+        The manifest is built from :meth:`_bundle_members`, the same private
+        assembly helper used by :meth:`generate_bundle_zip`, so counts stay tied
+        to the actual shareable ZIP path.
+        """
+
+        members = self._bundle_members(
+            include_archived=include_archived,
+            health_report_limit=health_report_limit,
+            wear_ledger_days=wear_ledger_days,
+            device_identity=device_identity,
+        )
+        return self._preview_manifest_from_members(
+            members,
+            wear_ledger_days=wear_ledger_days,
+        )
 
     def emit_generated_event(
         self,
@@ -309,6 +348,9 @@ class DiagnosticBundleService:
 
         return scrub_value(value)
 
+    def _sanitize_markdown(self, value: Any) -> str:
+        return escape_markdown(self._sanitize_path(value))
+
     # ------------------------------------------------------------------
     # Markdown rendering — individual sections
     # ------------------------------------------------------------------
@@ -327,14 +369,19 @@ class DiagnosticBundleService:
     def _render_hardware(self, device_identity: Optional[Mapping[str, Any]]) -> str:
         identity = dict(device_identity) if device_identity else {}
         # These come from the live device service and are not expected to carry
-        # paths, but they flow into the shareable report — scrub defensively so
-        # a future path-bearing caller can't leak a home path. ``_sanitize_path``
-        # returns "" for falsy values, so the ``or "Unknown"`` fallback holds.
-        product = self._sanitize_path(identity.get("product_string")) or "Unknown"
-        firmware = self._sanitize_path(identity.get("firmware_version")) or "Unknown"
-        connection = self._sanitize_path(identity.get("connection")) or "Unknown"
+        # paths, but they flow into the shareable report — scrub and Markdown
+        # escape defensively so a future path-bearing caller can't leak a home
+        # path or alter the rendered report. ``_sanitize_markdown`` returns ""
+        # for falsy values, so the ``or "Unknown"`` fallback holds.
+        product = self._sanitize_markdown(identity.get("product_string")) or "Unknown"
+        firmware = self._sanitize_markdown(identity.get("firmware_version")) or "Unknown"
+        connection = self._sanitize_markdown(identity.get("connection")) or "Unknown"
         slot = identity.get("active_slot")
-        slot_label = f"Config {slot}" if slot is not None else "Unknown"
+        slot_label = (
+            f"Config {self._sanitize_markdown(slot)}"
+            if slot is not None
+            else "Unknown"
+        )
         lines = [
             HEADING_HARDWARE,
             f"- Controller product string: {product}",
@@ -388,7 +435,7 @@ class DiagnosticBundleService:
             if latest is not None:
                 last_status = latest.overall_status
             lines.append(
-                f"- {side_label}: {self._sanitize_path(passport.module_id)} "
+                f"- {side_label}: {self._sanitize_markdown(passport.module_id)} "
                 f"(assigned {passport.assigned_at_utc}; runs: "
                 f"{len(passport.fingerprints)}; final status: {last_status})"
             )
@@ -397,12 +444,11 @@ class DiagnosticBundleService:
     def _render_passport_body(self, passport: ModulePassport) -> list[str]:
         # module_id + notes are operator-assignable freeform text, so they can
         # carry absolute paths (usernames/home dirs). Run them through
-        # _sanitize_path to uphold the module's "all paths sanitized" guarantee
-        # in the shareable report.md.
+        # path scrub + Markdown escaping before they land in shareable report.md.
         lines = [
-            f"- Module ID: {self._sanitize_path(passport.module_id)}",
+            f"- Module ID: {self._sanitize_markdown(passport.module_id)}",
             f"- Assigned: {passport.assigned_at_utc}",
-            f"- Notes: {self._sanitize_path(passport.notes) if passport.notes else '(none)'}",
+            f"- Notes: {self._sanitize_markdown(passport.notes) if passport.notes else '(none)'}",
         ]
         latest = passport.latest_fingerprint()
         if latest is None:
@@ -504,8 +550,8 @@ class DiagnosticBundleService:
             lines.append("    - (none in window)")
         else:
             for entry in recent_notes:
-                preview = entry.get("preview", "")
-                ts = entry.get("ts", "")
+                preview = self._sanitize_markdown(entry.get("preview", ""))
+                ts = self._sanitize_markdown(entry.get("ts", ""))
                 lines.append(f"    - {ts}: {preview}")
         return "\n".join(lines)
 
@@ -576,8 +622,8 @@ class DiagnosticBundleService:
             ]
             return result
         try:
-            payload = json.loads(json_sibling.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            payload = read_guarded_json(json_sibling)
+        except (OSError, ValueError, RecursionError, json.JSONDecodeError):
             logger.exception(
                 "DiagnosticBundleService: failed to read health report JSON %r",
                 str(json_sibling),
@@ -600,9 +646,9 @@ class DiagnosticBundleService:
         # an absolute path (e.g. in the device/controller string), and report.md
         # ships in the same shareable bundle.
         result["lines"] = [
-            f"Captured: {self._sanitize_path(captured_at)}",
-            f"Controller: {self._sanitize_path(controller_name)}",
-            f"Overall: {self._sanitize_path(overall)}",
+            f"Captured: {self._sanitize_markdown(captured_at)}",
+            f"Controller: {self._sanitize_markdown(controller_name)}",
+            f"Overall: {self._sanitize_markdown(overall)}",
         ]
         if sample_count is not None:
             try:
@@ -714,15 +760,190 @@ class DiagnosticBundleService:
         raw["notes"] = self._sanitize_path(raw.get("notes"))
         return raw
 
-    def _write_module_passports_to_zip(
+    def _bundle_members(
         self,
-        zf: zipfile.ZipFile,
         *,
         include_archived: bool,
-    ) -> None:
+        health_report_limit: int,
+        wear_ledger_days: int,
+        device_identity: Optional[Mapping[str, Any]],
+    ) -> list[_BundleMember]:
+        markdown = self.generate_markdown(
+            include_archived=include_archived,
+            health_report_limit=health_report_limit,
+            wear_ledger_days=wear_ledger_days,
+            device_identity=device_identity,
+        )
+        wear_ledger_summary = self._wear_ledger_summary(
+            wear_ledger_days=wear_ledger_days
+        )
+        counts = wear_ledger_summary.get("counts", {})
+        event_count = 0
+        if isinstance(counts, Mapping):
+            for value in counts.values():
+                try:
+                    event_count += int(value)
+                except (TypeError, ValueError):
+                    pass
+        recent_notes = wear_ledger_summary.get("recent_service_notes", [])
+        service_note_count = (
+            len(recent_notes) if isinstance(recent_notes, list) else 0
+        )
+
+        members: list[_BundleMember] = [
+            _BundleMember(
+                path="report.md",
+                text=markdown,
+                class_key="report",
+            )
+        ]
+        members.extend(
+            self._module_passport_bundle_members(
+                include_archived=include_archived
+            )
+        )
+        members.extend(
+            self._health_report_bundle_members(limit=health_report_limit)
+        )
+        members.append(
+            _BundleMember(
+                path="wear_ledger_summary.json",
+                text=json.dumps(
+                    wear_ledger_summary,
+                    indent=2,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                class_key="wear_ledger",
+                metadata={
+                    "window_days": int(wear_ledger_days),
+                    "event_count": event_count,
+                    "service_note_count": service_note_count,
+                },
+            )
+        )
+        return members
+
+    def _preview_manifest_from_members(
+        self,
+        members: Iterable[_BundleMember],
+        *,
+        wear_ledger_days: int,
+    ) -> DiagnosticBundlePreviewManifest:
+        members = tuple(members)
+        member_paths = tuple(member.path for member in members)
+
+        report_paths = tuple(
+            member.path for member in members if member.class_key == "report"
+        )
+        module_members = tuple(
+            member for member in members if member.class_key == "module_passport"
+        )
+        active_module_count = sum(
+            1 for member in module_members if member.metadata.get("kind") == "active"
+        )
+        archived_module_count = sum(
+            1
+            for member in module_members
+            if member.metadata.get("kind") == "archived"
+        )
+        health_members = tuple(
+            member for member in members if member.class_key == "health_report"
+        )
+        health_report_ids = tuple(
+            dict.fromkeys(
+                str(member.metadata.get("report_stem") or "")
+                for member in health_members
+                if member.metadata.get("report_stem")
+            )
+        )
+        health_markdown_count = sum(
+            1
+            for member in health_members
+            if member.metadata.get("format") == "markdown"
+        )
+        health_json_count = sum(
+            1
+            for member in health_members
+            if member.metadata.get("format") == "json"
+        )
+        wear_members = tuple(
+            member for member in members if member.class_key == "wear_ledger"
+        )
+        wear_metadata: Mapping[str, Any] = (
+            wear_members[0].metadata if wear_members else {}
+        )
+
+        items = (
+            DiagnosticBundlePreviewItem(
+                key="report",
+                count=len(report_paths),
+                member_count=len(report_paths),
+                member_paths=report_paths,
+            ),
+            DiagnosticBundlePreviewItem(
+                key="module_passports",
+                count=len(module_members),
+                member_count=len(module_members),
+                member_paths=tuple(member.path for member in module_members),
+                metadata={
+                    "active_count": active_module_count,
+                    "archived_count": archived_module_count,
+                },
+            ),
+            DiagnosticBundlePreviewItem(
+                key="health_reports",
+                count=len(health_report_ids),
+                member_count=len(health_members),
+                member_paths=tuple(member.path for member in health_members),
+                metadata={
+                    "markdown_count": health_markdown_count,
+                    "json_count": health_json_count,
+                },
+            ),
+            DiagnosticBundlePreviewItem(
+                key="wear_ledger",
+                count=len(wear_members),
+                member_count=len(wear_members),
+                member_paths=tuple(member.path for member in wear_members),
+                metadata={
+                    "window_days": int(
+                        wear_metadata.get("window_days", wear_ledger_days)
+                    ),
+                    "event_count": int(wear_metadata.get("event_count", 0)),
+                    "service_note_count": int(
+                        wear_metadata.get("service_note_count", 0)
+                    ),
+                },
+            ),
+        )
+        excluded_items = (
+            DiagnosticBundlePreviewItem(
+                key="raw_event_log",
+                count=0,
+                member_count=0,
+            ),
+            DiagnosticBundlePreviewItem(
+                key="raw_app_logs",
+                count=0,
+                member_count=0,
+            ),
+        )
+        return DiagnosticBundlePreviewManifest(
+            items=items,
+            excluded_items=excluded_items,
+            member_paths=member_paths,
+        )
+
+    def _module_passport_bundle_members(
+        self,
+        *,
+        include_archived: bool,
+    ) -> list[_BundleMember]:
+        members: list[_BundleMember] = []
         service = self._module_passport_service
         if service is None:
-            return
+            return members
         for side in SIDES:
             try:
                 passport = service.get(side)
@@ -734,20 +955,26 @@ class DiagnosticBundleService:
             if passport is None:
                 continue
             try:
-                payload = json.dumps(
-                    self._sanitized_passport_dict(passport),
-                    indent=2,
-                    ensure_ascii=False,
-                    sort_keys=True,
+                members.append(
+                    _BundleMember(
+                        path=f"module_passports/{side}.json",
+                        text=json.dumps(
+                            self._sanitized_passport_dict(passport),
+                            indent=2,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        class_key="module_passport",
+                        metadata={"kind": "active", "side": side},
+                    )
                 )
-                zf.writestr(f"module_passports/{side}.json", payload)
             except (TypeError, ValueError):
                 logger.exception(
                     "DiagnosticBundleService: failed to serialize passport (%s)",
                     side,
                 )
         if not include_archived:
-            return
+            return members
         for side in SIDES:
             try:
                 archived = service.list_archive(side)
@@ -758,23 +985,26 @@ class DiagnosticBundleService:
                 continue
             for idx, passport in enumerate(archived):
                 try:
-                    payload = json.dumps(
-                        self._sanitized_passport_dict(passport),
-                        indent=2,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                    )
                     # Stable, sortable archive filename — uses the passport's
                     # own metadata so the entry order matches the rendered
                     # order in the Markdown.
                     safe_id = _safe_filename_segment(self._sanitize_path(passport.module_id))
                     stamp = _safe_filename_segment(passport.assigned_at_utc)
-                    zf.writestr(
-                        (
-                            f"module_passports/archive/"
-                            f"{side}_{safe_id}_{stamp}_{idx:03d}.json"
-                        ),
-                        payload,
+                    members.append(
+                        _BundleMember(
+                            path=(
+                                f"module_passports/archive/"
+                                f"{side}_{safe_id}_{stamp}_{idx:03d}.json"
+                            ),
+                            text=json.dumps(
+                                self._sanitized_passport_dict(passport),
+                                indent=2,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                            class_key="module_passport",
+                            metadata={"kind": "archived", "side": side},
+                        )
                     )
                 except (TypeError, ValueError):
                     logger.exception(
@@ -783,19 +1013,29 @@ class DiagnosticBundleService:
                         side,
                         idx,
                     )
+        return members
 
-    def _write_health_reports_to_zip(
+    def _health_report_bundle_members(
         self,
-        zf: zipfile.ZipFile,
         *,
         limit: int,
-    ) -> None:
+    ) -> list[_BundleMember]:
+        members: list[_BundleMember] = []
         files = self._list_recent_health_reports(limit=limit)
         for md_path in files:
             try:
-                zf.writestr(
-                    f"health_reports/{md_path.name}",
-                    self._sanitize_path(md_path.read_text(encoding="utf-8")),
+                members.append(
+                    _BundleMember(
+                        path=f"health_reports/{md_path.name}",
+                        text=self._sanitize_path(
+                            md_path.read_text(encoding="utf-8")
+                        ),
+                        class_key="health_report",
+                        metadata={
+                            "format": "markdown",
+                            "report_stem": md_path.stem,
+                        },
+                    )
                 )
             except OSError:
                 logger.exception(
@@ -806,15 +1046,25 @@ class DiagnosticBundleService:
             json_sibling = md_path.with_suffix(".json")
             if json_sibling.exists():
                 try:
-                    zf.writestr(
-                        f"health_reports/{json_sibling.name}",
-                        self._sanitize_path(json_sibling.read_text(encoding="utf-8")),
+                    members.append(
+                        _BundleMember(
+                            path=f"health_reports/{json_sibling.name}",
+                            text=self._sanitize_path(
+                                json_sibling.read_text(encoding="utf-8")
+                            ),
+                            class_key="health_report",
+                            metadata={
+                                "format": "json",
+                                "report_stem": md_path.stem,
+                            },
+                        )
                     )
                 except OSError:
                     logger.exception(
                         "DiagnosticBundleService: failed to read JSON %r",
                         str(json_sibling),
                     )
+        return members
 
 
 # ---------------------------------------------------------------------------
@@ -841,5 +1091,7 @@ __all__ = [
     "BUNDLE_DIRNAME",
     "DEFAULT_HEALTH_REPORT_LIMIT",
     "DEFAULT_WEAR_LEDGER_DAYS",
+    "DiagnosticBundlePreviewItem",
+    "DiagnosticBundlePreviewManifest",
     "DiagnosticBundleService",
 ]

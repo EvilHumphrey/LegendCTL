@@ -38,6 +38,9 @@ from zd_app.storage.wrapper_profile_store import (
 )
 
 
+_DEEP_JSON = "[" * 20000 + "]" * 20000
+
+
 def _full_snapshot(rate: PollingRate = PollingRate.HZ_8000) -> ControllerSnapshot:
     return ControllerSnapshot(
         polling_rate=rate,
@@ -277,6 +280,27 @@ class WrapperProfileStoreTests(unittest.TestCase):
 
             self.assertEqual([profile.name for profile in profiles], ["Good"])
             self.assertEqual(skipped, [bad_path])
+
+    def test_deeply_nested_profile_is_skipped_in_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = WrapperProfileStore(tmpdir)
+            store.save(_profile("Good"))
+            deep_path = Path(tmpdir) / "deep.json"
+            deep_path.write_text(_DEEP_JSON, encoding="utf-8")
+
+            with self.assertLogs("zd_app.storage.wrapper_profile_store", level="WARNING"):
+                profiles, skipped = store.list_profiles()
+
+            self.assertEqual([profile.name for profile in profiles], ["Good"])
+            self.assertEqual(skipped, [deep_path])
+
+    def test_deeply_nested_profile_load_raises_wrapper_profile_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = WrapperProfileStore(tmpdir)
+            (Path(tmpdir) / "deep.json").write_text(_DEEP_JSON, encoding="utf-8")
+
+            with self.assertRaises(WrapperProfileError):
+                store.load("Deep")
 
     def test_unsupported_schema_version_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

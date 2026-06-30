@@ -1,5 +1,28 @@
 # Changelog
 
+## v2.2.0 — 2026-06-30
+
+Visibility-and-sharing release: the live controller model is redrawn with Front/Back/Top views
+and a click-to-inspect panel, and diagnostics bundles can now be previewed before sharing. No
+new settings are written by the wrapper (the new surfaces are read-only displays plus a local
+export preview); same test discipline (full suite green on Python 3.12 / DearPyGui 2.3.1).
+
+- **Front / Back / Top controller views.** The Live Verify model is redrawn closer to the real
+  ZD Ultimate Legend with smooth contours and three switchable views; live lights track XInput
+  output, while source-only labels (paddles, claws) are marked as not-live.
+- **Click the model to inspect a control.** Selecting a control on the model or in the list
+  opens an inspector (identity, live output, cached binding) with an "Edit binding" link to the
+  Buttons tab; clicking a back paddle selects the paddle, not the button it outputs.
+- **On-device binding guide.** Step-by-step instructions for assigning/clearing paddles and
+  switching onboard profiles on the controller, with a clear note that LegendCTL can set a
+  paddle but can't read paddle bindings back from the device.
+- **Preview a diagnostics bundle before sharing.** Export opens a preview of exactly what the
+  archive contains and the privacy posture of each part; the scrubbed file is written locally
+  and nothing is uploaded.
+- **Safer shareable reports.** Diagnostic text is scrubbed of local paths and written so
+  special characters can't reformat the report when pasted elsewhere; the open-folder action
+  stays within a safe local target.
+
 ## v2.1.0 — 2026-06-28
 
 Visibility-and-honesty release: the app now shows the controller's real button bindings and

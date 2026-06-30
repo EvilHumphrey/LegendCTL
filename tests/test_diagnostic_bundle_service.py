@@ -43,6 +43,9 @@ from zd_app.storage.module_passport_models import (
 )
 
 
+_DEEP_JSON = "[" * 20000 + "]" * 20000
+
+
 def _frozen_clock(start: datetime) -> Callable[[], datetime]:
     """Return a callable that advances by 1 second per call."""
 
@@ -202,6 +205,24 @@ class GenerateMarkdownFullDataTests(unittest.TestCase):
         ):
             self.assertIn(snippet, md, f"metric line missing: {snippet}")
 
+    def test_markdown_escapes_freeform_passport_fields(self) -> None:
+        self.passports.assign(
+            SIDE_LEFT,
+            "Module | [link](file:///x) `id`\nline",
+            notes="Notes | [link](file:///note) `note`\nsecond",
+        )
+
+        md = self.service.generate_markdown()
+
+        self.assertIn(r"Module \| \[link\]\(file:/x\) \`id\` line", md)
+        self.assertIn(
+            r"Notes \| \[link\]\(file:/note\) \`note\` second",
+            md,
+        )
+        self.assertNotIn("[link](file:///x)", md)
+        self.assertNotIn("[link](file:///note)", md)
+        self.assertNotIn("\nsecond", md)
+
     def test_markdown_includes_recent_health_reports(self) -> None:
         md = self.service.generate_markdown(health_report_limit=2)
         # Both seeded reports surface (newest first).
@@ -283,6 +304,19 @@ class GenerateMarkdownMissingDataTests(unittest.TestCase):
         service = self._service(health_dir=empty_dir)
         md = service.generate_markdown()
         self.assertIn("No exports found", md)
+
+    def test_deeply_nested_health_report_json_renders_unreadable_summary(self) -> None:
+        health_dir = self.root / "health_reports"
+        health_dir.mkdir()
+        md_path = health_dir / "zd_health_report_2026-05-26_180000.md"
+        md_path.write_text("# Health Report\n", encoding="utf-8")
+        md_path.with_suffix(".json").write_text(_DEEP_JSON, encoding="utf-8")
+        service = self._service(health_dir=health_dir)
+
+        with self.assertLogs("zd_app.services.diagnostic_bundle.service", level="ERROR"):
+            summary = service._summarize_health_report(md_path)
+
+        self.assertEqual(summary["lines"], ["(JSON sibling unreadable)"])
 
     def test_empty_wear_ledger_renders_zero_counts(self) -> None:
         ledger = WearLedgerService(
@@ -493,6 +527,158 @@ class MarkdownDoesNotLeakRootedHomePathTests(unittest.TestCase):
         self.assertNotIn(r"\Users", md)
 
 
+class ReportMarkdownEscapingTests(unittest.TestCase):
+    """Freeform bundle values must not become active Markdown in report.md."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.clock = _frozen_clock(
+            datetime(2026, 5, 26, 18, 0, 0, tzinfo=timezone.utc)
+        )
+        self.ledger = WearLedgerService(
+            base_dir=self.root / "ledger", utc_now=self.clock
+        )
+        self.ledger.append(
+            SERVICE_NOTE,
+            summary="serviced",
+            details={
+                "note": (
+                    "Service note | [note](file:///note) `note` "
+                    r"C:\Users\Jane Doe\AppData\Roaming\ZDUltimateLegend\note.txt"
+                    "\n# note heading"
+                ),
+            },
+        )
+        self.health_dir = self.root / "health_reports"
+        self.health_dir.mkdir(parents=True, exist_ok=True)
+        stamp = "2026-05-26_180000"
+        (self.health_dir / f"zd_health_report_{stamp}.md").write_text(
+            "# Controller Health Report\n\nOverall: ready\n",
+            encoding="utf-8",
+        )
+        (self.health_dir / f"zd_health_report_{stamp}.json").write_text(
+            json.dumps(
+                {
+                    "overall_status": (
+                        "ready | [overall](file:///overall) `overall`\n"
+                        "# overall heading "
+                        r"C:\Users\Jane Doe\AppData\Roaming\ZDUltimateLegend\overall.json"
+                    ),
+                    "captured_at_utc": (
+                        "Captured | [captured](file:///captured) `captured`\n"
+                        "# captured heading"
+                    ),
+                    "sample_count": 12000,
+                    "device": {
+                        "controller_name": (
+                            "Pad | [controller](file:///controller) `controller`\n"
+                            "# controller heading "
+                            r"C:\Users\Jane Doe\AppData\Roaming\ZDUltimateLegend\controllers\pad.json"
+                        ),
+                    },
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        self.service = DiagnosticBundleService(
+            base_dir=self.root / "bundles",
+            health_report_dir=self.health_dir,
+            wear_ledger=self.ledger,
+            app_data_dir=Path(
+                r"C:\Users\Jane Doe\AppData\Roaming\ZDUltimateLegend"
+            ),
+            utc_now=self.clock,
+        )
+
+    def test_report_md_escapes_markdown_after_path_scrub(self) -> None:
+        target = self.root / "out.zip"
+        result = self.service.generate_bundle_zip(
+            target,
+            device_identity={
+                "product_string": (
+                    "ZD | [product](file:///product) `product`\n"
+                    "# product heading "
+                    r"C:\Users\Jane Doe\AppData\Roaming\ZDUltimateLegend\device\product.json"
+                ),
+                "firmware_version": (
+                    "v1.18 | [firmware](file:///firmware) `firmware`\n"
+                    "# firmware heading"
+                ),
+                "connection": (
+                    "USB | [connection](file:///connection) `connection`\n"
+                    "# connection heading"
+                ),
+            },
+        )
+        self.assertEqual(result, target)
+
+        with zipfile.ZipFile(target, "r") as zf:
+            report_md = zf.read("report.md").decode("utf-8")
+            wear_summary = json.loads(
+                zf.read("wear_ledger_summary.json").decode("utf-8")
+            )
+
+        for escaped in (
+            r"ZD \| \[product\]",
+            r"v1.18 \| \[firmware\]",
+            r"USB \| \[connection\]",
+            r"Captured \| \[captured\]",
+            r"Pad \| \[controller\]",
+            r"ready \| \[overall\]",
+            r"Service note \| \[note\]",
+        ):
+            self.assertIn(escaped, report_md)
+        for raw_link in (
+            "[product](file:///product)",
+            "[firmware](file:///firmware)",
+            "[connection](file:///connection)",
+            "[captured](file:///captured)",
+            "[controller](file:///controller)",
+            "[overall](file:///overall)",
+            "[note](file:///note)",
+            "[product](file:/product)",
+            "[firmware](file:/firmware)",
+            "[connection](file:/connection)",
+            "[captured](file:/captured)",
+            "[controller](file:/controller)",
+            "[overall](file:/overall)",
+            "[note](file:/note)",
+        ):
+            self.assertNotIn(raw_link, report_md)
+        for raw_code in (
+            "`product`",
+            "`firmware`",
+            "`connection`",
+            "`captured`",
+            "`controller`",
+            "`overall`",
+            "`note`",
+        ):
+            self.assertNotIn(raw_code, report_md)
+        for heading in (
+            "\n# product heading",
+            "\n# firmware heading",
+            "\n# connection heading",
+            "\n# captured heading",
+            "\n# controller heading",
+            "\n# overall heading",
+            "\n# note heading",
+        ):
+            self.assertNotIn(heading, report_md)
+
+        self.assertIn(f"{APP_DATA_PLACEHOLDER}/device/product.json", report_md)
+        self.assertIn(f"{APP_DATA_PLACEHOLDER}/controllers/pad.json", report_md)
+        self.assertIn(f"{APP_DATA_PLACEHOLDER}/overall.json", report_md)
+        self.assertIn(f"{APP_DATA_PLACEHOLDER}/note.txt", report_md)
+        # JSON members stay path-scrubbed, not Markdown-escaped.
+        preview = wear_summary["recent_service_notes"][0]["preview"]
+        self.assertIn("[note]", preview)
+        self.assertNotIn(r"\[note\]", preview)
+
+
 # ---------------------------------------------------------------------------
 # ZIP composition
 # ---------------------------------------------------------------------------
@@ -562,6 +748,36 @@ class GenerateBundleZipTests(unittest.TestCase):
         self.assertNotIn("wear_ledger/events.jsonl", names)
         self.assertNotIn("events.jsonl", names)
 
+    def test_preview_manifest_matches_zip_members_and_counts(self) -> None:
+        manifest = self.service.preview_bundle_manifest()
+        target = self.root / "out.zip"
+        self.service.generate_bundle_zip(target)
+
+        with zipfile.ZipFile(target, "r") as zf:
+            names = set(zf.namelist())
+
+        self.assertEqual(set(manifest.member_paths), names)
+        items = {item.key: item for item in manifest.items}
+        self.assertEqual(items["report"].count, 1)
+        self.assertEqual(items["report"].member_paths, ("report.md",))
+        self.assertEqual(items["module_passports"].count, 3)
+        self.assertEqual(
+            items["module_passports"].metadata["active_count"], 2
+        )
+        self.assertEqual(
+            items["module_passports"].metadata["archived_count"], 1
+        )
+        self.assertEqual(items["health_reports"].count, 1)
+        self.assertEqual(items["health_reports"].member_count, 2)
+        self.assertEqual(
+            items["health_reports"].metadata["markdown_count"], 1
+        )
+        self.assertEqual(items["health_reports"].metadata["json_count"], 1)
+        self.assertEqual(items["wear_ledger"].count, 1)
+        excluded = {item.key: item for item in manifest.excluded_items}
+        self.assertEqual(excluded["raw_event_log"].count, 0)
+        self.assertEqual(excluded["raw_app_logs"].count, 0)
+
     def test_zip_excludes_archive_when_include_archived_false(self) -> None:
         target = self.root / "out_no_archive.zip"
         self.service.generate_bundle_zip(target, include_archived=False)
@@ -570,6 +786,18 @@ class GenerateBundleZipTests(unittest.TestCase):
         self.assertFalse(
             any(n.startswith("module_passports/archive/") for n in names),
             f"archive entries leaked: {[n for n in names if 'archive' in n]}",
+        )
+
+        manifest = self.service.preview_bundle_manifest(include_archived=False)
+        items = {item.key: item for item in manifest.items}
+        self.assertEqual(
+            items["module_passports"].metadata["archived_count"], 0
+        )
+        self.assertFalse(
+            any(
+                name.startswith("module_passports/archive/")
+                for name in manifest.member_paths
+            )
         )
 
     def test_zip_report_md_round_trips_through_bundle(self) -> None:
@@ -587,6 +815,31 @@ class GenerateBundleZipTests(unittest.TestCase):
         target = Path("Z:/non_existent_drive/diagnostic_bundle.zip")
         result = self.service.generate_bundle_zip(target)
         self.assertIsNone(result)
+
+
+class BundlePreviewEmptySourcesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.service = DiagnosticBundleService(base_dir=self.root / "bundles")
+
+    def test_preview_manifest_keeps_zero_count_classes_visible(self) -> None:
+        manifest = self.service.preview_bundle_manifest()
+        self.assertEqual(
+            set(manifest.member_paths),
+            {"report.md", "wear_ledger_summary.json"},
+        )
+        items = {item.key: item for item in manifest.items}
+        self.assertEqual(items["report"].count, 1)
+        self.assertEqual(items["module_passports"].count, 0)
+        self.assertEqual(items["health_reports"].count, 0)
+        self.assertEqual(items["wear_ledger"].count, 1)
+        self.assertEqual(items["wear_ledger"].metadata["event_count"], 0)
+        self.assertEqual(
+            {item.key for item in manifest.excluded_items},
+            {"raw_event_log", "raw_app_logs"},
+        )
 
 
 # ---------------------------------------------------------------------------

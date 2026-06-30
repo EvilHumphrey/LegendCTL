@@ -31,6 +31,10 @@ class TestSettingsScreen(unittest.TestCase):
 
         with patch.object(preferences_screen.dpg, "child_window", return_value=nullcontext()), patch.object(
             preferences_screen.dpg,
+            "group",
+            return_value=nullcontext(),
+        ), patch.object(
+            preferences_screen.dpg,
             "add_combo",
             side_effect=["language_combo", "logging_combo"],
         ), patch.object(preferences_screen.dpg, "bind_item_font") as bind_item_font, patch.object(

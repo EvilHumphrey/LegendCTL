@@ -13,6 +13,7 @@ import time
 import traceback
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 
 import dearpygui.dearpygui as dpg
@@ -99,7 +100,11 @@ from zd_app.storage.restore_point_store import RestorePointStore
 from zd_app.storage.settings_store import SettingsStore
 from zd_app.storage.snapshot_codec import snapshot_to_dict
 from zd_app.storage.wrapper_profile_store import WrapperProfileError, WrapperProfileStore
-from zd_app.ui import safe_import_model, support_reference
+from zd_app.ui import (
+    diagnostic_bundle_preview,
+    safe_import_model,
+    support_reference,
+)
 from zd_app.ui.fonts import bind_default_font, register_fonts
 from zd_app.ui.typography import screen_title
 from zd_app.ui.localized_dpg import install_dearpygui_i18n
@@ -483,6 +488,23 @@ LIGHTING_ZONE_LABEL_BY_ENUM = {v: k for k, v in LIGHTING_ZONE_BY_LABEL.items()}
 LIGHTING_MODE_LABEL_BY_ENUM = {v: k for k, v in LIGHTING_MODE_BY_LABEL.items()}
 
 logger = logging.getLogger(__name__)
+
+
+def _is_unc_path_value(path_value: str) -> bool:
+    expanded = os.path.expanduser(os.path.expandvars(str(path_value))).strip()
+    if not expanded:
+        return False
+    drive = PureWindowsPath(expanded).drive.replace("/", "\\").lower()
+    return drive.startswith("\\\\") and (
+        not drive.startswith("\\\\?\\") or drive.startswith("\\\\?\\unc\\")
+    )
+
+
+def _resolve_non_strict(path: Path) -> Path:
+    try:
+        return path.resolve(strict=False)
+    except OSError:
+        return path.absolute()
 
 _DPG_SAFE_WINDOW_TITLE = "LegendCTL - ZD Ultimate Legend"
 _TOP_STATUS_BAR_HEIGHT = 40
@@ -1520,7 +1542,19 @@ class AppShell:
                 dpg.add_spacer(width=SPACE_MD)
                 dpg.add_button(tag="footer_save_as_button", label=t("footer.save_as"), width=FOOTER_BUTTON_WIDTH_WIDE, callback=lambda: self._open_save_as_modal())
                 dpg.add_button(tag="footer_apply_button", label=t("footer.apply"), width=FOOTER_BUTTON_WIDTH, callback=lambda: self.apply_selected_wrapper_profile())
+                with dpg.tooltip("footer_apply_button", tag="footer_apply_tooltip"):
+                    dpg.add_text(
+                        t("footer.apply.tooltip"),
+                        wrap=320,
+                        tag="footer_apply_tooltip_text",
+                    )
                 dpg.add_button(tag="footer_delete_button", label=t("footer.delete"), width=FOOTER_BUTTON_WIDTH, callback=lambda: self.confirm_delete_wrapper_profile())
+                with dpg.tooltip("footer_delete_button", tag="footer_delete_tooltip"):
+                    dpg.add_text(
+                        t("footer.delete.tooltip"),
+                        wrap=320,
+                        tag="footer_delete_tooltip_text",
+                    )
                 dpg.add_spacer(width=SPACE_LG)
                 dpg.add_button(tag="footer_read_button", label=t("footer.read"), width=FOOTER_BUTTON_WIDTH, callback=lambda: self.refresh_from_controller())
                 dpg.add_spacer(width=SPACE_LG)
@@ -1804,6 +1838,8 @@ class AppShell:
         self._set_if_exists("bottom_last_event", recent_events[0] if recent_events else t("shell.no_events"))
         self._set_if_exists("bottom_apply_result", last_apply_result)
         self._set_if_exists("bottom_pending_changes", str(pending))
+        self._set_if_exists("footer_apply_tooltip_text", t("footer.apply.tooltip"))
+        self._set_if_exists("footer_delete_tooltip_text", t("footer.delete.tooltip"))
         if not _apply_status_active(self):
             self._set_if_exists("footer_status_text", last_apply_result)
 
@@ -2331,6 +2367,7 @@ class AppShell:
         # so it is safe in the hydrate path; per-slot no-op when not mounted.
         controller.refresh_current_bindings(self)
         self._hydrate_back_paddle_bindings(snapshot.back_paddle_bindings)
+        live_verify.refresh_inspector_binding(self)
         self._hydrate_lighting(snapshot.lighting_zones, missing)
         if include_device:
             self._hydrate_step_size(snapshot.step_size, missing)
@@ -4856,6 +4893,8 @@ class AppShell:
 
         self._record_settings_apply_result(success, message)
         self.refresh_shell()
+        if success:
+            live_verify.refresh_inspector_binding(self)
         return result
 
     def apply_vibration_settings(self):
@@ -5388,6 +5427,7 @@ class AppShell:
             # combos are left untouched (value-only update, no screen rebuild).
             self._remember_button_binding(slot, mapping)
             controller.refresh_current_bindings(self)
+            live_verify.refresh_inspector_binding(self)
         return result
 
     def apply_lighting(self):
@@ -5957,6 +5997,32 @@ class AppShell:
         self.refresh_current_screen()
 
     def export_rich_diagnostic_bundle(self) -> None:
+        bundle = self.diagnostic_bundle_service
+        if not isinstance(bundle, DiagnosticBundleService):
+            self.device_service.log_i18n_event("log.diagnostics.bundle_unavailable")
+            self.refresh_shell()
+            self.refresh_current_screen()
+            return
+        try:
+            manifest = bundle.preview_bundle_manifest(
+                include_archived=True,
+                health_report_limit=5,
+                wear_ledger_days=90,
+                device_identity=self._bundle_device_identity(),
+            )
+        except Exception:  # noqa: BLE001 — preview failure should not crash
+            logger.exception("Diagnostics rich bundle: preview manifest raised")
+            self.device_service.log_i18n_event("log.diagnostics.bundle_failed")
+            self.refresh_shell()
+            self.refresh_current_screen()
+            return
+        diagnostic_bundle_preview.open_preview_modal(
+            self,
+            manifest,
+            on_export=lambda: self._export_rich_diagnostic_bundle_now(),
+        )
+
+    def _export_rich_diagnostic_bundle_now(self) -> None:
         """Export the full DiagnosticBundleService ZIP from the Diagnostics screen.
 
         Mirrors the Modules-screen export (``modules._generate_zip``): writes a
@@ -6037,6 +6103,43 @@ class AppShell:
             os.startfile(str(path.parent))  # type: ignore[attr-defined]
         except OSError:
             logger.exception("Diagnostics rich bundle: failed to open folder")
+
+    def open_diagnostics_bundle_folder(self) -> None:
+        """Best-effort File Explorer open for the configured diagnostics folder."""
+
+        if not hasattr(os, "startfile"):
+            return
+        configured = self.settings.diagnostics_bundle_dir
+        if _is_unc_path_value(configured):
+            self.device_service.log_i18n_event(
+                "log.diagnostics.open_folder_unc_rejected"
+            )
+            self.refresh_shell()
+            self.refresh_current_screen()
+            return
+        requested = preferences.diagnostics_bundle_dir_open_target(configured)
+        try:
+            folder = self.diagnostics_service._safe_output_dir(str(requested))
+        except Exception:  # noqa: BLE001 — opening a folder should never crash the app
+            logger.exception("Diagnostics bundle folder: safe target resolution failed")
+            self.device_service.log_i18n_event("log.diagnostics.open_folder_failed")
+            self.refresh_shell()
+            self.refresh_current_screen()
+            return
+        opened_fallback = _resolve_non_strict(folder) != _resolve_non_strict(requested)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(folder))  # type: ignore[attr-defined]
+            if opened_fallback:
+                self.device_service.log_i18n_event(
+                    "log.diagnostics.open_folder_safe_fallback"
+                )
+        except OSError:
+            logger.exception("Diagnostics bundle folder: failed to open folder")
+            self.device_service.log_i18n_event("log.diagnostics.open_folder_failed")
+        finally:
+            self.refresh_shell()
+            self.refresh_current_screen()
 
     def update_setting(self, key: str, value) -> None:
         setattr(self.settings, key, value)
