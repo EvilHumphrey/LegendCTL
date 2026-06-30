@@ -289,12 +289,13 @@ _FACE_DPAD_TARGETS = frozenset(
 )
 
 _FACE_LABEL_POS_OVERRIDES = {
+    ControllerButtonTarget.LS: (150, 114),
     ControllerButtonTarget.UP: (140, 208),
-    ControllerButtonTarget.DOWN: (140, 338),
+    ControllerButtonTarget.DOWN: (140, 344),
     ControllerButtonTarget.LEFT: (66, 274),
-    ControllerButtonTarget.RIGHT: (218, 274),
-    ControllerButtonTarget.BACK: (236, 236),
-    ControllerButtonTarget.START: (324, 236),
+    ControllerButtonTarget.RIGHT: (232, 274),
+    ControllerButtonTarget.BACK: (228, 242),
+    ControllerButtonTarget.START: (332, 242),
 }
 
 _FACE_SOURCE_LABELS = {
@@ -1766,6 +1767,7 @@ def _draw_face_shell(shell) -> None:
     inner_fill = (244, 249, 255, 18)
     panel_shadow = _with_alpha(shell.COLORS["panel_alt"], 70)
     accent = _CRYSTAL_BLUE
+    edge_accent = (46, 155, 255, 150)
     body = [
         (78, 92),
         (138, 56),
@@ -1832,14 +1834,14 @@ def _draw_face_shell(shell) -> None:
         thickness=1.4,
     )
     _draw_segmented_line(
-        [(166, 338), (188, 296), (204, 242), (218, 190), (238, 146)],
-        accent,
-        2.4,
+        [(104, 330), (78, 286), (72, 224), (90, 162), (130, 118)],
+        edge_accent,
+        1.7,
     )
     _draw_segmented_line(
-        [(394, 338), (372, 296), (356, 242), (342, 190), (322, 146)],
-        accent,
-        2.4,
+        [(456, 330), (482, 286), (488, 224), (470, 162), (430, 118)],
+        edge_accent,
+        1.7,
     )
     _draw_segmented_line(
         [(236, 126), (258, 112), (280, 108), (302, 112), (324, 126)],

@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.3.0 — 2026-07-01
+
+Verify-it-yourself release: the app now demonstrates its local / no-network / no-driver claims,
+turns a run into a share-safe compatibility report, and exports a one-page evidence card. All
+opt-in, local, display/export-only — no new wrapper-written settings, no network calls, nothing
+uploaded; same test discipline (full suite green on Python 3.12 / DearPyGui 2.3.1).
+
+- **Trust Self-Check.** A Diagnostics panel that backs the trust posture with evidence — a static
+  no-networking-imports scan; confirmation of no driver / virtual device / background service; the
+  local-data location — claim-bounded per build/session, with one-click "Copy self-check."
+- **Compatibility Report.** Opt-in "Create Compatibility Report" → a share-safe, copy-pasteable
+  packet aligned to the compatibility-report issue template, plus a maintained public
+  `docs/compatibility-matrix.md`; carries a self-reported-evidence claim boundary (not vendor
+  certification / tournament / anti-cheat).
+- **Shareable evidence card.** A single self-contained HTML/Markdown page (trust posture +
+  device/config + diagnostic-bundle privacy posture + claim boundary); screenshotable, offline,
+  nothing uploaded.
+- **Live model polish.** Tidied edge-lighting and labels on the Live Verify controller model;
+  behavior unchanged (lights XInput output only).
+
 ## v2.2.0 — 2026-06-30
 
 Visibility-and-sharing release: the live controller model is redrawn with Front/Back/Top views

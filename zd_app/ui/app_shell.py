@@ -1144,6 +1144,7 @@ class AppShell:
                 wear_ledger=self.wear_ledger_service,
             )
         )
+        self._last_diagnostic_bundle_path = None
         # Modules screen view state. Lazily replaced by the screen module's
         # ModulesScreenState on first build.
         self.modules_screen_state = None
@@ -5992,6 +5993,7 @@ class AppShell:
             self.device_service.last_write_duration_ms,
             self.settings.diagnostics_bundle_dir,
         )
+        self._last_diagnostic_bundle_path = path
         self.device_service.log_i18n_event("log.diagnostics.exported_bundle", path=path)
         self.refresh_shell()
         self.refresh_current_screen()
@@ -6061,6 +6063,7 @@ class AppShell:
             self.refresh_shell()
             self.refresh_current_screen()
             return
+        self._last_diagnostic_bundle_path = result
         bundle.emit_generated_event(
             output_filename=result.name,
             bundle_format="zip",

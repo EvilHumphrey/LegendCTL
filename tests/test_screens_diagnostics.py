@@ -376,6 +376,13 @@ class DiagnosticsTabStructureTests(unittest.TestCase):
             self.assertTrue(dpg.does_item_exist("diag_health_summary"))
             self.assertTrue(dpg.does_item_exist("diag_connection_details"))
             self.assertTrue(dpg.does_item_exist(diagnostics.TRUST_CARD_TAG))
+            self.assertTrue(dpg.does_item_exist(diagnostics.TRUST_SELF_CHECK_CARD_TAG))
+            self.assertTrue(dpg.does_item_exist(diagnostics.TRUST_SELF_CHECK_COPY_TAG))
+            self.assertTrue(dpg.does_item_exist(diagnostics.COMPAT_REPORT_CARD_TAG))
+            self.assertTrue(dpg.does_item_exist(diagnostics.COMPAT_REPORT_COPY_TAG))
+            self.assertTrue(dpg.does_item_exist(diagnostics.SHARE_CARD_TAG))
+            self.assertTrue(dpg.does_item_exist(diagnostics.SHARE_CARD_SAVE_TAG))
+            self.assertTrue(dpg.does_item_exist(diagnostics.SHARE_CARD_COPY_TAG))
             self.assertTrue(dpg.does_item_exist("diag_event_log"))
             self.assertTrue(dpg.does_item_exist(diagnostics.OPEN_LIVE_VERIFY_BUTTON_TAG))
         finally:

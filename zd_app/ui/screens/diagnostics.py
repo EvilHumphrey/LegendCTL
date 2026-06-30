@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import dearpygui.dearpygui as dpg
 
 from zd_app.i18n import t
+from zd_app.services.compatibility_report import build_compatibility_report
+from zd_app.services.diagnostic_bundle import DiagnosticBundleService
 from zd_app.services.diagnostics_service import _redact_instance_id
+from zd_app.services.share_card import build_share_card
+from zd_app.services.trust_self_check import build_trust_self_check
 from zd_app.ui import support_reference, trust_labels
+from zd_app.ui.screens import about, preferences
 from zd_app.ui.typography import screen_title, section_title
 
 
@@ -37,6 +43,28 @@ TRUST_BODY_TAG = "diagnostics_trust_body"
 # comfortable measure. Matches the codebase convention for full-width prose
 # (restore_points reason wrap=860, modules subtitle wrap=900).
 _TRUST_BODY_WRAP = 840
+
+TRUST_SELF_CHECK_CARD_TAG = "diagnostics_trust_self_check_card"
+TRUST_SELF_CHECK_INTRO_TAG = "diagnostics_trust_self_check_intro"
+TRUST_SELF_CHECK_COPY_TAG = "diagnostics_trust_self_check_copy"
+TRUST_SELF_CHECK_STATUS_TAG = "diagnostics_trust_self_check_status"
+_TRUST_SELF_CHECK_WRAP = 840
+
+COMPAT_REPORT_CARD_TAG = "diagnostics_compat_report_card"
+COMPAT_REPORT_VARIANT_TAG = "diagnostics_compat_report_variant"
+COMPAT_REPORT_FIRMWARE_TAG = "diagnostics_compat_report_firmware"
+COMPAT_REPORT_REFRESH_TAG = "diagnostics_compat_report_refresh"
+COMPAT_REPORT_COPY_TAG = "diagnostics_compat_report_copy"
+COMPAT_REPORT_OPEN_TAG = "diagnostics_compat_report_open"
+COMPAT_REPORT_STATUS_TAG = "diagnostics_compat_report_status"
+COMPAT_REPORT_PREVIEW_TAG = "diagnostics_compat_report_preview"
+_COMPAT_REPORT_WRAP = 840
+
+SHARE_CARD_TAG = "diagnostics_share_card"
+SHARE_CARD_SAVE_TAG = "diagnostics_share_card_save"
+SHARE_CARD_COPY_TAG = "diagnostics_share_card_copy"
+SHARE_CARD_STATUS_TAG = "diagnostics_share_card_status"
+_SHARE_CARD_WRAP = 840
 
 # Tab identifiers for the Diagnostics screen (mirrors CONTROLLER_TAB_IDS in
 # controller.py). The active tab is stashed on the shell as
@@ -207,6 +235,12 @@ def _build_guidance_tab(shell) -> None:
             tag=TRUST_BODY_TAG,
         )
     dpg.add_spacer(height=10)
+    _build_trust_self_check_card(shell)
+    dpg.add_spacer(height=10)
+    _build_compatibility_report_card(shell)
+    dpg.add_spacer(height=10)
+    _build_share_card_card(shell)
+    dpg.add_spacer(height=10)
     with dpg.child_window(height=320, border=True):
         dpg.add_text(t("ui.event_log_878e531b"), color=shell.COLORS["muted"])
         dpg.add_button(
@@ -218,6 +252,312 @@ def _build_guidance_tab(shell) -> None:
             tag="diag_event_log",
             default_value=t("diagnostics.event_log.empty"),
             wrap=1200,
+        )
+
+
+def _trust_self_check_result(shell):
+    result = getattr(shell, "_trust_self_check_result", None)
+    if result is None or not hasattr(result, "to_markdown"):
+        result = build_trust_self_check()
+        shell._trust_self_check_result = result
+    return result
+
+
+def _build_trust_self_check_card(shell) -> None:
+    result = _trust_self_check_result(shell)
+    with dpg.child_window(
+        width=-1,
+        border=True,
+        tag=TRUST_SELF_CHECK_CARD_TAG,
+        auto_resize_y=True,
+        autosize_y=False,
+    ):
+        dpg.add_text(t("trust_self_check.title"), color=shell.COLORS["muted"])
+        dpg.add_text(
+            t("trust_self_check.intro"),
+            tag=TRUST_SELF_CHECK_INTRO_TAG,
+            wrap=_TRUST_SELF_CHECK_WRAP,
+            color=shell.COLORS["muted"],
+        )
+        dpg.add_spacer(height=6)
+        for index, row in enumerate(result.rows):
+            dpg.add_text(
+                row.claim,
+                tag=f"diagnostics_trust_self_check_claim_{index}",
+                wrap=_TRUST_SELF_CHECK_WRAP,
+            )
+            dpg.add_text(
+                row.evidence,
+                tag=f"diagnostics_trust_self_check_evidence_{index}",
+                wrap=_TRUST_SELF_CHECK_WRAP,
+                color=shell.COLORS["muted"],
+            )
+            dpg.add_text(
+                row.boundary,
+                tag=f"diagnostics_trust_self_check_boundary_{index}",
+                wrap=_TRUST_SELF_CHECK_WRAP,
+                color=shell.COLORS["muted"],
+            )
+            dpg.add_spacer(height=4)
+        dpg.add_button(
+            label=t("trust_self_check.copy_button"),
+            tag=TRUST_SELF_CHECK_COPY_TAG,
+            width=160,
+            callback=lambda: _copy_trust_self_check(shell),
+        )
+        dpg.add_text(
+            "",
+            tag=TRUST_SELF_CHECK_STATUS_TAG,
+            wrap=_TRUST_SELF_CHECK_WRAP,
+            color=shell.COLORS["muted"],
+        )
+
+
+def _copy_trust_self_check(shell) -> None:
+    result = _trust_self_check_result(shell)
+    dpg.set_clipboard_text(result.to_markdown())
+    if dpg.does_item_exist(TRUST_SELF_CHECK_STATUS_TAG):
+        dpg.set_value(TRUST_SELF_CHECK_STATUS_TAG, t("trust_self_check.copy_success"))
+
+
+def _build_compatibility_report_card(shell) -> None:
+    report = _compatibility_report_result(shell)
+    with dpg.child_window(
+        width=-1,
+        border=True,
+        tag=COMPAT_REPORT_CARD_TAG,
+        auto_resize_y=True,
+        autosize_y=False,
+    ):
+        dpg.add_text(t("compat_report.title"), color=shell.COLORS["muted"])
+        dpg.add_text(
+            t("compat_report.intro"),
+            wrap=_COMPAT_REPORT_WRAP,
+            color=shell.COLORS["muted"],
+        )
+        dpg.add_spacer(height=6)
+        with dpg.group(horizontal=True):
+            with dpg.group():
+                dpg.add_text(t("compat_report.variant_label"), color=shell.COLORS["muted"])
+                dpg.add_input_text(
+                    tag=COMPAT_REPORT_VARIANT_TAG,
+                    default_value=getattr(shell, "_compat_report_variant", ""),
+                    width=300,
+                    hint=t("compat_report.variant_hint"),
+                    callback=lambda _s, value, _u: _set_compatibility_report_field(shell, "variant", value),
+                )
+            with dpg.group():
+                dpg.add_text(t("compat_report.firmware_label"), color=shell.COLORS["muted"])
+                dpg.add_input_text(
+                    tag=COMPAT_REPORT_FIRMWARE_TAG,
+                    default_value=getattr(shell, "_compat_report_firmware", ""),
+                    width=220,
+                    hint=t("compat_report.firmware_hint"),
+                    callback=lambda _s, value, _u: _set_compatibility_report_field(shell, "firmware", value),
+                )
+        dpg.add_spacer(height=8)
+        with dpg.group(horizontal=True):
+            dpg.add_button(
+                label=t("compat_report.refresh_button"),
+                tag=COMPAT_REPORT_REFRESH_TAG,
+                width=140,
+                callback=lambda: _refresh_compatibility_report(shell),
+            )
+            dpg.add_button(
+                label=t("compat_report.copy_button"),
+                tag=COMPAT_REPORT_COPY_TAG,
+                width=160,
+                callback=lambda: _copy_compatibility_report(shell),
+            )
+            dpg.add_button(
+                label=t("compat_report.open_issue_button"),
+                tag=COMPAT_REPORT_OPEN_TAG,
+                width=190,
+                enabled=bool(about.ISSUE_URL),
+                callback=lambda: _open_compatibility_issue(shell),
+            )
+        dpg.add_text(
+            "",
+            tag=COMPAT_REPORT_STATUS_TAG,
+            wrap=_COMPAT_REPORT_WRAP,
+            color=shell.COLORS["muted"],
+        )
+        dpg.add_spacer(height=6)
+        dpg.add_text(t("compat_report.preview_label"), color=shell.COLORS["muted"])
+        dpg.add_input_text(
+            tag=COMPAT_REPORT_PREVIEW_TAG,
+            default_value=report.to_issue_body(),
+            multiline=True,
+            readonly=True,
+            width=-1,
+            height=220,
+        )
+
+
+def _set_compatibility_report_field(shell, field: str, value: str) -> None:
+    if field == "variant":
+        shell._compat_report_variant = value
+    elif field == "firmware":
+        shell._compat_report_firmware = value
+    _refresh_compatibility_report(shell, status_key=None)
+
+
+def _compatibility_report_result(shell):
+    device_service = shell.device_service
+    state = device_service.state
+    return build_compatibility_report(
+        device_state=state,
+        variant=_compatibility_input_value(
+            shell,
+            COMPAT_REPORT_VARIANT_TAG,
+            "_compat_report_variant",
+        ),
+        firmware=_compatibility_input_value(
+            shell,
+            COMPAT_REPORT_FIRMWARE_TAG,
+            "_compat_report_firmware",
+        ),
+        last_read_duration_ms=getattr(device_service, "last_read_duration_ms", None),
+        last_write_duration_ms=getattr(device_service, "last_write_duration_ms", None),
+        last_apply_result=getattr(device_service, "last_apply_result", None),
+        recent_events=device_service.recent_events(8),
+        diagnostic_bundle_path=getattr(shell, "_last_diagnostic_bundle_path", None),
+    )
+
+
+def _compatibility_input_value(shell, tag: str, attr: str) -> str:
+    if dpg.does_item_exist(tag):
+        value = dpg.get_value(tag)
+        if isinstance(value, str):
+            setattr(shell, attr, value)
+            return value
+    return getattr(shell, attr, "")
+
+
+def _refresh_compatibility_report(shell, *, status_key: str | None = "compat_report.refresh_success") -> None:
+    report = _compatibility_report_result(shell)
+    if dpg.does_item_exist(COMPAT_REPORT_PREVIEW_TAG):
+        dpg.set_value(COMPAT_REPORT_PREVIEW_TAG, report.to_issue_body())
+    if status_key and dpg.does_item_exist(COMPAT_REPORT_STATUS_TAG):
+        dpg.set_value(COMPAT_REPORT_STATUS_TAG, t(status_key))
+
+
+def _copy_compatibility_report(shell) -> None:
+    report = _compatibility_report_result(shell)
+    dpg.set_clipboard_text(report.to_issue_body())
+    if dpg.does_item_exist(COMPAT_REPORT_PREVIEW_TAG):
+        dpg.set_value(COMPAT_REPORT_PREVIEW_TAG, report.to_issue_body())
+    if dpg.does_item_exist(COMPAT_REPORT_STATUS_TAG):
+        dpg.set_value(COMPAT_REPORT_STATUS_TAG, t("compat_report.copy_success"))
+
+
+def _open_compatibility_issue(shell) -> None:
+    if not about.ISSUE_URL:
+        if dpg.does_item_exist(COMPAT_REPORT_STATUS_TAG):
+            dpg.set_value(COMPAT_REPORT_STATUS_TAG, t("compat_report.open_issue_unavailable"))
+        return
+    about._open_issue_url()
+    if dpg.does_item_exist(COMPAT_REPORT_STATUS_TAG):
+        dpg.set_value(COMPAT_REPORT_STATUS_TAG, t("compat_report.open_issue_status"))
+
+
+def _build_share_card_card(shell) -> None:
+    with dpg.child_window(
+        width=-1,
+        border=True,
+        tag=SHARE_CARD_TAG,
+        auto_resize_y=True,
+        autosize_y=False,
+    ):
+        dpg.add_text(t("share_card.title"), color=shell.COLORS["muted"])
+        dpg.add_text(
+            t("share_card.intro"),
+            wrap=_SHARE_CARD_WRAP,
+            color=shell.COLORS["muted"],
+        )
+        dpg.add_spacer(height=8)
+        with dpg.group(horizontal=True):
+            dpg.add_button(
+                label=t("share_card.save_button"),
+                tag=SHARE_CARD_SAVE_TAG,
+                width=180,
+                callback=lambda: _save_share_card(shell),
+            )
+            dpg.add_button(
+                label=t("share_card.copy_markdown_button"),
+                tag=SHARE_CARD_COPY_TAG,
+                width=250,
+                callback=lambda: _copy_share_card_markdown(shell),
+            )
+        dpg.add_text(
+            "",
+            tag=SHARE_CARD_STATUS_TAG,
+            wrap=_SHARE_CARD_WRAP,
+            color=shell.COLORS["muted"],
+        )
+
+
+def _share_card_result(shell):
+    device_service = shell.device_service
+    bundle = getattr(shell, "diagnostic_bundle_service", None)
+    if not isinstance(bundle, DiagnosticBundleService):
+        bundle = None
+    return build_share_card(
+        device_state=device_service.state,
+        variant=_compatibility_input_value(
+            shell,
+            COMPAT_REPORT_VARIANT_TAG,
+            "_compat_report_variant",
+        ),
+        firmware=_compatibility_input_value(
+            shell,
+            COMPAT_REPORT_FIRMWARE_TAG,
+            "_compat_report_firmware",
+        ),
+        last_read_duration_ms=getattr(device_service, "last_read_duration_ms", None),
+        last_write_duration_ms=getattr(device_service, "last_write_duration_ms", None),
+        last_apply_result=getattr(device_service, "last_apply_result", None),
+        recent_events=device_service.recent_events(8),
+        diagnostic_bundle_path=getattr(shell, "_last_diagnostic_bundle_path", None),
+        diagnostic_bundle_service=bundle,
+    )
+
+
+def _copy_share_card_markdown(shell) -> None:
+    dpg.set_clipboard_text(_share_card_result(shell).to_markdown())
+    if dpg.does_item_exist(SHARE_CARD_STATUS_TAG):
+        dpg.set_value(SHARE_CARD_STATUS_TAG, t("share_card.copy_success"))
+
+
+def _save_share_card(shell) -> None:
+    try:
+        requested = preferences.diagnostics_bundle_dir_open_target(
+            shell.settings.diagnostics_bundle_dir
+        )
+        output_dir = shell.diagnostics_service._safe_output_dir(str(requested))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%d_%H%M%S")
+        html_path = output_dir / f"legendctl_evidence_card_{stamp}.html"
+        markdown_path = output_dir / f"legendctl_evidence_card_{stamp}.md"
+        card = _share_card_result(shell)
+        html_path.write_text(card.to_html(), encoding="utf-8")
+        markdown_path.write_text(card.to_markdown(), encoding="utf-8")
+    except Exception:  # noqa: BLE001 - save action should never crash the UI
+        logger.exception("Diagnostics share card export failed")
+        shell.device_service.log_i18n_event("log.diagnostics.share_card_failed")
+        if dpg.does_item_exist(SHARE_CARD_STATUS_TAG):
+            dpg.set_value(SHARE_CARD_STATUS_TAG, t("share_card.save_failed"))
+        return
+
+    shell._last_share_card_path = html_path
+    shell.device_service.log_i18n_event(
+        "log.diagnostics.share_card_saved",
+        filename=html_path.name,
+    )
+    if dpg.does_item_exist(SHARE_CARD_STATUS_TAG):
+        dpg.set_value(
+            SHARE_CARD_STATUS_TAG,
+            t("share_card.save_success", filename=html_path.name),
         )
 
 
