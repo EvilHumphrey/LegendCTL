@@ -801,7 +801,7 @@
   "support.guide.close": "Close",
   "developer.section_title": "Developer",
   "developer.show_dev_panels.label": "Show developer diagnostics",
-  "developer.show_dev_panels.helper": "Adds advanced diagnostics surfaces to the Diagnostics screen, including manual write/replay debug actions that send data to the controller. Off by default; not needed for normal use.",
+  "developer.show_dev_panels.helper": "Adds advanced diagnostics surfaces (e.g. the Raw HID frame log) to the Diagnostics screen. Off by default; not needed for normal use.",
   "ui.diagnostics.firmware_target_split": "Firmware updates stay split by target: controller / receiver / left stick / right stick.",
   "diagnostics.cards.diagnostics_title": "Diagnostics",
   "diagnostics.tab.status": "Status",

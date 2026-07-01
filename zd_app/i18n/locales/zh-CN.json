@@ -801,7 +801,7 @@
   "support.guide.close": "关闭",
   "developer.section_title": "开发者",
   "developer.show_dev_panels.label": "显示开发者诊断面板",
-  "developer.show_dev_panels.helper": "在诊断页面添加高级诊断界面，包括会向控制器发送数据的手动写入/重放调试操作。默认关闭；正常使用无需开启。",
+  "developer.show_dev_panels.helper": "在诊断页面添加高级诊断界面（例如原始 HID 帧日志）。默认关闭；正常使用无需开启。",
   "ui.diagnostics.firmware_target_split": "固件更新按目标分别进行：手柄 / 接收器 / 左摇杆 / 右摇杆。",
   "diagnostics.cards.diagnostics_title": "诊断",
   "diagnostics.tab.status": "状态",
