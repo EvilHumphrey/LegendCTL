@@ -21,8 +21,11 @@ what did and didn't take.
 No. The LegendCTL process makes **zero** network calls — no telemetry, no
 analytics, no auto-update, no "usage data." The only outbound action anywhere in
 the app is the About screen's GitHub links, which hand a URL to your default
-browser; the app itself opens no socket. You don't have to take that on faith —
-[verify it yourself in a couple of minutes](verifying-no-network.md).
+browser; the app itself opens no socket. You don't have to take that on faith:
+open the in-app **Trust Self-Check** (Diagnostics), which scans the *running* build
+for any networking code and confirms no driver or background service, then copies
+the result out — or [verify it yourself with Resource Monitor](verifying-no-network.md)
+in a couple of minutes.
 
 ### Is it open source? Can I read/build it myself?
 Yes — MIT licensed, the full source is on GitHub, and the README has a
@@ -40,6 +43,7 @@ test-enforced precisely so you don't have to trust the process; you can read it.
 ### Can I trust an unsigned app from a new, pseudonymous repo?
 Fair question — you shouldn't trust any of them blindly. Here's what you *can* do
 instead of trusting: read the source (it's all here), build it yourself, run the
+in-app **Trust Self-Check** (and export the **evidence card**), run the
 [no-network check](verifying-no-network.md), and verify the published **SHA-256**
 of your download against `SHA256SUMS.txt` in each release. Code signing (via the
 free [SignPath Foundation](https://signpath.org) program for open-source projects)
@@ -91,8 +95,10 @@ incl. 8K polling, and **v1.24**, incl. 8-point sensitivity curves and the latest
 optimized-latency build). The controller
 ships in six variants with different stick modules/firmware; other variants and
 firmware are **best-effort** — the HID protocol may differ. The app is built to
-say so honestly rather than fake a successful write. If something's off on your
-unit, please file a [compatibility report](https://github.com/EvilHumphrey/LegendCTL/issues/new/choose).
+say so honestly rather than fake a successful write. See the maintained
+[compatibility matrix](compatibility-matrix.md) for the current evidence ledger
+across variants/firmware; if something's off on your unit, please file a
+[compatibility report](https://github.com/EvilHumphrey/LegendCTL/issues/new/choose).
 
 ### Does the live stick tester work on non-ZD controllers?
 The **Live Verify** stick/circularity view reads from XInput, so it is largely

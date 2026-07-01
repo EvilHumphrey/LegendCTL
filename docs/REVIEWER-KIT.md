@@ -9,8 +9,7 @@ screenshot, or record (MIT-licensed).
 
 A free, open-source, fully-local Windows configurator for the **ZD Ultimate
 Legend** controller — open, auditable, and no-telemetry, for the settings it
-supports. It runs standalone (the official ZD app isn't required) and coexists
-with it.
+supports. It runs standalone — the official ZD app isn't required.
 
 ## The 30-second pitch
 
@@ -25,7 +24,7 @@ feature — gamepad testers and config apps exist — it's the **posture**:
 - **Honest writes** — it reports the real outcome of each write and reads values
   back on the verifying paths, instead of flashing "success" and hoping.
 - **Standalone** — talks straight to the controller; the official ZD app isn't
-  required (it coexists if you keep it).
+  required.
 - **A safety net** — Restore Points before risky changes, an append-only local
   event ledger, and a clear Recovery path.
 - **Honest about its limits** — bench-tested on a single unit; it says so, and
@@ -62,9 +61,18 @@ features; the UI and Live Verify open without one.
    from the device.
 4. **See the safety net.** Open **Restore Points** — note that risky changes
    capture one automatically; restore an earlier one to roll back.
-5. **Prove "no network" (optional, the fun part).** Follow
-   [docs/verifying-no-network.md](verifying-no-network.md) — watch Resource Monitor
-   show zero connections while the app runs and writes.
+5. **Prove "no network" (the fun part).** Two ways now: open the in-app **Trust
+   Self-Check** (Diagnostics) — it scans the *running* build for networking code,
+   confirms no driver / virtual device / background service, and copies the result
+   out; and/or follow [docs/verifying-no-network.md](verifying-no-network.md) to
+   watch Resource Monitor show zero connections while the app runs and writes.
+6. **Create a Compatibility Report + evidence card (new in v2.3.0).** From
+   Diagnostics, generate a share-safe **Compatibility Report** (your variant /
+   firmware + what you actually tested) — it aligns to the public
+   [compatibility matrix](compatibility-matrix.md) — and export the one-page
+   **evidence card** (HTML or Markdown) summarizing the trust posture + your config.
+   Both are pasteable / screenshotable and fully offline — handy if you're writing
+   it up.
 
 ## What's genuinely differentiated (and what isn't)
 
@@ -82,7 +90,8 @@ LegendCTL's pitch is the inverse, and it's verifiable rather than asserted.
 
 - **One unit, bench-tested.** Developed/verified on a single ZD Ultimate Legend
   (firmware v1.18 incl. 8K, v1.24 incl. 8-point sensitivity). The controller ships
-  in six variants; other variants/firmware are best-effort.
+  in six variants; other variants/firmware are best-effort — see the
+  [compatibility matrix](compatibility-matrix.md) for the current evidence ledger.
 - **Unsigned** today (SmartScreen warning expected; signing is planned via the
   SignPath Foundation OSS program once eligible).
 - **AI-assisted**, human-directed and reviewed — disclosed in the
