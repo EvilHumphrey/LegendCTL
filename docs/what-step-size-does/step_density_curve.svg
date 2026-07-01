@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 780 520" font-family="Segoe UI, Inter, Arial, sans-serif">
+<rect x="0" y="0" width="780" height="520" fill="#ffffff"/>
+<text x="78" y="34" font-size="21" font-weight="700" fill="#0f172a">ZD Ultimate Legend: distinct emitted stick levels vs. step size</text>
+<text x="78" y="57" font-size="13" fill="#64748b">Measured at the game-facing XInput layer · left stick · firmware 1.24 · wired · ~504k raw samples · min gap between adjacent values = 1 at every step</text>
+<line x1="78" y1="424.0" x2="752" y2="424.0" stroke="#e2e8f0" stroke-width="1"/>
+<text x="68" y="428.0" font-size="12" fill="#64748b" text-anchor="end">0</text>
+<line x1="78" y1="341.0" x2="752" y2="341.0" stroke="#e2e8f0" stroke-width="1"/>
+<text x="68" y="345.0" font-size="12" fill="#64748b" text-anchor="end">5,000</text>
+<line x1="78" y1="258.0" x2="752" y2="258.0" stroke="#e2e8f0" stroke-width="1"/>
+<text x="68" y="262.0" font-size="12" fill="#64748b" text-anchor="end">10,000</text>
+<line x1="78" y1="175.0" x2="752" y2="175.0" stroke="#e2e8f0" stroke-width="1"/>
+<text x="68" y="179.0" font-size="12" fill="#64748b" text-anchor="end">15,000</text>
+<line x1="78" y1="92.0" x2="752" y2="92.0" stroke="#e2e8f0" stroke-width="1"/>
+<text x="68" y="96.0" font-size="12" fill="#64748b" text-anchor="end">20,000</text>
+<line x1="78.0" y1="424" x2="78.0" y2="429" stroke="#64748b" stroke-width="1"/>
+<text x="78.0" y="446" font-size="12" fill="#64748b" text-anchor="middle">0</text>
+<line x1="206.6" y1="424" x2="206.6" y2="429" stroke="#64748b" stroke-width="1"/>
+<text x="206.6" y="446" font-size="12" fill="#64748b" text-anchor="middle">50</text>
+<line x1="335.3" y1="424" x2="335.3" y2="429" stroke="#64748b" stroke-width="1"/>
+<text x="335.3" y="446" font-size="12" fill="#64748b" text-anchor="middle">100</text>
+<line x1="463.9" y1="424" x2="463.9" y2="429" stroke="#64748b" stroke-width="1"/>
+<text x="463.9" y="446" font-size="12" fill="#64748b" text-anchor="middle">150</text>
+<line x1="592.5" y1="424" x2="592.5" y2="429" stroke="#64748b" stroke-width="1"/>
+<text x="592.5" y="446" font-size="12" fill="#64748b" text-anchor="middle">200</text>
+<line x1="734.0" y1="424" x2="734.0" y2="429" stroke="#64748b" stroke-width="1"/>
+<text x="734.0" y="446" font-size="12" fill="#64748b" text-anchor="middle">255</text>
+<line x1="78" y1="92" x2="78" y2="424" stroke="#0f172a" stroke-width="1.5"/>
+<line x1="78" y1="424" x2="752" y2="424" stroke="#0f172a" stroke-width="1.5"/>
+<text x="415" y="468" font-size="13.5" font-weight="600" fill="#0f172a" text-anchor="middle">Step-size setting (1–255)</text>
+<text transform="translate(20,258) rotate(-90)" font-size="13.5" font-weight="600" fill="#0f172a" text-anchor="middle">Distinct emitted values (per full sweep)</text>
+<line x1="78" y1="419.8" x2="752" y2="419.8" stroke="#dc2626" stroke-width="1.4" stroke-dasharray="6 4"/>
+<text x="752" y="412.8" font-size="11.5" fill="#dc2626" text-anchor="end">where a true 8-bit / 256-level grid would sit — every measured point is ~20–75× above it</text>
+<polyline points="142.3,110.2 206.6,141.4 335.3,238.2 448.4,263.0 541.1,276.3 644.0,292.1 734.0,325.7" fill="none" stroke="#7da9f7" stroke-width="2.4" stroke-dasharray="5 4" stroke-linejoin="round" stroke-linecap="round"/>
+<polyline points="142.3,103.4 206.6,146.5 335.3,249.8 448.4,278.6 541.1,304.0 644.0,309.1 734.0,331.7" fill="none" stroke="#2563eb" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="142.3" cy="103.4" r="4.5" fill="#2563eb" stroke="#2563eb" stroke-width="1.5"/>
+<circle cx="206.6" cy="146.5" r="4.5" fill="#2563eb" stroke="#2563eb" stroke-width="1.5"/>
+<circle cx="335.3" cy="249.8" r="4.5" fill="#2563eb" stroke="#2563eb" stroke-width="1.5"/>
+<circle cx="448.4" cy="278.6" r="4.5" fill="#2563eb" stroke="#2563eb" stroke-width="1.5"/>
+<circle cx="541.1" cy="304.0" r="4.5" fill="#2563eb" stroke="#2563eb" stroke-width="1.5"/>
+<circle cx="644.0" cy="309.1" r="4.5" fill="#2563eb" stroke="#2563eb" stroke-width="1.5"/>
+<circle cx="734.0" cy="331.7" r="4.5" fill="#2563eb" stroke="#2563eb" stroke-width="1.5"/>
+<circle cx="142.3" cy="110.2" r="3.5" fill="#7da9f7" stroke="#7da9f7" stroke-width="1.5"/>
+<circle cx="206.6" cy="141.4" r="3.5" fill="#7da9f7" stroke="#7da9f7" stroke-width="1.5"/>
+<circle cx="335.3" cy="238.2" r="3.5" fill="#7da9f7" stroke="#7da9f7" stroke-width="1.5"/>
+<circle cx="448.4" cy="263.0" r="3.5" fill="#7da9f7" stroke="#7da9f7" stroke-width="1.5"/>
+<circle cx="541.1" cy="276.3" r="3.5" fill="#7da9f7" stroke="#7da9f7" stroke-width="1.5"/>
+<circle cx="644.0" cy="292.1" r="3.5" fill="#7da9f7" stroke="#7da9f7" stroke-width="1.5"/>
+<circle cx="734.0" cy="325.7" r="3.5" fill="#7da9f7" stroke="#7da9f7" stroke-width="1.5"/>
+<circle cx="80.6" cy="177.1" r="4.5" fill="#ffffff" stroke="#9aa4b2" stroke-width="1.5"/>
+<circle cx="80.6" cy="186.7" r="3.5" fill="#ffffff" stroke="#9aa4b2" stroke-width="1.5"/>
+<text x="80.6" y="166.1" font-size="10.5" fill="#9aa4b2" text-anchor="middle">step 1*</text>
+<circle cx="265.8" cy="237.9" r="4.5" fill="#ffffff" stroke="#9aa4b2" stroke-width="1.5"/>
+<circle cx="265.8" cy="212.5" r="3.5" fill="#ffffff" stroke="#9aa4b2" stroke-width="1.5"/>
+<text x="265.8" y="226.9" font-size="10.5" fill="#9aa4b2" text-anchor="middle">step 73*</text>
+<rect x="502" y="100" width="238" height="70" rx="8" fill="#f8fafc" stroke="#e2e8f0"/>
+<line x1="516" y1="120" x2="542" y2="120" stroke="#2563eb" stroke-width="3"/>
+<circle cx="529.0" cy="120.0" r="4.5" fill="#2563eb" stroke="#2563eb" stroke-width="1.5"/>
+<text x="550" y="124" font-size="12.5" fill="#0f172a">LX (left-stick X)</text>
+<line x1="516" y1="140" x2="542" y2="140" stroke="#7da9f7" stroke-width="2.4" stroke-dasharray="5 4"/>
+<circle cx="529.0" cy="140.0" r="3.5" fill="#7da9f7" stroke="#7da9f7" stroke-width="1.5"/>
+<text x="550" y="144" font-size="12.5" fill="#0f172a">LY (left-stick Y)</text>
+<circle cx="529.0" cy="158.0" r="4.5" fill="#ffffff" stroke="#9aa4b2" stroke-width="1.5"/>
+<text x="550" y="162" font-size="12.5" fill="#64748b">* steps 1 &amp; 73 (different sweep)</text>
+<text x="78" y="496" font-size="11.5" fill="#64748b">Higher step → fewer distinct emitted values (a density/granularity change), but never a coarse grid: adjacent int16 values still appear at every step, including 255.</text>
+<text x="78" y="511" font-size="11" fill="#64748b">Manual sweep (not a fixture): the "adjacent values exist" result is exact; the level counts show the real trend but are not exact output-grid cardinalities. LegendCTL · 2026-07-01.</text>
+</svg>
