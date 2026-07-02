@@ -30,7 +30,8 @@ have referenced LegendCTL on their own initiative.
 
 | Date | Where | Link | Notes |
 | --- | --- | --- | --- |
-| _—_ | _(none logged yet)_ | | |
+| 2026-06-30 | r/Controller — "Controller News Digest - end of June 2026" | https://www.reddit.com/r/Controller/comments/1ujqang/ | LegendCTL featured in the monthly community digest's software section by the digest's author (a subreddit regular, no affiliation), noting its low-risk architecture — "no input injection, virtual devices, background service, etc." |
+| 2026-07-01 | DCInside 게임패드 갤러리 (KR) — "[레딧번역] 6월 게임패드 소식 모음" | https://gall.dcinside.com/mgallery/board/view/?id=gamepad&no=171078 | Independent Korean translation/repost of the June digest above, carrying the LegendCTL entry to the KR gamepad community. |
 
 ## Articles, reviews & coverage
 
