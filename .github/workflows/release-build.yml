@@ -124,12 +124,15 @@ jobs:
           # marker). This one file is BOTH the attestation subject list and
           # the published checksums asset, so what users verify is
           # byte-identical to what was attested.
+          # Written with explicit LF line endings: Set-Content on Windows
+          # emits CRLF, and a subject-checksums parser that doesn't strip \r
+          # would record subtly wrong subject names in the attestation.
           $files = @(Get-ChildItem dist\*-Setup.exe) + @(Get-ChildItem dist\*-windows.zip)
           $lines = foreach ($f in $files) {
             $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
             "$h *$($f.Name)"
           }
-          Set-Content -Path dist\SHA256SUMS.txt -Value $lines -Encoding utf8
+          [IO.File]::WriteAllText((Join-Path $PWD "dist\SHA256SUMS.txt"), (($lines -join "`n") + "`n"))
           Get-Content dist\SHA256SUMS.txt
 
       - name: Attest build provenance for the release binaries (tag runs only)
