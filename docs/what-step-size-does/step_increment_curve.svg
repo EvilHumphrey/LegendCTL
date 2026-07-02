@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 480" font-family="Segoe UI, Arial, sans-serif">
+<rect width="760" height="480" fill="#0d1420"/>
+<text x="70" y="26" fill="#dce8f5" font-size="17" font-weight="600">ZD step size is a motion-increment quantizer (measured)</text>
+<text x="70" y="44" fill="#8fa8c0" font-size="12">Median movement between consecutive stick reports vs the step setting - left stick, wired USB, fw 1.24, 2 runs x 25 s per step</text>
+<line x1="70" y1="416.0" x2="730" y2="416.0" stroke="#1d2a3a" stroke-width="1"/>
+<text x="62" y="420.0" fill="#7d93aa" font-size="11" text-anchor="end">0</text>
+<line x1="70" y1="356.0" x2="730" y2="356.0" stroke="#1d2a3a" stroke-width="1"/>
+<text x="62" y="360.0" fill="#7d93aa" font-size="11" text-anchor="end">50</text>
+<line x1="70" y1="296.0" x2="730" y2="296.0" stroke="#1d2a3a" stroke-width="1"/>
+<text x="62" y="300.0" fill="#7d93aa" font-size="11" text-anchor="end">100</text>
+<line x1="70" y1="236.0" x2="730" y2="236.0" stroke="#1d2a3a" stroke-width="1"/>
+<text x="62" y="240.0" fill="#7d93aa" font-size="11" text-anchor="end">150</text>
+<line x1="70" y1="176.0" x2="730" y2="176.0" stroke="#1d2a3a" stroke-width="1"/>
+<text x="62" y="180.0" fill="#7d93aa" font-size="11" text-anchor="end">200</text>
+<line x1="70" y1="115.99999999999999" x2="730" y2="115.99999999999999" stroke="#1d2a3a" stroke-width="1"/>
+<text x="62" y="119.99999999999999" fill="#7d93aa" font-size="11" text-anchor="end">250</text>
+<line x1="70" y1="56.0" x2="730" y2="56.0" stroke="#1d2a3a" stroke-width="1"/>
+<text x="62" y="60.0" fill="#7d93aa" font-size="11" text-anchor="end">300</text>
+<line x1="72.35714285714286" y1="56" x2="72.35714285714286" y2="416" stroke="#16202e" stroke-width="1"/>
+<text x="72.35714285714286" y="432" fill="#7d93aa" font-size="11" text-anchor="middle">1</text>
+<line x1="128.92857142857144" y1="56" x2="128.92857142857144" y2="416" stroke="#16202e" stroke-width="1"/>
+<text x="128.92857142857144" y="432" fill="#7d93aa" font-size="11" text-anchor="middle">25</text>
+<line x1="187.85714285714286" y1="56" x2="187.85714285714286" y2="416" stroke="#16202e" stroke-width="1"/>
+<text x="187.85714285714286" y="432" fill="#7d93aa" font-size="11" text-anchor="middle">50</text>
+<line x1="242.07142857142858" y1="56" x2="242.07142857142858" y2="416" stroke="#16202e" stroke-width="1"/>
+<text x="242.07142857142858" y="432" fill="#7d93aa" font-size="11" text-anchor="middle">73</text>
+<line x1="305.7142857142857" y1="56" x2="305.7142857142857" y2="416" stroke="#16202e" stroke-width="1"/>
+<text x="305.7142857142857" y="432" fill="#7d93aa" font-size="11" text-anchor="middle">100</text>
+<line x1="409.42857142857144" y1="56" x2="409.42857142857144" y2="416" stroke="#16202e" stroke-width="1"/>
+<text x="409.42857142857144" y="432" fill="#7d93aa" font-size="11" text-anchor="middle">144</text>
+<line x1="494.2857142857143" y1="56" x2="494.2857142857143" y2="416" stroke="#16202e" stroke-width="1"/>
+<text x="494.2857142857143" y="432" fill="#7d93aa" font-size="11" text-anchor="middle">180</text>
+<line x1="588.5714285714286" y1="56" x2="588.5714285714286" y2="416" stroke="#16202e" stroke-width="1"/>
+<text x="588.5714285714286" y="432" fill="#7d93aa" font-size="11" text-anchor="middle">220</text>
+<line x1="671.0714285714286" y1="56" x2="671.0714285714286" y2="416" stroke="#16202e" stroke-width="1"/>
+<text x="671.0714285714286" y="432" fill="#7d93aa" font-size="11" text-anchor="middle">255</text>
+<text x="400.0" y="466" fill="#9db4ca" font-size="12" text-anchor="middle">step size setting (raw 1-255)</text>
+<text x="20" y="236.0" fill="#9db4ca" font-size="12" transform="rotate(-90 20 236.0)" text-anchor="middle">median jump between reports (raw int16 counts)</text>
+<line x1="70.0" y1="416.0" x2="730.0" y2="80.0" stroke="#3b82f6" stroke-width="1.5" stroke-dasharray="6 5" opacity="0.85"/>
+<text x="565.0" y="154.0" fill="#3b82f6" font-size="12" transform="rotate(-37 565.0 154.0)">y = x (jump = step)</text>
+<circle cx="72.35714285714286" cy="378.8" r="4" fill="none" stroke="#7dd3fc" stroke-width="1.6" opacity="0.8"/>
+<circle cx="72.35714285714286" cy="380.0" r="4" fill="none" stroke="#a5b4fc" stroke-width="1.6" opacity="0.8"/>
+<circle cx="72.35714285714286" cy="372.8" r="4" fill="none" stroke="#7dd3fc" stroke-width="1.6" opacity="0.8"/>
+<circle cx="72.35714285714286" cy="369.2" r="4" fill="none" stroke="#a5b4fc" stroke-width="1.6" opacity="0.8"/>
+<circle cx="128.92857142857144" cy="356.0" r="4" fill="none" stroke="#7dd3fc" stroke-width="1.6" opacity="0.8"/>
+<circle cx="128.92857142857144" cy="358.4" r="4" fill="none" stroke="#a5b4fc" stroke-width="1.6" opacity="0.8"/>
+<circle cx="128.92857142857144" cy="364.40000000000003" r="4" fill="none" stroke="#7dd3fc" stroke-width="1.6" opacity="0.8"/>
+<circle cx="128.92857142857144" cy="360.8" r="4" fill="none" stroke="#a5b4fc" stroke-width="1.6" opacity="0.8"/>
+<circle cx="187.85714285714286" cy="342.8" r="4" fill="none" stroke="#7dd3fc" stroke-width="1.6" opacity="0.8"/>
+<circle cx="187.85714285714286" cy="342.8" r="4" fill="none" stroke="#a5b4fc" stroke-width="1.6" opacity="0.8"/>
+<circle cx="187.85714285714286" cy="340.40000000000003" r="4" fill="none" stroke="#7dd3fc" stroke-width="1.6" opacity="0.8"/>
+<circle cx="187.85714285714286" cy="342.8" r="4" fill="none" stroke="#a5b4fc" stroke-width="1.6" opacity="0.8"/>
+<circle cx="242.07142857142858" cy="324.79999999999995" r="4.5" fill="#7dd3fc" opacity="0.95"/>
+<circle cx="242.07142857142858" cy="323.6" r="4.5" fill="#a5b4fc" opacity="0.95"/>
+<circle cx="242.07142857142858" cy="317.6" r="4.5" fill="#7dd3fc" opacity="0.95"/>
+<circle cx="242.07142857142858" cy="317.6" r="4.5" fill="#a5b4fc" opacity="0.95"/>
+<circle cx="305.7142857142857" cy="286.4" r="4.5" fill="#7dd3fc" opacity="0.95"/>
+<circle cx="305.7142857142857" cy="284.0" r="4.5" fill="#a5b4fc" opacity="0.95"/>
+<circle cx="305.7142857142857" cy="287.6" r="4.5" fill="#7dd3fc" opacity="0.95"/>
+<circle cx="305.7142857142857" cy="284.0" r="4.5" fill="#a5b4fc" opacity="0.95"/>
+<circle cx="409.42857142857144" cy="233.6" r="4.5" fill="#7dd3fc" opacity="0.95"/>
+<circle cx="409.42857142857144" cy="233.6" r="4.5" fill="#a5b4fc" opacity="0.95"/>
+<circle cx="409.42857142857144" cy="233.6" r="4.5" fill="#7dd3fc" opacity="0.95"/>
+<circle cx="409.42857142857144" cy="233.6" r="4.5" fill="#a5b4fc" opacity="0.95"/>
+<circle cx="494.2857142857143" cy="188.0" r="4.5" fill="#7dd3fc" opacity="0.95"/>
+<circle cx="494.2857142857143" cy="186.79999999999998" r="4.5" fill="#a5b4fc" opacity="0.95"/>
+<circle cx="494.2857142857143" cy="188.0" r="4.5" fill="#7dd3fc" opacity="0.95"/>
+<circle cx="494.2857142857143" cy="188.0" r="4.5" fill="#a5b4fc" opacity="0.95"/>
+<circle cx="588.5714285714286" cy="142.39999999999998" r="4.5" fill="#7dd3fc" opacity="0.95"/>
+<circle cx="588.5714285714286" cy="141.2" r="4.5" fill="#a5b4fc" opacity="0.95"/>
+<circle cx="588.5714285714286" cy="142.39999999999998" r="4.5" fill="#7dd3fc" opacity="0.95"/>
+<circle cx="588.5714285714286" cy="141.2" r="4.5" fill="#a5b4fc" opacity="0.95"/>
+<circle cx="671.0714285714286" cy="98.00000000000001" r="4.5" fill="#7dd3fc" opacity="0.95"/>
+<circle cx="671.0714285714286" cy="102.80000000000001" r="4.5" fill="#a5b4fc" opacity="0.95"/>
+<circle cx="671.0714285714286" cy="98.00000000000001" r="4.5" fill="#7dd3fc" opacity="0.95"/>
+<circle cx="671.0714285714286" cy="102.80000000000001" r="4.5" fill="#a5b4fc" opacity="0.95"/>
+<rect x="70.0" y="56" width="136.71428571428572" height="360" fill="#3b82f6" opacity="0.05"/>
+<text x="138.35714285714286" y="74" fill="#5f7c98" font-size="10.5" text-anchor="middle">steps &#8804; 50: sampling-limited</text>
+<text x="138.35714285714286" y="88" fill="#5f7c98" font-size="10.5" text-anchor="middle">(hollow = upper bound)</text>
+<circle cx="520" cy="70" r="4.5" fill="#7dd3fc"/>
+<text x="530" y="74" fill="#c9d8e8" font-size="11.5">LX (runs 1+2)</text>
+<circle cx="625" cy="70" r="4.5" fill="#a5b4fc"/>
+<text x="635" y="74" fill="#c9d8e8" font-size="11.5">LY (runs 1+2)</text>
+<text x="70" y="446" fill="#5f7c98" font-size="10.5">Pitch runs ~2-8% above the set step (threshold overshoot mid-motion). At 255: ~261-265 counts &#8776; 126 steps center-to-edge &#8776; 8.0-bit True Bitness (GamepadLA convention). Manual sweep; XInput layer.</text>
+</svg>

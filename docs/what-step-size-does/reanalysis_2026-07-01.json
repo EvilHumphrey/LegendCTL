@@ -1,0 +1,2878 @@
+[
+ {
+  "step": 1,
+  "run": 1,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.983879355174207,
+  "LX": {
+   "distinct": 10381,
+   "min_gap": 1,
+   "span": 65535,
+   "axis_change_rate": 0.9013560542421697,
+   "mean_plateau_ms": 1.463,
+   "median_plateau_ms": 1.029,
+   "n_plateaus": 22534,
+   "jump_median": 31,
+   "jump_p90": 84,
+   "jump_hist_top": [
+    [
+     13,
+     1273
+    ],
+    [
+     14,
+     1185
+    ],
+    [
+     25,
+     943
+    ],
+    [
+     38,
+     860
+    ],
+    [
+     28,
+     826
+    ],
+    [
+     15,
+     765
+    ]
+   ],
+   "dwell_values": 17,
+   "dwell_nn_gap_top": [
+    [
+     2,
+     5
+    ],
+    [
+     1,
+     5
+    ],
+    [
+     31024,
+     1
+    ],
+    [
+     1936,
+     1
+    ],
+    [
+     16,
+     1
+    ],
+    [
+     122,
+     1
+    ]
+   ],
+   "dwell_nn_gap_median": 2.0,
+   "lattice_R": {
+    "grid_257.0": 0.6555,
+    "grid_256": 0.6942,
+    "grid_128.5": 0.4752,
+    "grid_span/1": 0.4535,
+    "uniform_baseline": 0.2425
+   },
+   "distinct_first_half": 3828,
+   "distinct_second_half": 7940,
+   "near_axis_distinct": 717,
+   "float3_distinct": 1995,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 9166,
+   "min_gap": 1,
+   "span": 65534,
+   "axis_change_rate": 0.8991959678387136,
+   "mean_plateau_ms": 1.273,
+   "median_plateau_ms": 1.036,
+   "n_plateaus": 22480,
+   "jump_median": 30,
+   "jump_p90": 93,
+   "jump_hist_top": [
+    [
+     14,
+     1311
+    ],
+    [
+     15,
+     1245
+    ],
+    [
+     30,
+     911
+    ],
+    [
+     16,
+     902
+    ],
+    [
+     31,
+     858
+    ],
+    [
+     1,
+     847
+    ]
+   ],
+   "dwell_values": 22,
+   "dwell_nn_gap_top": [
+    [
+     1,
+     8
+    ],
+    [
+     2,
+     4
+    ],
+    [
+     3,
+     1
+    ],
+    [
+     7,
+     1
+    ],
+    [
+     28,
+     1
+    ],
+    [
+     26867,
+     1
+    ]
+   ],
+   "dwell_nn_gap_median": 2,
+   "lattice_R": {
+    "grid_257.0": 0.782,
+    "grid_256": 0.7449,
+    "grid_128.5": 0.5965,
+    "grid_span/1": 0.7616,
+    "uniform_baseline": 0.2132
+   },
+   "distinct_first_half": 3127,
+   "distinct_second_half": 7485,
+   "near_axis_distinct": 514,
+   "float3_distinct": 1984,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 1,
+  "run": 2,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.9820792831713269,
+  "LX": {
+   "distinct": 9199,
+   "min_gap": 1,
+   "span": 65534,
+   "axis_change_rate": 0.905596223848954,
+   "mean_plateau_ms": 1.203,
+   "median_plateau_ms": 1.022,
+   "n_plateaus": 22640,
+   "jump_median": 36,
+   "jump_p90": 88,
+   "jump_hist_top": [
+    [
+     13,
+     1735
+    ],
+    [
+     14,
+     1415
+    ],
+    [
+     25,
+     1251
+    ],
+    [
+     38,
+     1242
+    ],
+    [
+     28,
+     1029
+    ],
+    [
+     27,
+     791
+    ]
+   ],
+   "dwell_values": 11,
+   "dwell_nn_gap_top": [
+    [
+     2,
+     2
+    ],
+    [
+     13489,
+     1
+    ],
+    [
+     18644,
+     1
+    ],
+    [
+     13,
+     1
+    ],
+    [
+     28,
+     1
+    ],
+    [
+     32407,
+     1
+    ]
+   ],
+   "dwell_nn_gap_median": 20.5,
+   "lattice_R": {
+    "grid_257.0": 0.6424,
+    "grid_256": 0.3535,
+    "grid_128.5": 0.5735,
+    "grid_span/1": 0.4001,
+    "uniform_baseline": 0.3015
+   },
+   "distinct_first_half": 4999,
+   "distinct_second_half": 6935,
+   "near_axis_distinct": 195,
+   "float3_distinct": 2001,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 9124,
+   "min_gap": 1,
+   "span": 65534,
+   "axis_change_rate": 0.8993159726389055,
+   "mean_plateau_ms": 1.277,
+   "median_plateau_ms": 1.03,
+   "n_plateaus": 22483,
+   "jump_median": 39.0,
+   "jump_p90": 104,
+   "jump_hist_top": [
+    [
+     15,
+     1446
+    ],
+    [
+     14,
+     1338
+    ],
+    [
+     30,
+     1019
+    ],
+    [
+     61,
+     875
+    ],
+    [
+     41,
+     870
+    ],
+    [
+     46,
+     840
+    ]
+   ],
+   "dwell_values": 12,
+   "dwell_nn_gap_top": [
+    [
+     2,
+     6
+    ],
+    [
+     1,
+     2
+    ],
+    [
+     565,
+     1
+    ],
+    [
+     69,
+     1
+    ],
+    [
+     64886,
+     1
+    ]
+   ],
+   "dwell_nn_gap_median": 2,
+   "lattice_R": {
+    "grid_257.0": 0.7595,
+    "grid_256": 0.7535,
+    "grid_128.5": 0.8141,
+    "grid_span/1": 0.9998,
+    "uniform_baseline": 0.2887
+   },
+   "distinct_first_half": 4956,
+   "distinct_second_half": 6735,
+   "near_axis_distinct": 566,
+   "float3_distinct": 1995,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 25,
+  "run": 1,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.984959398375935,
+  "LX": {
+   "distinct": 12756,
+   "min_gap": 1,
+   "span": 65535,
+   "axis_change_rate": 0.8441137645505821,
+   "mean_plateau_ms": 1.803,
+   "median_plateau_ms": 1.04,
+   "n_plateaus": 21103,
+   "jump_median": 50.0,
+   "jump_p90": 113,
+   "jump_hist_top": [
+    [
+     38,
+     1349
+    ],
+    [
+     26,
+     950
+    ],
+    [
+     25,
+     936
+    ],
+    [
+     13,
+     912
+    ],
+    [
+     63,
+     810
+    ],
+    [
+     12,
+     680
+    ]
+   ],
+   "dwell_values": 131,
+   "dwell_nn_gap_top": [
+    [
+     1,
+     26
+    ],
+    [
+     2,
+     15
+    ],
+    [
+     3,
+     13
+    ],
+    [
+     5,
+     11
+    ],
+    [
+     6,
+     6
+    ],
+    [
+     13,
+     5
+    ]
+   ],
+   "dwell_nn_gap_median": 5.0,
+   "lattice_R": {
+    "grid_257.0": 0.0418,
+    "grid_256": 0.0546,
+    "grid_128.5": 0.0559,
+    "grid_span/25": 0.7112,
+    "uniform_baseline": 0.0874
+   },
+   "distinct_first_half": 7577,
+   "distinct_second_half": 7565,
+   "near_axis_distinct": 56,
+   "float3_distinct": 2000,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 12059,
+   "min_gap": 1,
+   "span": 65533,
+   "axis_change_rate": 0.843233729349174,
+   "mean_plateau_ms": 1.796,
+   "median_plateau_ms": 1.049,
+   "n_plateaus": 21081,
+   "jump_median": 48.0,
+   "jump_p90": 123,
+   "jump_hist_top": [
+    [
+     15,
+     924
+    ],
+    [
+     27,
+     849
+    ],
+    [
+     30,
+     769
+    ],
+    [
+     46,
+     729
+    ],
+    [
+     61,
+     722
+    ],
+    [
+     28,
+     718
+    ]
+   ],
+   "dwell_values": 127,
+   "dwell_nn_gap_top": [
+    [
+     1,
+     35
+    ],
+    [
+     4,
+     15
+    ],
+    [
+     5,
+     12
+    ],
+    [
+     3,
+     11
+    ],
+    [
+     2,
+     7
+    ],
+    [
+     6,
+     5
+    ]
+   ],
+   "dwell_nn_gap_median": 4.0,
+   "lattice_R": {
+    "grid_257.0": 0.1389,
+    "grid_256": 0.1365,
+    "grid_128.5": 0.0416,
+    "grid_span/25": 0.8427,
+    "uniform_baseline": 0.0887
+   },
+   "distinct_first_half": 7130,
+   "distinct_second_half": 6823,
+   "near_axis_distinct": 60,
+   "float3_distinct": 1998,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 25,
+  "run": 2,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.9794791791671666,
+  "LX": {
+   "distinct": 11403,
+   "min_gap": 1,
+   "span": 65535,
+   "axis_change_rate": 0.8411936477459099,
+   "mean_plateau_ms": 1.704,
+   "median_plateau_ms": 1.046,
+   "n_plateaus": 21030,
+   "jump_median": 43,
+   "jump_p90": 101,
+   "jump_hist_top": [
+    [
+     38,
+     1413
+    ],
+    [
+     13,
+     991
+    ],
+    [
+     25,
+     941
+    ],
+    [
+     26,
+     924
+    ],
+    [
+     63,
+     792
+    ],
+    [
+     12,
+     763
+    ]
+   ],
+   "dwell_values": 130,
+   "dwell_nn_gap_top": [
+    [
+     1,
+     31
+    ],
+    [
+     2,
+     16
+    ],
+    [
+     6,
+     8
+    ],
+    [
+     3,
+     7
+    ],
+    [
+     11,
+     5
+    ],
+    [
+     8,
+     4
+    ]
+   ],
+   "dwell_nn_gap_median": 6,
+   "lattice_R": {
+    "grid_257.0": 0.1591,
+    "grid_256": 0.0855,
+    "grid_128.5": 0.0225,
+    "grid_span/25": 0.7099,
+    "uniform_baseline": 0.0877
+   },
+   "distinct_first_half": 6563,
+   "distinct_second_half": 7456,
+   "near_axis_distinct": 71,
+   "float3_distinct": 2000,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 11032,
+   "min_gap": 1,
+   "span": 65531,
+   "axis_change_rate": 0.7991519660786431,
+   "mean_plateau_ms": 2.282,
+   "median_plateau_ms": 1.064,
+   "n_plateaus": 19979,
+   "jump_median": 46.0,
+   "jump_p90": 123,
+   "jump_hist_top": [
+    [
+     27,
+     947
+    ],
+    [
+     15,
+     791
+    ],
+    [
+     14,
+     786
+    ],
+    [
+     28,
+     786
+    ],
+    [
+     46,
+     698
+    ],
+    [
+     55,
+     692
+    ]
+   ],
+   "dwell_values": 98,
+   "dwell_nn_gap_top": [
+    [
+     1,
+     15
+    ],
+    [
+     3,
+     9
+    ],
+    [
+     2,
+     7
+    ],
+    [
+     6,
+     7
+    ],
+    [
+     7,
+     5
+    ],
+    [
+     8,
+     5
+    ]
+   ],
+   "dwell_nn_gap_median": 7,
+   "lattice_R": {
+    "grid_257.0": 0.1762,
+    "grid_256": 0.1422,
+    "grid_128.5": 0.0578,
+    "grid_span/25": 0.7865,
+    "uniform_baseline": 0.101
+   },
+   "distinct_first_half": 6154,
+   "distinct_second_half": 6943,
+   "near_axis_distinct": 285,
+   "float3_distinct": 1995,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 50,
+  "run": 1,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.9031961278451138,
+  "LX": {
+   "distinct": 9999,
+   "min_gap": 1,
+   "span": 65532,
+   "axis_change_rate": 0.6671466858674348,
+   "mean_plateau_ms": 1.825,
+   "median_plateau_ms": 1.046,
+   "n_plateaus": 16679,
+   "jump_median": 61.0,
+   "jump_p90": 116,
+   "jump_hist_top": [
+    [
+     63,
+     1794
+    ],
+    [
+     51,
+     1485
+    ],
+    [
+     55,
+     947
+    ],
+    [
+     12,
+     596
+    ],
+    [
+     76,
+     574
+    ],
+    [
+     13,
+     462
+    ]
+   ],
+   "dwell_values": 295,
+   "dwell_nn_gap_top": [
+    [
+     1,
+     40
+    ],
+    [
+     3,
+     31
+    ],
+    [
+     2,
+     19
+    ],
+    [
+     4,
+     14
+    ],
+    [
+     6,
+     12
+    ],
+    [
+     13,
+     10
+    ]
+   ],
+   "dwell_nn_gap_median": 10.0,
+   "lattice_R": {
+    "grid_257.0": 0.0097,
+    "grid_256": 0.0788,
+    "grid_128.5": 0.0577,
+    "grid_span/50": 0.1913,
+    "uniform_baseline": 0.0582
+   },
+   "distinct_first_half": 5511,
+   "distinct_second_half": 6480,
+   "near_axis_distinct": 34,
+   "float3_distinct": 2000,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 10208,
+   "min_gap": 1,
+   "span": 65532,
+   "axis_change_rate": 0.672186887475499,
+   "mean_plateau_ms": 2.202,
+   "median_plateau_ms": 1.057,
+   "n_plateaus": 16805,
+   "jump_median": 61.0,
+   "jump_p90": 135,
+   "jump_hist_top": [
+    [
+     55,
+     1760
+    ],
+    [
+     61,
+     1080
+    ],
+    [
+     15,
+     692
+    ],
+    [
+     76,
+     671
+    ],
+    [
+     69,
+     511
+    ],
+    [
+     54,
+     384
+    ]
+   ],
+   "dwell_values": 290,
+   "dwell_nn_gap_top": [
+    [
+     1,
+     41
+    ],
+    [
+     2,
+     25
+    ],
+    [
+     4,
+     18
+    ],
+    [
+     3,
+     17
+    ],
+    [
+     14,
+     17
+    ],
+    [
+     5,
+     15
+    ]
+   ],
+   "dwell_nn_gap_median": 8,
+   "lattice_R": {
+    "grid_257.0": 0.0288,
+    "grid_256": 0.0103,
+    "grid_128.5": 0.0208,
+    "grid_span/50": 0.1041,
+    "uniform_baseline": 0.0587
+   },
+   "distinct_first_half": 5361,
+   "distinct_second_half": 6655,
+   "near_axis_distinct": 180,
+   "float3_distinct": 2001,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 50,
+  "run": 2,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.9081563262530501,
+  "LX": {
+   "distinct": 10794,
+   "min_gap": 1,
+   "span": 65535,
+   "axis_change_rate": 0.6662666506660266,
+   "mean_plateau_ms": 1.956,
+   "median_plateau_ms": 1.054,
+   "n_plateaus": 16657,
+   "jump_median": 63.0,
+   "jump_p90": 121,
+   "jump_hist_top": [
+    [
+     63,
+     1689
+    ],
+    [
+     51,
+     1383
+    ],
+    [
+     55,
+     946
+    ],
+    [
+     12,
+     550
+    ],
+    [
+     76,
+     543
+    ],
+    [
+     13,
+     411
+    ]
+   ],
+   "dwell_values": 301,
+   "dwell_nn_gap_top": [
+    [
+     1,
+     38
+    ],
+    [
+     3,
+     24
+    ],
+    [
+     2,
+     23
+    ],
+    [
+     4,
+     19
+    ],
+    [
+     5,
+     16
+    ],
+    [
+     7,
+     15
+    ]
+   ],
+   "dwell_nn_gap_median": 8.0,
+   "lattice_R": {
+    "grid_257.0": 0.0157,
+    "grid_256": 0.0292,
+    "grid_128.5": 0.0248,
+    "grid_span/50": 0.1139,
+    "uniform_baseline": 0.0576
+   },
+   "distinct_first_half": 6083,
+   "distinct_second_half": 6557,
+   "near_axis_distinct": 37,
+   "float3_distinct": 2001,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 10588,
+   "min_gap": 1,
+   "span": 65528,
+   "axis_change_rate": 0.6855474218968759,
+   "mean_plateau_ms": 1.977,
+   "median_plateau_ms": 1.062,
+   "n_plateaus": 17139,
+   "jump_median": 61.0,
+   "jump_p90": 131,
+   "jump_hist_top": [
+    [
+     55,
+     1664
+    ],
+    [
+     61,
+     1166
+    ],
+    [
+     76,
+     681
+    ],
+    [
+     15,
+     656
+    ],
+    [
+     69,
+     502
+    ],
+    [
+     54,
+     390
+    ]
+   ],
+   "dwell_values": 311,
+   "dwell_nn_gap_top": [
+    [
+     1,
+     48
+    ],
+    [
+     2,
+     27
+    ],
+    [
+     5,
+     19
+    ],
+    [
+     7,
+     18
+    ],
+    [
+     3,
+     17
+    ],
+    [
+     4,
+     13
+    ]
+   ],
+   "dwell_nn_gap_median": 7.5,
+   "lattice_R": {
+    "grid_257.0": 0.0308,
+    "grid_256": 0.0027,
+    "grid_128.5": 0.0023,
+    "grid_span/50": 0.1388,
+    "uniform_baseline": 0.0567
+   },
+   "distinct_first_half": 5504,
+   "distinct_second_half": 6703,
+   "near_axis_distinct": 36,
+   "float3_distinct": 1999,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 73,
+  "run": 1,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.5949837993519741,
+  "LX": {
+   "distinct": 4821,
+   "min_gap": 1,
+   "span": 65534,
+   "axis_change_rate": 0.3230129205168207,
+   "mean_plateau_ms": 3.383,
+   "median_plateau_ms": 2.039,
+   "n_plateaus": 8076,
+   "jump_median": 76,
+   "jump_p90": 99,
+   "jump_hist_top": [
+    [
+     76,
+     1626
+    ],
+    [
+     75,
+     723
+    ],
+    [
+     88,
+     565
+    ],
+    [
+     82,
+     395
+    ],
+    [
+     13,
+     374
+    ],
+    [
+     89,
+     323
+    ]
+   ],
+   "dwell_values": 1096,
+   "dwell_nn_gap_top": [
+    [
+     13,
+     77
+    ],
+    [
+     25,
+     72
+    ],
+    [
+     38,
+     57
+    ],
+    [
+     12,
+     57
+    ],
+    [
+     76,
+     42
+    ],
+    [
+     51,
+     36
+    ]
+   ],
+   "dwell_nn_gap_median": 38,
+   "lattice_R": {
+    "grid_257.0": 0.0044,
+    "grid_256": 0.0108,
+    "grid_128.5": 0.0148,
+    "grid_span/73": 0.0226,
+    "uniform_baseline": 0.0302
+   },
+   "distinct_first_half": 2033,
+   "distinct_second_half": 3653,
+   "near_axis_distinct": 43,
+   "float3_distinct": 1908,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 5506,
+   "min_gap": 1,
+   "span": 65519,
+   "axis_change_rate": 0.40393615744629785,
+   "mean_plateau_ms": 3.197,
+   "median_plateau_ms": 1.615,
+   "n_plateaus": 10099,
+   "jump_median": 77.0,
+   "jump_p90": 107,
+   "jump_hist_top": [
+    [
+     76,
+     1297
+    ],
+    [
+     15,
+     710
+    ],
+    [
+     82,
+     647
+    ],
+    [
+     91,
+     450
+    ],
+    [
+     83,
+     442
+    ],
+    [
+     77,
+     306
+    ]
+   ],
+   "dwell_values": 667,
+   "dwell_nn_gap_top": [
+    [
+     14,
+     65
+    ],
+    [
+     15,
+     38
+    ],
+    [
+     13,
+     33
+    ],
+    [
+     41,
+     26
+    ],
+    [
+     27,
+     24
+    ],
+    [
+     1,
+     21
+    ]
+   ],
+   "dwell_nn_gap_median": 40.0,
+   "lattice_R": {
+    "grid_257.0": 0.0334,
+    "grid_256": 0.0529,
+    "grid_128.5": 0.0467,
+    "grid_span/73": 0.0346,
+    "uniform_baseline": 0.0387
+   },
+   "distinct_first_half": 3159,
+   "distinct_second_half": 3091,
+   "near_axis_distinct": 598,
+   "float3_distinct": 1915,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 73,
+  "run": 2,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.7721908876355055,
+  "LX": {
+   "distinct": 8857,
+   "min_gap": 1,
+   "span": 65530,
+   "axis_change_rate": 0.49429977199087966,
+   "mean_plateau_ms": 2.101,
+   "median_plateau_ms": 1.118,
+   "n_plateaus": 12358,
+   "jump_median": 82,
+   "jump_p90": 113,
+   "jump_hist_top": [
+    [
+     76,
+     1846
+    ],
+    [
+     75,
+     999
+    ],
+    [
+     82,
+     765
+    ],
+    [
+     88,
+     652
+    ],
+    [
+     83,
+     588
+    ],
+    [
+     89,
+     463
+    ]
+   ],
+   "dwell_values": 552,
+   "dwell_nn_gap_top": [
+    [
+     1,
+     57
+    ],
+    [
+     2,
+     42
+    ],
+    [
+     4,
+     27
+    ],
+    [
+     3,
+     24
+    ],
+    [
+     6,
+     20
+    ],
+    [
+     5,
+     15
+    ]
+   ],
+   "dwell_nn_gap_median": 19,
+   "lattice_R": {
+    "grid_257.0": 0.0243,
+    "grid_256": 0.0148,
+    "grid_128.5": 0.0336,
+    "grid_span/73": 0.0555,
+    "uniform_baseline": 0.0426
+   },
+   "distinct_first_half": 4592,
+   "distinct_second_half": 5533,
+   "near_axis_distinct": 26,
+   "float3_distinct": 1997,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 9309,
+   "min_gap": 1,
+   "span": 65533,
+   "axis_change_rate": 0.5430617224688987,
+   "mean_plateau_ms": 2.306,
+   "median_plateau_ms": 1.099,
+   "n_plateaus": 13577,
+   "jump_median": 82.0,
+   "jump_p90": 152,
+   "jump_hist_top": [
+    [
+     76,
+     1102
+    ],
+    [
+     82,
+     1001
+    ],
+    [
+     83,
+     773
+    ],
+    [
+     96,
+     512
+    ],
+    [
+     77,
+     499
+    ],
+    [
+     15,
+     427
+    ]
+   ],
+   "dwell_values": 417,
+   "dwell_nn_gap_top": [
+    [
+     14,
+     47
+    ],
+    [
+     13,
+     28
+    ],
+    [
+     1,
+     27
+    ],
+    [
+     3,
+     20
+    ],
+    [
+     2,
+     18
+    ],
+    [
+     6,
+     15
+    ]
+   ],
+   "dwell_nn_gap_median": 14.0,
+   "lattice_R": {
+    "grid_257.0": 0.0479,
+    "grid_256": 0.0493,
+    "grid_128.5": 0.0165,
+    "grid_span/73": 0.0228,
+    "uniform_baseline": 0.049
+   },
+   "distinct_first_half": 4977,
+   "distinct_second_half": 5352,
+   "near_axis_distinct": 20,
+   "float3_distinct": 1998,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 100,
+  "run": 1,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.5856234249369975,
+  "LX": {
+   "distinct": 6758,
+   "min_gap": 1,
+   "span": 65535,
+   "axis_change_rate": 0.36165446617864716,
+   "mean_plateau_ms": 2.661,
+   "median_plateau_ms": 1.657,
+   "n_plateaus": 9042,
+   "jump_median": 108,
+   "jump_p90": 127,
+   "jump_hist_top": [
+    [
+     101,
+     2031
+    ],
+    [
+     114,
+     602
+    ],
+    [
+     110,
+     550
+    ],
+    [
+     113,
+     490
+    ],
+    [
+     126,
+     335
+    ],
+    [
+     102,
+     319
+    ]
+   ],
+   "dwell_values": 869,
+   "dwell_nn_gap_top": [
+    [
+     13,
+     53
+    ],
+    [
+     25,
+     42
+    ],
+    [
+     1,
+     35
+    ],
+    [
+     12,
+     31
+    ],
+    [
+     2,
+     28
+    ],
+    [
+     101,
+     23
+    ]
+   ],
+   "dwell_nn_gap_median": 27.0,
+   "lattice_R": {
+    "grid_257.0": 0.0181,
+    "grid_256": 0.05,
+    "grid_128.5": 0.0164,
+    "grid_span/100": 0.0298,
+    "uniform_baseline": 0.0339
+   },
+   "distinct_first_half": 3528,
+   "distinct_second_half": 4095,
+   "near_axis_distinct": 46,
+   "float3_distinct": 1979,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 6820,
+   "min_gap": 1,
+   "span": 65530,
+   "axis_change_rate": 0.3707348293931757,
+   "mean_plateau_ms": 3.553,
+   "median_plateau_ms": 1.602,
+   "n_plateaus": 9269,
+   "jump_median": 110.0,
+   "jump_p90": 152,
+   "jump_hist_top": [
+    [
+     110,
+     1107
+    ],
+    [
+     107,
+     650
+    ],
+    [
+     106,
+     615
+    ],
+    [
+     122,
+     391
+    ],
+    [
+     1,
+     342
+    ],
+    [
+     109,
+     333
+    ]
+   ],
+   "dwell_values": 733,
+   "dwell_nn_gap_top": [
+    [
+     14,
+     48
+    ],
+    [
+     1,
+     45
+    ],
+    [
+     15,
+     42
+    ],
+    [
+     3,
+     26
+    ],
+    [
+     2,
+     24
+    ],
+    [
+     5,
+     24
+    ]
+   ],
+   "dwell_nn_gap_median": 17.0,
+   "lattice_R": {
+    "grid_257.0": 0.0213,
+    "grid_256": 0.026,
+    "grid_128.5": 0.0166,
+    "grid_span/100": 0.0246,
+    "uniform_baseline": 0.0369
+   },
+   "distinct_first_half": 3769,
+   "distinct_second_half": 3725,
+   "near_axis_distinct": 239,
+   "float3_distinct": 1966,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 100,
+  "run": 2,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.5547821912876515,
+  "LX": {
+   "distinct": 5902,
+   "min_gap": 1,
+   "span": 65535,
+   "axis_change_rate": 0.3301332053282131,
+   "mean_plateau_ms": 2.773,
+   "median_plateau_ms": 1.972,
+   "n_plateaus": 8254,
+   "jump_median": 107,
+   "jump_p90": 126,
+   "jump_hist_top": [
+    [
+     101,
+     2189
+    ],
+    [
+     114,
+     612
+    ],
+    [
+     113,
+     504
+    ],
+    [
+     110,
+     500
+    ],
+    [
+     126,
+     302
+    ],
+    [
+     102,
+     285
+    ]
+   ],
+   "dwell_values": 1038,
+   "dwell_nn_gap_top": [
+    [
+     13,
+     89
+    ],
+    [
+     12,
+     51
+    ],
+    [
+     25,
+     50
+    ],
+    [
+     38,
+     35
+    ],
+    [
+     1,
+     31
+    ],
+    [
+     2,
+     27
+    ]
+   ],
+   "dwell_nn_gap_median": 34,
+   "lattice_R": {
+    "grid_257.0": 0.0071,
+    "grid_256": 0.035,
+    "grid_128.5": 0.0204,
+    "grid_span/100": 0.0274,
+    "uniform_baseline": 0.031
+   },
+   "distinct_first_half": 3346,
+   "distinct_second_half": 3446,
+   "near_axis_distinct": 20,
+   "float3_distinct": 1963,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 6399,
+   "min_gap": 1,
+   "span": 65525,
+   "axis_change_rate": 0.35201408056322253,
+   "mean_plateau_ms": 3.502,
+   "median_plateau_ms": 1.708,
+   "n_plateaus": 8801,
+   "jump_median": 110.0,
+   "jump_p90": 138,
+   "jump_hist_top": [
+    [
+     110,
+     1144
+    ],
+    [
+     107,
+     643
+    ],
+    [
+     106,
+     632
+    ],
+    [
+     122,
+     423
+    ],
+    [
+     137,
+     332
+    ],
+    [
+     109,
+     327
+    ]
+   ],
+   "dwell_values": 782,
+   "dwell_nn_gap_top": [
+    [
+     14,
+     54
+    ],
+    [
+     15,
+     34
+    ],
+    [
+     3,
+     32
+    ],
+    [
+     2,
+     32
+    ],
+    [
+     1,
+     30
+    ],
+    [
+     13,
+     25
+    ]
+   ],
+   "dwell_nn_gap_median": 22,
+   "lattice_R": {
+    "grid_257.0": 0.0072,
+    "grid_256": 0.0185,
+    "grid_128.5": 0.0274,
+    "grid_span/100": 0.0163,
+    "uniform_baseline": 0.0358
+   },
+   "distinct_first_half": 3575,
+   "distinct_second_half": 3561,
+   "near_axis_distinct": 18,
+   "float3_distinct": 1958,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 144,
+  "run": 1,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.4129365174606984,
+  "LX": {
+   "distinct": 4701,
+   "min_gap": 1,
+   "span": 65535,
+   "axis_change_rate": 0.2298091923676947,
+   "mean_plateau_ms": 3.913,
+   "median_plateau_ms": 2.611,
+   "n_plateaus": 5746,
+   "jump_median": 152,
+   "jump_p90": 176,
+   "jump_hist_top": [
+    [
+     151,
+     1119
+    ],
+    [
+     152,
+     732
+    ],
+    [
+     164,
+     573
+    ],
+    [
+     165,
+     250
+    ],
+    [
+     146,
+     185
+    ],
+    [
+     177,
+     171
+    ]
+   ],
+   "dwell_values": 1465,
+   "dwell_nn_gap_top": [
+    [
+     13,
+     125
+    ],
+    [
+     25,
+     105
+    ],
+    [
+     12,
+     82
+    ],
+    [
+     38,
+     72
+    ],
+    [
+     1,
+     41
+    ],
+    [
+     50,
+     41
+    ]
+   ],
+   "dwell_nn_gap_median": 27.0,
+   "lattice_R": {
+    "grid_257.0": 0.022,
+    "grid_256": 0.0082,
+    "grid_128.5": 0.0158,
+    "grid_span/144": 0.0111,
+    "uniform_baseline": 0.0261
+   },
+   "distinct_first_half": 2455,
+   "distinct_second_half": 2706,
+   "near_axis_distinct": 17,
+   "float3_distinct": 1875,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 5119,
+   "min_gap": 1,
+   "span": 65529,
+   "axis_change_rate": 0.25229009160366417,
+   "mean_plateau_ms": 4.491,
+   "median_plateau_ms": 2.07,
+   "n_plateaus": 6308,
+   "jump_median": 152,
+   "jump_p90": 182,
+   "jump_hist_top": [
+    [
+     152,
+     820
+    ],
+    [
+     151,
+     818
+    ],
+    [
+     1,
+     335
+    ],
+    [
+     167,
+     272
+    ],
+    [
+     165,
+     266
+    ],
+    [
+     153,
+     255
+    ]
+   ],
+   "dwell_values": 973,
+   "dwell_nn_gap_top": [
+    [
+     14,
+     71
+    ],
+    [
+     15,
+     61
+    ],
+    [
+     1,
+     42
+    ],
+    [
+     13,
+     36
+    ],
+    [
+     28,
+     30
+    ],
+    [
+     27,
+     25
+    ]
+   ],
+   "dwell_nn_gap_median": 23.0,
+   "lattice_R": {
+    "grid_257.0": 0.0265,
+    "grid_256": 0.0446,
+    "grid_128.5": 0.0145,
+    "grid_span/144": 0.0069,
+    "uniform_baseline": 0.0321
+   },
+   "distinct_first_half": 2801,
+   "distinct_second_half": 2697,
+   "near_axis_distinct": 14,
+   "float3_distinct": 1888,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 144,
+  "run": 2,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.49081963278531143,
+  "LX": {
+   "distinct": 5548,
+   "min_gap": 1,
+   "span": 65535,
+   "axis_change_rate": 0.2734509380375215,
+   "mean_plateau_ms": 3.364,
+   "median_plateau_ms": 2.118,
+   "n_plateaus": 6837,
+   "jump_median": 152.0,
+   "jump_p90": 176,
+   "jump_hist_top": [
+    [
+     151,
+     1296
+    ],
+    [
+     152,
+     842
+    ],
+    [
+     164,
+     671
+    ],
+    [
+     1,
+     291
+    ],
+    [
+     165,
+     271
+    ],
+    [
+     2,
+     209
+    ]
+   ],
+   "dwell_values": 1199,
+   "dwell_nn_gap_top": [
+    [
+     13,
+     109
+    ],
+    [
+     25,
+     80
+    ],
+    [
+     12,
+     66
+    ],
+    [
+     38,
+     62
+    ],
+    [
+     1,
+     29
+    ],
+    [
+     63,
+     27
+    ]
+   ],
+   "dwell_nn_gap_median": 26.0,
+   "lattice_R": {
+    "grid_257.0": 0.0078,
+    "grid_256": 0.0097,
+    "grid_128.5": 0.0068,
+    "grid_span/144": 0.0108,
+    "uniform_baseline": 0.0289
+   },
+   "distinct_first_half": 2978,
+   "distinct_second_half": 3097,
+   "near_axis_distinct": 18,
+   "float3_distinct": 1934,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 6017,
+   "min_gap": 1,
+   "span": 65500,
+   "axis_change_rate": 0.3030521220848834,
+   "mean_plateau_ms": 3.939,
+   "median_plateau_ms": 1.982,
+   "n_plateaus": 7577,
+   "jump_median": 152.0,
+   "jump_p90": 182,
+   "jump_hist_top": [
+    [
+     151,
+     954
+    ],
+    [
+     152,
+     901
+    ],
+    [
+     1,
+     533
+    ],
+    [
+     2,
+     420
+    ],
+    [
+     165,
+     357
+    ],
+    [
+     167,
+     340
+    ]
+   ],
+   "dwell_values": 946,
+   "dwell_nn_gap_top": [
+    [
+     14,
+     64
+    ],
+    [
+     15,
+     56
+    ],
+    [
+     13,
+     39
+    ],
+    [
+     27,
+     37
+    ],
+    [
+     1,
+     32
+    ],
+    [
+     28,
+     30
+    ]
+   ],
+   "dwell_nn_gap_median": 24,
+   "lattice_R": {
+    "grid_257.0": 0.0223,
+    "grid_256": 0.0404,
+    "grid_128.5": 0.0163,
+    "grid_span/144": 0.0162,
+    "uniform_baseline": 0.0325
+   },
+   "distinct_first_half": 3222,
+   "distinct_second_half": 3361,
+   "near_axis_distinct": 15,
+   "float3_distinct": 1914,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 180,
+  "run": 1,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.3487739509580383,
+  "LX": {
+   "distinct": 3971,
+   "min_gap": 1,
+   "span": 65535,
+   "axis_change_rate": 0.18176727069082763,
+   "mean_plateau_ms": 5.21,
+   "median_plateau_ms": 3.412,
+   "n_plateaus": 4545,
+   "jump_median": 190.0,
+   "jump_p90": 210,
+   "jump_hist_top": [
+    [
+     189,
+     627
+    ],
+    [
+     202,
+     389
+    ],
+    [
+     190,
+     366
+    ],
+    [
+     192,
+     263
+    ],
+    [
+     1,
+     208
+    ],
+    [
+     181,
+     169
+    ]
+   ],
+   "dwell_values": 1768,
+   "dwell_nn_gap_top": [
+    [
+     13,
+     170
+    ],
+    [
+     25,
+     109
+    ],
+    [
+     38,
+     104
+    ],
+    [
+     12,
+     102
+    ],
+    [
+     50,
+     45
+    ],
+    [
+     1,
+     44
+    ]
+   ],
+   "dwell_nn_gap_median": 25,
+   "lattice_R": {
+    "grid_257.0": 0.0099,
+    "grid_256": 0.0078,
+    "grid_128.5": 0.0127,
+    "grid_span/180": 0.005,
+    "uniform_baseline": 0.0238
+   },
+   "distinct_first_half": 1668,
+   "distinct_second_half": 2558,
+   "near_axis_distinct": 17,
+   "float3_distinct": 1780,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 4493,
+   "min_gap": 1,
+   "span": 65497,
+   "axis_change_rate": 0.20908836353454138,
+   "mean_plateau_ms": 5.354,
+   "median_plateau_ms": 2.698,
+   "n_plateaus": 5228,
+   "jump_median": 191,
+   "jump_p90": 214,
+   "jump_hist_top": [
+    [
+     192,
+     481
+    ],
+    [
+     1,
+     379
+    ],
+    [
+     183,
+     355
+    ],
+    [
+     182,
+     334
+    ],
+    [
+     2,
+     282
+    ],
+    [
+     206,
+     237
+    ]
+   ],
+   "dwell_values": 1221,
+   "dwell_nn_gap_top": [
+    [
+     15,
+     77
+    ],
+    [
+     14,
+     70
+    ],
+    [
+     13,
+     51
+    ],
+    [
+     30,
+     35
+    ],
+    [
+     1,
+     33
+    ],
+    [
+     4,
+     32
+    ]
+   ],
+   "dwell_nn_gap_median": 26.0,
+   "lattice_R": {
+    "grid_257.0": 0.0103,
+    "grid_256": 0.0098,
+    "grid_128.5": 0.0172,
+    "grid_span/180": 0.0177,
+    "uniform_baseline": 0.0286
+   },
+   "distinct_first_half": 1811,
+   "distinct_second_half": 2915,
+   "near_axis_distinct": 16,
+   "float3_distinct": 1803,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 180,
+  "run": 2,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.3886555462218489,
+  "LX": {
+   "distinct": 4144,
+   "min_gap": 1,
+   "span": 65535,
+   "axis_change_rate": 0.19932797311892475,
+   "mean_plateau_ms": 4.508,
+   "median_plateau_ms": 3.063,
+   "n_plateaus": 4984,
+   "jump_median": 190,
+   "jump_p90": 214,
+   "jump_hist_top": [
+    [
+     189,
+     780
+    ],
+    [
+     202,
+     475
+    ],
+    [
+     190,
+     442
+    ],
+    [
+     192,
+     345
+    ],
+    [
+     181,
+     208
+    ],
+    [
+     193,
+     172
+    ]
+   ],
+   "dwell_values": 1676,
+   "dwell_nn_gap_top": [
+    [
+     13,
+     139
+    ],
+    [
+     25,
+     116
+    ],
+    [
+     38,
+     113
+    ],
+    [
+     12,
+     104
+    ],
+    [
+     1,
+     46
+    ],
+    [
+     3,
+     43
+    ]
+   ],
+   "dwell_nn_gap_median": 25,
+   "lattice_R": {
+    "grid_257.0": 0.0053,
+    "grid_256": 0.0138,
+    "grid_128.5": 0.0111,
+    "grid_span/180": 0.0075,
+    "uniform_baseline": 0.0244
+   },
+   "distinct_first_half": 2131,
+   "distinct_second_half": 2372,
+   "near_axis_distinct": 18,
+   "float3_distinct": 1812,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 5279,
+   "min_gap": 1,
+   "span": 65502,
+   "axis_change_rate": 0.24636985479419177,
+   "mean_plateau_ms": 5.043,
+   "median_plateau_ms": 2.134,
+   "n_plateaus": 6160,
+   "jump_median": 190,
+   "jump_p90": 213,
+   "jump_hist_top": [
+    [
+     1,
+     643
+    ],
+    [
+     192,
+     555
+    ],
+    [
+     2,
+     521
+    ],
+    [
+     183,
+     334
+    ],
+    [
+     182,
+     299
+    ],
+    [
+     206,
+     280
+    ]
+   ],
+   "dwell_values": 1087,
+   "dwell_nn_gap_top": [
+    [
+     14,
+     87
+    ],
+    [
+     15,
+     58
+    ],
+    [
+     28,
+     42
+    ],
+    [
+     27,
+     42
+    ],
+    [
+     41,
+     37
+    ],
+    [
+     9,
+     28
+    ]
+   ],
+   "dwell_nn_gap_median": 27.0,
+   "lattice_R": {
+    "grid_257.0": 0.0154,
+    "grid_256": 0.0141,
+    "grid_128.5": 0.0275,
+    "grid_span/180": 0.0108,
+    "uniform_baseline": 0.0303
+   },
+   "distinct_first_half": 2466,
+   "distinct_second_half": 3089,
+   "near_axis_distinct": 15,
+   "float3_distinct": 1874,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 220,
+  "run": 1,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.3481739269570783,
+  "LX": {
+   "distinct": 3970,
+   "min_gap": 1,
+   "span": 65535,
+   "axis_change_rate": 0.18628745149805992,
+   "mean_plateau_ms": 5.375,
+   "median_plateau_ms": 3.817,
+   "n_plateaus": 4658,
+   "jump_median": 228,
+   "jump_p90": 251,
+   "jump_hist_top": [
+    [
+     227,
+     786
+    ],
+    [
+     1,
+     377
+    ],
+    [
+     240,
+     355
+    ],
+    [
+     228,
+     260
+    ],
+    [
+     2,
+     257
+    ],
+    [
+     233,
+     200
+    ]
+   ],
+   "dwell_values": 1826,
+   "dwell_nn_gap_top": [
+    [
+     13,
+     192
+    ],
+    [
+     25,
+     128
+    ],
+    [
+     12,
+     128
+    ],
+    [
+     38,
+     116
+    ],
+    [
+     14,
+     55
+    ],
+    [
+     51,
+     52
+    ]
+   ],
+   "dwell_nn_gap_median": 25,
+   "lattice_R": {
+    "grid_257.0": 0.0069,
+    "grid_256": 0.0332,
+    "grid_128.5": 0.0126,
+    "grid_span/220": 0.0102,
+    "uniform_baseline": 0.0234
+   },
+   "distinct_first_half": 1869,
+   "distinct_second_half": 2346,
+   "near_axis_distinct": 17,
+   "float3_distinct": 1711,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 4285,
+   "min_gap": 1,
+   "span": 65503,
+   "axis_change_rate": 0.20076803072122884,
+   "mean_plateau_ms": 6.14,
+   "median_plateau_ms": 2.309,
+   "n_plateaus": 5020,
+   "jump_median": 229,
+   "jump_p90": 258,
+   "jump_hist_top": [
+    [
+     1,
+     631
+    ],
+    [
+     2,
+     446
+    ],
+    [
+     228,
+     404
+    ],
+    [
+     233,
+     357
+    ],
+    [
+     234,
+     299
+    ],
+    [
+     3,
+     236
+    ]
+   ],
+   "dwell_values": 1061,
+   "dwell_nn_gap_top": [
+    [
+     14,
+     77
+    ],
+    [
+     15,
+     52
+    ],
+    [
+     27,
+     37
+    ],
+    [
+     41,
+     32
+    ],
+    [
+     28,
+     32
+    ],
+    [
+     13,
+     27
+    ]
+   ],
+   "dwell_nn_gap_median": 28.0,
+   "lattice_R": {
+    "grid_257.0": 0.0109,
+    "grid_256": 0.041,
+    "grid_128.5": 0.0326,
+    "grid_span/220": 0.0211,
+    "uniform_baseline": 0.0307
+   },
+   "distinct_first_half": 2336,
+   "distinct_second_half": 2209,
+   "near_axis_distinct": 17,
+   "float3_distinct": 1722,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 220,
+  "run": 2,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.3365334613384535,
+  "LX": {
+   "distinct": 3831,
+   "min_gap": 1,
+   "span": 65530,
+   "axis_change_rate": 0.17560702428097125,
+   "mean_plateau_ms": 5.441,
+   "median_plateau_ms": 3.869,
+   "n_plateaus": 4391,
+   "jump_median": 228.0,
+   "jump_p90": 250,
+   "jump_hist_top": [
+    [
+     227,
+     688
+    ],
+    [
+     240,
+     330
+    ],
+    [
+     228,
+     268
+    ],
+    [
+     1,
+     262
+    ],
+    [
+     233,
+     224
+    ],
+    [
+     234,
+     181
+    ]
+   ],
+   "dwell_values": 1948,
+   "dwell_nn_gap_top": [
+    [
+     13,
+     167
+    ],
+    [
+     25,
+     131
+    ],
+    [
+     12,
+     127
+    ],
+    [
+     38,
+     101
+    ],
+    [
+     1,
+     62
+    ],
+    [
+     2,
+     47
+    ]
+   ],
+   "dwell_nn_gap_median": 25,
+   "lattice_R": {
+    "grid_257.0": 0.0291,
+    "grid_256": 0.0179,
+    "grid_128.5": 0.0227,
+    "grid_span/220": 0.0086,
+    "uniform_baseline": 0.0227
+   },
+   "distinct_first_half": 1746,
+   "distinct_second_half": 2306,
+   "near_axis_distinct": 18,
+   "float3_distinct": 1705,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 4358,
+   "min_gap": 1,
+   "span": 65528,
+   "axis_change_rate": 0.19876795071802872,
+   "mean_plateau_ms": 5.813,
+   "median_plateau_ms": 2.978,
+   "n_plateaus": 4970,
+   "jump_median": 229,
+   "jump_p90": 255,
+   "jump_hist_top": [
+    [
+     1,
+     514
+    ],
+    [
+     2,
+     374
+    ],
+    [
+     233,
+     353
+    ],
+    [
+     234,
+     309
+    ],
+    [
+     228,
+     307
+    ],
+    [
+     247,
+     192
+    ]
+   ],
+   "dwell_values": 1276,
+   "dwell_nn_gap_top": [
+    [
+     14,
+     93
+    ],
+    [
+     15,
+     75
+    ],
+    [
+     30,
+     35
+    ],
+    [
+     4,
+     34
+    ],
+    [
+     13,
+     34
+    ],
+    [
+     31,
+     31
+    ]
+   ],
+   "dwell_nn_gap_median": 30,
+   "lattice_R": {
+    "grid_257.0": 0.0348,
+    "grid_256": 0.0238,
+    "grid_128.5": 0.0146,
+    "grid_span/220": 0.0014,
+    "uniform_baseline": 0.028
+   },
+   "distinct_first_half": 2247,
+   "distinct_second_half": 2331,
+   "near_axis_distinct": 15,
+   "float3_distinct": 1759,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 255,
+  "run": 1,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.23400936037441497,
+  "LX": {
+   "distinct": 2814,
+   "min_gap": 1,
+   "span": 65487,
+   "axis_change_rate": 0.12712508500340014,
+   "mean_plateau_ms": 7.83,
+   "median_plateau_ms": 5.02,
+   "n_plateaus": 3179,
+   "jump_median": 265.0,
+   "jump_p90": 288,
+   "jump_hist_top": [
+    [
+     265,
+     641
+    ],
+    [
+     261,
+     203
+    ],
+    [
+     278,
+     187
+    ],
+    [
+     1,
+     177
+    ],
+    [
+     2,
+     130
+    ],
+    [
+     277,
+     113
+    ]
+   ],
+   "dwell_values": 1755,
+   "dwell_nn_gap_top": [
+    [
+     13,
+     178
+    ],
+    [
+     12,
+     127
+    ],
+    [
+     25,
+     118
+    ],
+    [
+     38,
+     97
+    ],
+    [
+     26,
+     57
+    ],
+    [
+     51,
+     48
+    ]
+   ],
+   "dwell_nn_gap_median": 26.0,
+   "lattice_R": {
+    "grid_257.0": 0.0411,
+    "grid_256": 0.0275,
+    "grid_128.5": 0.0344,
+    "grid_span/255": 0.0467,
+    "uniform_baseline": 0.0239
+   },
+   "distinct_first_half": 1306,
+   "distinct_second_half": 1641,
+   "near_axis_distinct": 15,
+   "float3_distinct": 1539,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 2801,
+   "min_gap": 1,
+   "span": 65503,
+   "axis_change_rate": 0.12524500980039202,
+   "mean_plateau_ms": 8.162,
+   "median_plateau_ms": 4.142,
+   "n_plateaus": 3132,
+   "jump_median": 261,
+   "jump_p90": 289,
+   "jump_hist_top": [
+    [
+     261,
+     432
+    ],
+    [
+     259,
+     246
+    ],
+    [
+     274,
+     193
+    ],
+    [
+     1,
+     172
+    ],
+    [
+     258,
+     171
+    ],
+    [
+     275,
+     125
+    ]
+   ],
+   "dwell_values": 1423,
+   "dwell_nn_gap_top": [
+    [
+     15,
+     70
+    ],
+    [
+     14,
+     70
+    ],
+    [
+     27,
+     53
+    ],
+    [
+     28,
+     48
+    ],
+    [
+     13,
+     45
+    ],
+    [
+     41,
+     35
+    ]
+   ],
+   "dwell_nn_gap_median": 29.0,
+   "lattice_R": {
+    "grid_257.0": 0.0645,
+    "grid_256": 0.0382,
+    "grid_128.5": 0.0343,
+    "grid_span/255": 0.0631,
+    "uniform_baseline": 0.0265
+   },
+   "distinct_first_half": 1326,
+   "distinct_second_half": 1576,
+   "near_axis_distinct": 15,
+   "float3_distinct": 1520,
+   "float2_distinct": 201
+  }
+ },
+ {
+  "step": 255,
+  "run": 2,
+  "sweep_samples": 25000,
+  "pair_change_rate": 0.30749229969198766,
+  "LX": {
+   "distinct": 3397,
+   "min_gap": 1,
+   "span": 65535,
+   "axis_change_rate": 0.16192647705908236,
+   "mean_plateau_ms": 6.277,
+   "median_plateau_ms": 4.132,
+   "n_plateaus": 4049,
+   "jump_median": 265.0,
+   "jump_p90": 288,
+   "jump_hist_top": [
+    [
+     265,
+     844
+    ],
+    [
+     1,
+     325
+    ],
+    [
+     261,
+     262
+    ],
+    [
+     278,
+     253
+    ],
+    [
+     2,
+     253
+    ],
+    [
+     277,
+     145
+    ]
+   ],
+   "dwell_values": 1751,
+   "dwell_nn_gap_top": [
+    [
+     13,
+     225
+    ],
+    [
+     12,
+     137
+    ],
+    [
+     25,
+     133
+    ],
+    [
+     38,
+     85
+    ],
+    [
+     26,
+     57
+    ],
+    [
+     1,
+     46
+    ]
+   ],
+   "dwell_nn_gap_median": 25.0,
+   "lattice_R": {
+    "grid_257.0": 0.0505,
+    "grid_256": 0.0213,
+    "grid_128.5": 0.0141,
+    "grid_span/255": 0.0505,
+    "uniform_baseline": 0.0239
+   },
+   "distinct_first_half": 1725,
+   "distinct_second_half": 1919,
+   "near_axis_distinct": 13,
+   "float3_distinct": 1602,
+   "float2_distinct": 201
+  },
+  "LY": {
+   "distinct": 3678,
+   "min_gap": 1,
+   "span": 65529,
+   "axis_change_rate": 0.17244689787591502,
+   "mean_plateau_ms": 6.386,
+   "median_plateau_ms": 3.214,
+   "n_plateaus": 4312,
+   "jump_median": 261,
+   "jump_p90": 289,
+   "jump_hist_top": [
+    [
+     261,
+     571
+    ],
+    [
+     1,
+     423
+    ],
+    [
+     259,
+     384
+    ],
+    [
+     2,
+     324
+    ],
+    [
+     274,
+     303
+    ],
+    [
+     258,
+     246
+    ]
+   ],
+   "dwell_values": 1377,
+   "dwell_nn_gap_top": [
+    [
+     14,
+     109
+    ],
+    [
+     15,
+     67
+    ],
+    [
+     27,
+     59
+    ],
+    [
+     28,
+     52
+    ],
+    [
+     41,
+     51
+    ],
+    [
+     13,
+     48
+    ]
+   ],
+   "dwell_nn_gap_median": 28.0,
+   "lattice_R": {
+    "grid_257.0": 0.0142,
+    "grid_256": 0.0568,
+    "grid_128.5": 0.0207,
+    "grid_span/255": 0.0155,
+    "uniform_baseline": 0.0269
+   },
+   "distinct_first_half": 2032,
+   "distinct_second_half": 1884,
+   "near_axis_distinct": 20,
+   "float3_distinct": 1664,
+   "float2_distinct": 201
+  }
+ }
+]

@@ -1,0 +1,122 @@
+{
+ "step144_run1": [
+  {
+   "axis": "LX",
+   "pairs": 4597,
+   "jump_median": 152,
+   "jump_CV": 0.086,
+   "plateau_median_ms": 1.69,
+   "plateau_CV": 1.015,
+   "corr_dur_vs_jump": 0.169
+  },
+  {
+   "axis": "LY",
+   "pairs": 5045,
+   "jump_median": 152,
+   "jump_CV": 0.118,
+   "plateau_median_ms": 0.99,
+   "plateau_CV": 1.115,
+   "corr_dur_vs_jump": 0.159
+  }
+ ],
+ "step144_run2": [
+  {
+   "axis": "LX",
+   "pairs": 5469,
+   "jump_median": 152,
+   "jump_CV": 0.086,
+   "plateau_median_ms": 1.08,
+   "plateau_CV": 1.483,
+   "corr_dur_vs_jump": 0.228
+  },
+  {
+   "axis": "LY",
+   "pairs": 6061,
+   "jump_median": 152,
+   "jump_CV": 0.132,
+   "plateau_median_ms": 0.5,
+   "plateau_CV": 1.104,
+   "corr_dur_vs_jump": 0.181
+  }
+ ],
+ "step255_run1": [
+  {
+   "axis": "LX",
+   "pairs": 2542,
+   "jump_median": 265.0,
+   "jump_CV": 0.06,
+   "plateau_median_ms": 3.64,
+   "plateau_CV": 1.241,
+   "corr_dur_vs_jump": 0.37
+  },
+  {
+   "axis": "LY",
+   "pairs": 2505,
+   "jump_median": 263,
+   "jump_CV": 0.065,
+   "plateau_median_ms": 2.65,
+   "plateau_CV": 1.258,
+   "corr_dur_vs_jump": 0.247
+  }
+ ],
+ "step255_run2": [
+  {
+   "axis": "LX",
+   "pairs": 3238,
+   "jump_median": 265.0,
+   "jump_CV": 0.068,
+   "plateau_median_ms": 2.7,
+   "plateau_CV": 1.194,
+   "corr_dur_vs_jump": 0.456
+  },
+  {
+   "axis": "LY",
+   "pairs": 3449,
+   "jump_median": 261,
+   "jump_CV": 1.038,
+   "plateau_median_ms": 1.18,
+   "plateau_CV": 2.152,
+   "corr_dur_vs_jump": 0.382
+  }
+ ],
+ "step50_run1": [
+  {
+   "axis": "LX",
+   "pairs": 13348,
+   "jump_median": 63.0,
+   "jump_CV": 0.397,
+   "plateau_median_ms": 0.5,
+   "plateau_CV": 0.0,
+   "corr_dur_vs_jump": 0.095
+  },
+  {
+   "axis": "LY",
+   "pairs": 13443,
+   "jump_median": 61,
+   "jump_CV": 0.738,
+   "plateau_median_ms": 0.5,
+   "plateau_CV": 0.0,
+   "corr_dur_vs_jump": 0.041
+  }
+ ],
+ "step50_run2": [
+  {
+   "axis": "LX",
+   "pairs": 13326,
+   "jump_median": 63.0,
+   "jump_CV": 0.492,
+   "plateau_median_ms": 0.5,
+   "plateau_CV": 0.0,
+   "corr_dur_vs_jump": 0.021
+  },
+  {
+   "axis": "LY",
+   "pairs": 13710,
+   "jump_median": 61.0,
+   "jump_CV": 0.705,
+   "plateau_median_ms": 0.5,
+   "plateau_CV": 0.0,
+   "corr_dur_vs_jump": 0.016
+  }
+ ]
+}
