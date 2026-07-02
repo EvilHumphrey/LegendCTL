@@ -119,7 +119,7 @@ LegendCTL — LegendCTL itself is not a firmware updater.
 Polling rate, the button-binding matrix, stick deadzones / sensitivity curves /
 axis inversion / step-size, trigger range & modes, lighting, vibration, and
 back-paddle bindings, plus wrapper profiles and Restore Points. The full list is
-in the README [Status](../README.md#status) section.
+in the README [Features](../README.md#features) section.
 
 ### Does it have macros, turbo, or rapid-fire?
 No — and that's deliberate. Macros / turbo / automation / input injection / a

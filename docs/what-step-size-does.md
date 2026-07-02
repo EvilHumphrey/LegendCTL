@@ -54,7 +54,7 @@ Four legs, independently:
 - **At high polling settings, step decides how fast you must move before the extra rate shows up in values.** A new value emits only per ~step counts of travel, so value-update rate ≈ stick speed ÷ step. At the default 73, sustaining 8,000 value updates per second would take ~584,000 counts of travel per second — roughly one full center-to-edge deflection every 56 ms; hard flick peaks brush that briefly, ordinary aiming doesn't. The higher polling setting still pays off at any speed as *latency*: each threshold crossing rides the next USB poll (125 µs intervals at 8 kHz vs 1 ms at 1 kHz). This likely also explains owner reports that "step changes the report rate" — tools that estimate rate by counting value changes are measuring the quantizer, not the USB transport. *(Derived from the measured mechanism plus standard USB polling behavior — not a separate measurement; see Honest scope.)*
 - Practical rule: run the lowest step that's stable for your stick; raise it only enough to calm jitter.
 
-Unrelated but often conflated: "I set 255 and it didn't stick" in the official app is a separate write-reliability quirk (the firmware silently drops some setting writes; LegendCTL verifies every write and retries until the controller confirms).
+Unrelated but often conflated: "I set 255 and it didn't stick" in the official app is a separate write-reliability quirk (the firmware silently drops some setting writes; LegendCTL verifies the writes it can read back and retries the ones the firmware drops, so a value that didn't commit is caught rather than silently lost).
 
 ## Honest scope
 

@@ -32,9 +32,12 @@ To run it:
 Because LegendCTL is unsigned, the honest way to be sure your download is the real, untampered file is to check its SHA-256 hash against the one published with the release.
 
 1. Each release includes a **`SHA256SUMS.txt`** asset listing the official hashes.
-2. Open PowerShell in your downloads folder and run:
+2. Open PowerShell in your downloads folder and run the line for whichever file you downloaded:
 
    ```powershell
+   # Portable ZIP (the recommended "just try it" download):
+   Get-FileHash .\ZDUltimateLegend-v<version>-windows.zip -Algorithm SHA256
+   # Or the installer:
    Get-FileHash .\ZDUltimateLegend-v<version>-Setup.exe -Algorithm SHA256
    ```
 

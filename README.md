@@ -106,7 +106,7 @@ can and can't do.
 
 ## Features
 
-v2.3.0 — feature-complete for normal use.
+v2.4.0 — feature-complete for normal use.
 
 Controller settings (all written as standard HID feature reports; a normal Apply
 reports each field's write outcome and refreshes the on-screen state from the
@@ -182,7 +182,7 @@ how releases are (will be) signed.
 Two ways to get it — the **portable ZIP is the simplest** and needs no admin
 rights; the installer adds Start-Menu/uninstaller integration if you prefer it.
 Both ship the exact same wrapper executable. (In the download names below,
-`<version>` is just the release number — e.g. `2.3.0` in the current release.)
+`<version>` is just the release number shown on the [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest) page.)
 
 > **A note on names.** The project is named **LegendCTL**, but the application
 > window, Start Menu entry, and executable still carry the legacy name *ZD
@@ -310,7 +310,7 @@ logs attached or they will be closed.
 ## Build from source
 
 Requires **64-bit Python 3.12** (the version this build is developed and tested
-against). The pinned `dearpygui==2.3` ships prebuilt wheels only for specific
+against). The pinned `dearpygui==2.3.1` ships prebuilt wheels only for specific
 Python versions and architectures, so other interpreters may need to compile it
 from source.
 
