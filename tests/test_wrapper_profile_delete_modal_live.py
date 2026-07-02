@@ -42,6 +42,13 @@ import dearpygui.dearpygui as dpg
 
 from tests.r2_shell_test_helpers import make_shell
 from zd_app import i18n
+from zd_app.i18n import t
+from zd_app.ui import diagnostic_bundle_preview
+from zd_app.ui.app_shell import (
+    CLEAR_DIAGNOSTIC_LOGS_CONFIRM_BUTTON,
+    CLEAR_DIAGNOSTIC_LOGS_CONFIRM_MODAL,
+    CLEAR_DIAGNOSTIC_LOGS_MODAL_SWAP_DELETE_TAGS,
+)
 
 _POPUP = "wrapper_profile_delete_popup"
 _CONFIRM_BTN = "wrapper_profile_delete_confirm_button"
@@ -183,6 +190,117 @@ class WrapperProfileDeleteModalLiveTests(unittest.TestCase):
             self.assertIs(shell._record_settings_apply_result.call_args.args[0], False)
         finally:
             dpg.destroy_context()
+
+
+class ClearDiagnosticLogsModalLiveTests(unittest.TestCase):
+    def setUp(self) -> None:
+        i18n.set_locale("en")
+        self.addCleanup(i18n.set_locale, "en")
+
+    def _build_shell(self):
+        shell = make_shell(settings_service=mock.MagicMock())
+        shell._dpg_context_ready = True
+        shell._defer_ui_armed = True
+        shell.refresh_shell = mock.MagicMock()
+        shell.refresh_current_screen = mock.MagicMock()
+        return shell
+
+    def _drain(self, shell) -> None:
+        shell._drain_deferred_ui_calls()
+
+    def test_clear_logs_confirm_create_is_split_from_teardown(self) -> None:
+        dpg.create_context()
+        try:
+            shell = self._build_shell()
+
+            with dpg.window(tag=CLEAR_DIAGNOSTIC_LOGS_CONFIRM_MODAL, modal=True):
+                dpg.add_text("stale clear popup")
+
+            shell.clear_diagnostic_logs()
+
+            self.assertFalse(dpg.does_item_exist(CLEAR_DIAGNOSTIC_LOGS_CONFIRM_BUTTON))
+            shell.diagnostics_service.clear_event_log.assert_not_called()
+            shell.device_service.clear_event_log.assert_not_called()
+
+            self._drain(shell)
+            self.assertFalse(dpg.does_item_exist(CLEAR_DIAGNOSTIC_LOGS_CONFIRM_BUTTON))
+
+            self._drain(shell)
+            self.assertTrue(dpg.does_item_exist(CLEAR_DIAGNOSTIC_LOGS_CONFIRM_MODAL))
+            self.assertTrue(dpg.does_item_exist(CLEAR_DIAGNOSTIC_LOGS_CONFIRM_BUTTON))
+            self.assertIn(t("diagnostics.clear_logs_confirm.body"), _all_text_values())
+        finally:
+            dpg.destroy_context()
+
+    def test_clear_logs_confirm_tears_down_other_modal_before_opening(self) -> None:
+        dpg.create_context()
+        try:
+            shell = self._build_shell()
+
+            with dpg.window(
+                tag=diagnostic_bundle_preview.PREVIEW_MODAL_TAG,
+                modal=True,
+            ):
+                dpg.add_text("stale export preview")
+
+            shell.clear_diagnostic_logs()
+
+            self.assertFalse(dpg.does_item_exist(CLEAR_DIAGNOSTIC_LOGS_CONFIRM_BUTTON))
+
+            self._drain(shell)
+            self.assertFalse(
+                dpg.does_item_exist(diagnostic_bundle_preview.PREVIEW_MODAL_TAG)
+            )
+            self.assertFalse(dpg.does_item_exist(CLEAR_DIAGNOSTIC_LOGS_CONFIRM_BUTTON))
+
+            self._drain(shell)
+            self.assertTrue(dpg.does_item_exist(CLEAR_DIAGNOSTIC_LOGS_CONFIRM_MODAL))
+            self.assertTrue(dpg.does_item_exist(CLEAR_DIAGNOSTIC_LOGS_CONFIRM_BUTTON))
+        finally:
+            dpg.destroy_context()
+
+    def test_clear_logs_modal_swap_delete_set_covers_export_preview(self) -> None:
+        self.assertIn(
+            diagnostic_bundle_preview.PREVIEW_MODAL_TAG,
+            CLEAR_DIAGNOSTIC_LOGS_MODAL_SWAP_DELETE_TAGS,
+        )
+
+    def test_clear_logs_only_runs_after_confirm(self) -> None:
+        dpg.create_context()
+        try:
+            shell = self._build_shell()
+
+            shell.clear_diagnostic_logs()
+            shell.diagnostics_service.clear_event_log.assert_not_called()
+            shell.device_service.clear_event_log.assert_not_called()
+
+            self._drain(shell)
+            self._drain(shell)
+            callback = dpg.get_item_configuration(CLEAR_DIAGNOSTIC_LOGS_CONFIRM_BUTTON)[
+                "callback"
+            ]
+            callback(CLEAR_DIAGNOSTIC_LOGS_CONFIRM_BUTTON, None, None)
+
+            shell.diagnostics_service.clear_event_log.assert_called_once_with()
+            shell.device_service.clear_event_log.assert_called_once_with()
+            shell.device_service.log_i18n_event.assert_called_with(
+                "log.diagnostics.logs_cleared"
+            )
+            shell.refresh_shell.assert_called_once_with()
+            shell.refresh_current_screen.assert_called_once_with()
+            self.assertFalse(dpg.does_item_exist(CLEAR_DIAGNOSTIC_LOGS_CONFIRM_MODAL))
+        finally:
+            dpg.destroy_context()
+
+
+def _all_text_values() -> list[str]:
+    values: list[str] = []
+    for item in dpg.get_all_items():
+        if dpg.get_item_type(item) == "mvAppItemType::mvText":
+            value = dpg.get_value(item)
+            if value is not None:
+                values.append(str(value))
+    return values
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ import dearpygui.dearpygui as dpg
 from tests.r2_shell_test_helpers import make_shell
 from zd_app import i18n
 from zd_app.models import AppSettings
+from zd_app.ui import right_rail, trust_front_door
 from zd_app.ui import typography
 from zd_app.ui.screens import diagnostics
 
@@ -91,12 +92,22 @@ class _DiagnosticsChildWindowRecorder:
 
     def __init__(self) -> None:
         self.child_windows: list[dict] = []
+        self.text_items: list[dict] = []
+        self.input_text_items: list[dict] = []
         self._patches: list = []
 
     def __enter__(self) -> "_DiagnosticsChildWindowRecorder":
         def record_child_window(*_args, **kw):
             self.child_windows.append(kw)
             return self._CM()
+
+        def record_add_text(*args, **kw):
+            self.text_items.append({"args": args, **kw})
+            return kw.get("tag", "t")
+
+        def record_add_input_text(*args, **kw):
+            self.input_text_items.append({"args": args, **kw})
+            return kw.get("tag", "input")
 
         def passthrough(*_args, **_kw):
             return self._CM()
@@ -110,7 +121,8 @@ class _DiagnosticsChildWindowRecorder:
         fake_dpg.tree_node = passthrough
         fake_dpg.drawlist = passthrough
         # Items that return tags must echo something usable.
-        fake_dpg.add_text = MagicMock(return_value="t")
+        fake_dpg.add_text = record_add_text
+        fake_dpg.add_input_text = record_add_input_text
         fake_dpg.add_button = MagicMock(return_value="b")
         fake_dpg.add_spacer = MagicMock(return_value="s")
         fake_dpg.add_separator = MagicMock(return_value="sep")
@@ -127,6 +139,15 @@ class _DiagnosticsChildWindowRecorder:
         cm = patch.object(diagnostics, "dpg", fake_dpg)
         cm.__enter__()
         self._patches.append(cm)
+        cm_trust = patch.object(trust_front_door, "dpg", fake_dpg)
+        cm_trust.__enter__()
+        self._patches.append(cm_trust)
+        cm_right_rail = patch.object(right_rail, "dpg", fake_dpg)
+        cm_right_rail.__enter__()
+        self._patches.append(cm_right_rail)
+        cm_right_rail_wide = patch.object(right_rail, "is_wide", return_value=False)
+        cm_right_rail_wide.__enter__()
+        self._patches.append(cm_right_rail_wide)
         # The typography helpers (screen_title/section_title/helper_text)
         # use their own module-level ``dpg``; patch it too so title rendering
         # routes through the fake instead of hitting a real (absent) context.
@@ -216,6 +237,52 @@ class DiagnosticsCardHeightTests(unittest.TestCase):
             f"cannot fit its summary + 5 bullets + 2 paragraphs at "
             f"wrap=360. Pre-fix value (246) clipped the entire "
             f"windows-support paragraph at the bottom.",
+        )
+
+    def test_connection_details_card_wraps_trust_evidence(self) -> None:
+        settings = AppSettings(developer_panels_visible=False)
+        shell = make_shell(settings_service=MagicMock(), settings=settings)
+        with _DiagnosticsChildWindowRecorder() as rec:
+            diagnostics.build(shell, "content_region")
+
+        connection_cards = [
+            kw for kw in rec.child_windows
+            if kw.get("width") == diagnostics._CONNECTION_DETAILS_CARD_WIDTH
+        ]
+        self.assertEqual(len(connection_cards), 1)
+        self.assertGreater(
+            connection_cards[0]["width"],
+            320,
+            "Connection Details must be wider than the old clipping card.",
+        )
+
+        details = [
+            kw for kw in rec.text_items
+            if kw.get("tag") == "diag_connection_details"
+        ]
+        self.assertEqual(len(details), 1)
+        self.assertGreater(
+            details[0].get("wrap", 0),
+            0,
+            "Connection Details evidence text must wrap inside the card.",
+        )
+
+    def test_compat_report_preview_height_is_reduced_to_avoid_scroll_trap(self) -> None:
+        settings = AppSettings(developer_panels_visible=False)
+        shell = make_shell(settings_service=MagicMock(), settings=settings)
+        with _DiagnosticsChildWindowRecorder() as rec:
+            diagnostics.build(shell, "content_region")
+
+        previews = [
+            kw for kw in rec.input_text_items
+            if kw.get("tag") == diagnostics.COMPAT_REPORT_PREVIEW_TAG
+        ]
+        self.assertEqual(len(previews), 1)
+        self.assertTrue(previews[0]["readonly"])
+        self.assertTrue(previews[0]["multiline"])
+        self.assertEqual(
+            previews[0]["height"],
+            diagnostics._COMPAT_REPORT_PREVIEW_HEIGHT,
         )
 
 
@@ -385,8 +452,134 @@ class DiagnosticsTabStructureTests(unittest.TestCase):
             self.assertTrue(dpg.does_item_exist(diagnostics.SHARE_CARD_COPY_TAG))
             self.assertTrue(dpg.does_item_exist("diag_event_log"))
             self.assertTrue(dpg.does_item_exist(diagnostics.OPEN_LIVE_VERIFY_BUTTON_TAG))
+            for link in trust_front_door.TRUST_FRONT_DOOR_LINKS:
+                self.assertTrue(
+                    dpg.does_item_exist(
+                        trust_front_door.button_tag(
+                            "diagnostics_status_trust_front_door",
+                            link.target,
+                        )
+                    )
+                )
         finally:
             dpg.destroy_context()
+
+    def test_status_tab_uses_two_column_grid_on_wide_viewports(self) -> None:
+        shell = self._shell(developer_panels_visible=False)
+        shell._viewport_client_width = lambda: 2560
+        dpg.create_context()
+        try:
+            _build_in_fresh_context(shell)
+            self.assertTrue(dpg.does_item_exist("diagnostics_status_grid"))
+            self.assertTrue(dpg.does_item_exist("diag_health_summary"))
+            self.assertTrue(dpg.does_item_exist("diag_connection_details"))
+        finally:
+            dpg.destroy_context()
+
+    def test_status_trust_front_door_links_route_to_guidance(self) -> None:
+        shell = self._shell(developer_panels_visible=False)
+        shell.switch_screen = MagicMock()
+        dpg.create_context()
+        try:
+            _build_in_fresh_context(shell)
+            target = "self_check"
+            callback = dpg.get_item_callback(
+                trust_front_door.button_tag(
+                    "diagnostics_status_trust_front_door",
+                    target,
+                )
+            )
+            callback("sender", None, None)
+        finally:
+            dpg.destroy_context()
+
+        self.assertEqual(shell.diagnostics_active_tab, "guidance")
+        self.assertEqual(
+            getattr(shell, trust_front_door.TRUST_FRONT_DOOR_FOCUS_ATTR),
+            target,
+        )
+        shell.switch_screen.assert_called_once_with("diagnostics")
+
+    def test_trust_self_check_display_caveat_is_consolidated(self) -> None:
+        shell = self._shell(developer_panels_visible=False)
+        dpg.create_context()
+        try:
+            _build_in_fresh_context(shell)
+
+            self.assertEqual(
+                dpg.get_value(diagnostics.TRUST_SELF_CHECK_INTRO_TAG),
+                i18n.t("trust_self_check.display_caveat"),
+            )
+            self.assertTrue(
+                dpg.does_item_exist(diagnostics.TRUST_SELF_CHECK_SCOPE_DETAILS_TAG)
+            )
+            for index in range(5):
+                self.assertFalse(
+                    dpg.does_item_exist(
+                        f"diagnostics_trust_self_check_boundary_{index}"
+                    )
+                )
+                self.assertTrue(
+                    dpg.does_item_exist(
+                        f"diagnostics_trust_self_check_claim_{index}"
+                    )
+                )
+                self.assertTrue(
+                    dpg.does_item_exist(
+                        f"diagnostics_trust_self_check_evidence_{index}"
+                    )
+                )
+            extra_tag = "diagnostics_trust_self_check_boundary_extra_1"
+            self.assertTrue(dpg.does_item_exist(extra_tag))
+            self.assertIn(
+                "app-footprint check, not a whole-PC or game-compatibility clearance",
+                dpg.get_value(extra_tag),
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_drivers_extra_boundary_is_visible_not_inside_scope_details(self) -> None:
+        shell = self._shell(developer_panels_visible=False)
+        dpg.create_context()
+        try:
+            _build_in_fresh_context(shell)
+            extra_tag = "diagnostics_trust_self_check_boundary_extra_1"
+
+            self.assertTrue(dpg.does_item_exist(extra_tag))
+            self.assertIn(
+                "app-footprint check, not a whole-PC or game-compatibility clearance",
+                dpg.get_value(extra_tag),
+            )
+            parent = dpg.get_item_info(extra_tag)["parent"]
+            self.assertNotEqual(
+                dpg.get_item_alias(parent),
+                diagnostics.TRUST_SELF_CHECK_SCOPE_DETAILS_TAG,
+                "Drivers-specific qualifier must render inline with the row, "
+                "not inside the default-collapsed Scope details node.",
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_front_door_focus_is_one_shot_and_targets_real_guidance_tags(self) -> None:
+        for target, expected_tag in (
+            ("self_check", diagnostics.TRUST_SELF_CHECK_CARD_TAG),
+            ("compat_report", diagnostics.COMPAT_REPORT_CARD_TAG),
+            ("evidence_card", diagnostics.SHARE_CARD_COPY_TAG),
+        ):
+            with self.subTest(target=target):
+                shell = self._shell(developer_panels_visible=False)
+                setattr(shell, trust_front_door.TRUST_FRONT_DOOR_FOCUS_ATTR, target)
+                fake_dpg = MagicMock()
+                fake_dpg.does_item_exist.return_value = True
+                fake_dpg.focus_item = MagicMock()
+
+                with patch.object(diagnostics, "dpg", fake_dpg):
+                    diagnostics._consume_trust_front_door_focus(shell)
+
+                self.assertIsNone(
+                    getattr(shell, trust_front_door.TRUST_FRONT_DOOR_FOCUS_ATTR)
+                )
+                fake_dpg.focus_item.assert_called_once_with(expected_tag)
 
     def test_stale_warning_pinned_above_tab_bar(self) -> None:
         shell = self._shell(developer_panels_visible=False)
@@ -515,7 +708,10 @@ class DiagnosticsDeveloperCardFitTests(unittest.TestCase):
         offending = [
             kw for kw in rec.child_windows
             if kw.get("height") in self._OLD_DEV_FIXED_HEIGHTS
-            and kw.get("width") not in (220, 320)  # Status-tab Health/Connection keep 220
+            and kw.get("width") not in (
+                220,
+                diagnostics._CONNECTION_DETAILS_CARD_WIDTH,
+            )
         ]
         self.assertEqual(
             [kw.get("height") for kw in offending], [],

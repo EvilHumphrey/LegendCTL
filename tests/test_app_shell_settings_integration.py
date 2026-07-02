@@ -65,6 +65,7 @@ from zd_app.ui.app_shell import (
     SENSITIVITY_PRESETS_8POINT,
     _GEOMETRY_LOG_SETTLE_FRAMES,
     _format_apply_failure_row,
+    _windowed_viewport_kwargs,
 )
 
 
@@ -3770,17 +3771,12 @@ class ReadSettleRetryTests(unittest.TestCase):
         )
 
 
-class StartupMaximizesViewportTests(unittest.TestCase):
-    """The app opens maximized so it uses the full screen by default
-    (2026-06-21). ``dpg.maximize_viewport`` must fire exactly once during
-    ``run()``, after the viewport is shown, while the 1480x1040
-    ``create_viewport`` size is kept as the (sane) restore size with a
-    non-collapsing minimum.
+class StartupWindowedViewportTests(unittest.TestCase):
+    """The 2026-06-21 maximize-on-startup rule was reversed on 2026-07-02.
 
-    The restore height was raised 920 -> 1040 so that un-maximizing yields a
-    window whose ~876px content clip clears the trimmed Home dashboard (~816px),
-    i.e. dragging off maximized does not bring back the far-right page scrollbar.
-    It stays <= 1080 so the restore size still fits common smaller monitors.
+    The app now launches as a standard window at the suite-budgeted 1480x1040
+    size with non-collapsing minimums, best-effort centered on the primary
+    display. Users can maximize manually when they want the wide rail layout.
     """
 
     def setUp(self) -> None:
@@ -3789,14 +3785,15 @@ class StartupMaximizesViewportTests(unittest.TestCase):
     def tearDown(self) -> None:
         i18n.set_locale("en")
 
-    def test_run_maximizes_viewport_after_show(self) -> None:
+    def test_run_opens_windowed_viewport_without_maximize(self) -> None:
         shell = _make_shell()
         fake_dpg = MagicMock()
         # Skip the render loop entirely — we only care about the
-        # create -> setup -> show -> maximize startup sequence.
+        # create -> setup -> show startup sequence.
         fake_dpg.is_dearpygui_running.return_value = False
 
         with patch("zd_app.ui.app_shell.dpg", fake_dpg), \
+                patch("zd_app.ui.app_shell._primary_display_size", return_value=(2560, 1440)), \
                 patch("zd_app.ui.app_shell.install_dearpygui_i18n"), \
                 patch("zd_app.ui.app_shell.register_fonts"), \
                 patch("zd_app.ui.app_shell.bind_default_font"), \
@@ -3813,33 +3810,33 @@ class StartupMaximizesViewportTests(unittest.TestCase):
                 patch.object(shell, "_emit_session_start_event"):
             shell.run()
 
-        # Maximized on startup, exactly once.
-        fake_dpg.maximize_viewport.assert_called_once_with()
+        # Standard windowed startup: no automatic maximize.
+        fake_dpg.maximize_viewport.assert_not_called()
 
-        # Restore size stays sane (un-maximizing yields a usable window) and
-        # the layout can't collapse below a workable minimum.
+        # Launch size stays at the suite-budgeted window and the layout can't
+        # collapse below a workable minimum.
         _, kwargs = fake_dpg.create_viewport.call_args
         self.assertEqual(kwargs.get("width"), 1480)
-        # Restore height raised 920 -> 1040 so the un-maximized content clip
-        # (~876px) clears the trimmed Home dashboard (~816px) — no far-right page
-        # scrollbar when dragged off maximized.
         self.assertEqual(kwargs.get("height"), 1040)
-        # ...but it must stay <= 1080 so the restore size still fits common
-        # smaller monitors (a 1080-tall display).
-        self.assertLessEqual(kwargs.get("height"), 1080)
-        self.assertGreaterEqual(kwargs.get("min_width", 0), 1000)
-        self.assertGreaterEqual(kwargs.get("min_height", 0), 700)
+        self.assertEqual(kwargs.get("min_width"), 1180)
+        self.assertEqual(kwargs.get("min_height"), 760)
+        self.assertEqual(kwargs.get("x_pos"), 540)
+        self.assertEqual(kwargs.get("y_pos"), 200)
 
-        # maximize_viewport must come AFTER show_viewport (maximizing an
-        # unshown viewport is a no-op / undefined on some platforms).
         names = [call[0] for call in fake_dpg.method_calls]
         self.assertIn("show_viewport", names)
-        self.assertIn("maximize_viewport", names)
-        self.assertGreater(
-            names.index("maximize_viewport"),
-            names.index("show_viewport"),
-            "maximize_viewport must be called after show_viewport",
-        )
+        self.assertNotIn("maximize_viewport", names)
+
+    def test_windowed_viewport_sizes_down_and_clamps_position_on_small_display(self) -> None:
+        with patch("zd_app.ui.app_shell._primary_display_size", return_value=(1366, 768)):
+            kwargs = _windowed_viewport_kwargs()
+
+        self.assertEqual(kwargs["width"], 1366)
+        self.assertEqual(kwargs["height"], 768)
+        self.assertEqual(kwargs["min_width"], 1180)
+        self.assertEqual(kwargs["min_height"], 760)
+        self.assertEqual(kwargs["x_pos"], 0)
+        self.assertEqual(kwargs["y_pos"], 0)
 
 
 class GeometryLoggingTests(unittest.TestCase):

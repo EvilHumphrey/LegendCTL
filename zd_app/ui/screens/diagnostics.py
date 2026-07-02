@@ -13,7 +13,7 @@ from zd_app.services.diagnostic_bundle import DiagnosticBundleService
 from zd_app.services.diagnostics_service import _redact_instance_id
 from zd_app.services.share_card import build_share_card
 from zd_app.services.trust_self_check import build_trust_self_check
-from zd_app.ui import support_reference, trust_labels
+from zd_app.ui import right_rail, support_reference, trust_front_door, trust_labels
 from zd_app.ui.screens import about, preferences
 from zd_app.ui.typography import screen_title, section_title
 
@@ -46,9 +46,14 @@ _TRUST_BODY_WRAP = 840
 
 TRUST_SELF_CHECK_CARD_TAG = "diagnostics_trust_self_check_card"
 TRUST_SELF_CHECK_INTRO_TAG = "diagnostics_trust_self_check_intro"
+TRUST_SELF_CHECK_SCOPE_DETAILS_TAG = "diagnostics_trust_self_check_scope_details"
 TRUST_SELF_CHECK_COPY_TAG = "diagnostics_trust_self_check_copy"
 TRUST_SELF_CHECK_STATUS_TAG = "diagnostics_trust_self_check_status"
 _TRUST_SELF_CHECK_WRAP = 840
+
+_CONNECTION_DETAILS_CARD_WIDTH = 500
+_CONNECTION_DETAILS_WRAP = 470
+_STATUS_TRUST_STRIP_HEIGHT = 66
 
 COMPAT_REPORT_CARD_TAG = "diagnostics_compat_report_card"
 COMPAT_REPORT_VARIANT_TAG = "diagnostics_compat_report_variant"
@@ -59,12 +64,21 @@ COMPAT_REPORT_OPEN_TAG = "diagnostics_compat_report_open"
 COMPAT_REPORT_STATUS_TAG = "diagnostics_compat_report_status"
 COMPAT_REPORT_PREVIEW_TAG = "diagnostics_compat_report_preview"
 _COMPAT_REPORT_WRAP = 840
+_COMPAT_REPORT_PREVIEW_HEIGHT = 120
 
 SHARE_CARD_TAG = "diagnostics_share_card"
 SHARE_CARD_SAVE_TAG = "diagnostics_share_card_save"
 SHARE_CARD_COPY_TAG = "diagnostics_share_card_copy"
 SHARE_CARD_STATUS_TAG = "diagnostics_share_card_status"
 _SHARE_CARD_WRAP = 840
+
+_TRUST_FRONT_DOOR_FOCUS_TARGETS = {
+    "self_check": TRUST_SELF_CHECK_CARD_TAG,
+    "compat_report": COMPAT_REPORT_CARD_TAG,
+    # The public target name intentionally points to the actionable evidence
+    # card controls, not a same-named internal tag.
+    "evidence_card": SHARE_CARD_COPY_TAG,
+}
 
 # Tab identifiers for the Diagnostics screen (mirrors CONTROLLER_TAB_IDS in
 # controller.py). The active tab is stashed on the shell as
@@ -77,7 +91,13 @@ DIAGNOSTICS_TAB_IDS = ("status", "actions", "guidance", "developer")
 
 def build(shell, parent: str) -> None:
     state = shell.device_service.state
-    with dpg.child_window(parent=parent, autosize_x=True, autosize_y=True, border=False):
+    with right_rail.rail_screen(
+        shell,
+        parent,
+        screen_id="diagnostics",
+        root_tag="diagnostics_root",
+        work_tag="diagnostics_work_column",
+    ):
         screen_title(t("diagnostics.cards.diagnostics_title"))
         dpg.add_text(t("diagnostics.trust_anchor_intro"))
         dpg.add_spacer(height=10)
@@ -115,6 +135,7 @@ def build(shell, parent: str) -> None:
         active_tab_tag = _diag_tab_id_to_tag(getattr(shell, "diagnostics_active_tab", "status"))
         if dpg.does_item_exist(active_tab_tag):
             dpg.set_value("diagnostics_tab_bar", active_tab_tag)
+        _consume_trust_front_door_focus(shell)
 
 
 def _remember_active_tab(shell, selected_tab) -> None:
@@ -137,33 +158,70 @@ def _diag_tab_tag_to_id(tab_tag) -> str:
 
 
 def _build_status_tab(shell, state) -> None:
-    # Health (220) + Connection (320) sit side by side and fit the default
-    # window.
-    with dpg.group(horizontal=True):
-        with dpg.child_window(width=220, height=220, border=True):
-            dpg.add_text(t("diagnostics.cards.health"), color=shell.COLORS["muted"])
-            # wrap to the card's inner width (220 - padding) so a long status
-            # line (e.g. "Disconnected — No supported controller…") wraps
-            # instead of overrunning the right edge (measured 53px H-clip).
+    if right_rail.screen_wide_state(shell, "diagnostics"):
+        with dpg.table(
+            header_row=False,
+            policy=dpg.mvTable_SizingStretchSame,
+            tag="diagnostics_status_grid",
+        ):
+            dpg.add_table_column()
+            dpg.add_table_column()
+            with dpg.table_row():
+                _build_health_card(shell, state, width=-1, wrap=360)
+                _build_connection_card(shell, width=-1, wrap=360)
+    else:
+        _build_health_card(shell, state, width=220, wrap=190)
+        dpg.add_spacer(height=8)
+        _build_connection_card(
+            shell,
+            width=_CONNECTION_DETAILS_CARD_WIDTH,
+            wrap=_CONNECTION_DETAILS_WRAP,
+        )
+    dpg.add_spacer(height=8)
+    with dpg.child_window(
+        width=-1,
+        height=_STATUS_TRUST_STRIP_HEIGHT,
+        border=True,
+        tag="diagnostics_status_trust_front_door",
+    ):
+        with dpg.group(horizontal=True):
             dpg.add_text(
-                tag="diag_health_summary",
-                default_value=health_summary_text(state, None),
-                wrap=190,
+                t("diagnostics.trust_front_door.status_intro"),
+                color=shell.COLORS["muted"],
             )
-        with dpg.child_window(width=320, height=220, border=True):
-            dpg.add_text(t("diagnostics.cards.connection_details"), color=shell.COLORS["muted"])
-            dpg.add_text(
-                tag="diag_connection_details",
-                default_value=t("diagnostics.connection.waiting"),
+            trust_front_door.add_trust_link_buttons(
+                shell,
+                tag_prefix="diagnostics_status_trust_front_door",
+                button_width=150,
             )
+
+
+def _build_health_card(shell, state, *, width: int, wrap: int) -> None:
+    with dpg.child_window(width=width, height=220, border=True):
+        dpg.add_text(t("diagnostics.cards.health"), color=shell.COLORS["muted"])
+        dpg.add_text(
+            tag="diag_health_summary",
+            default_value=health_summary_text(state, None),
+            wrap=wrap,
+        )
+
+
+def _build_connection_card(shell, *, width: int, wrap: int) -> None:
+    with dpg.child_window(width=width, height=220, border=True):
+        dpg.add_text(t("diagnostics.cards.connection_details"), color=shell.COLORS["muted"])
+        dpg.add_text(
+            tag="diag_connection_details",
+            default_value=t("diagnostics.connection.waiting"),
+            wrap=wrap,
+        )
 
 
 def _build_actions_tab(shell) -> None:
     with dpg.group(horizontal=True):
-        # Actions card holds 1 label + 8 buttons + 1 wrap=236 helper text.
-        # Heights are unchanged from the pre-tab layout (audit floors pinned by
-        # DiagnosticsCardHeightTests): 360 clears the 8 buttons + helper.
-        with dpg.child_window(width=280, height=360, border=True):
+        # Actions card holds routine actions plus a separated Maintenance group.
+        # The extra maintenance text keeps Clear Logs visually away from safe
+        # navigation/export actions.
+        with dpg.child_window(width=280, height=440, border=True):
             dpg.add_text(t("ui.actions_c3cd636a"), color=shell.COLORS["muted"])
             dpg.add_button(label=t("ui.read_now_1d9d0f1e"), width=160, callback=lambda: shell.read_controller())
             # Live Verify (live button chips, per-stick circularity, inline
@@ -188,6 +246,13 @@ def _build_actions_tab(shell) -> None:
             dpg.add_button(label=t("ui.open_calibration_guide_b87103fd"), width=180, callback=lambda: shell.open_support_guide("calibration"))
             dpg.add_button(label=t("ui.open_firmware_guide_620b9625"), width=180, callback=lambda: shell.open_support_guide("firmware"))
             dpg.add_button(label=t("ui.open_stack_guide_b240e63a"), width=180, callback=lambda: shell.open_support_guide("windows_component_model"))
+            dpg.add_separator()
+            dpg.add_text(t("diagnostics.actions.maintenance.title"), color=shell.COLORS["muted"])
+            dpg.add_text(
+                t("diagnostics.actions.maintenance.helper"),
+                color=shell.COLORS["muted"],
+                wrap=236,
+            )
             dpg.add_button(label=t("ui.clear_logs_7c3089dc"), width=160, callback=lambda: shell.clear_diagnostic_logs())
         # Calibration card holds 1 label + summary + 5 bullets + 2 paragraphs.
         # 400 covers the worst-case English locale (DiagnosticsCardHeightTests
@@ -274,11 +339,27 @@ def _build_trust_self_check_card(shell) -> None:
     ):
         dpg.add_text(t("trust_self_check.title"), color=shell.COLORS["muted"])
         dpg.add_text(
-            t("trust_self_check.intro"),
+            t("trust_self_check.display_caveat"),
             tag=TRUST_SELF_CHECK_INTRO_TAG,
             wrap=_TRUST_SELF_CHECK_WRAP,
             color=shell.COLORS["muted"],
         )
+        shared_boundary = t("trust_self_check.boundary.session")
+        with dpg.tree_node(
+            label=t("trust_self_check.scope_details.title"),
+            default_open=False,
+            tag=TRUST_SELF_CHECK_SCOPE_DETAILS_TAG,
+        ):
+            dpg.add_text(
+                t("trust_self_check.boundary.session"),
+                wrap=_TRUST_SELF_CHECK_WRAP,
+                color=shell.COLORS["muted"],
+            )
+            dpg.add_text(
+                t("trust_self_check.drivers.boundary"),
+                wrap=_TRUST_SELF_CHECK_WRAP,
+                color=shell.COLORS["muted"],
+            )
         dpg.add_spacer(height=6)
         for index, row in enumerate(result.rows):
             dpg.add_text(
@@ -292,12 +373,14 @@ def _build_trust_self_check_card(shell) -> None:
                 wrap=_TRUST_SELF_CHECK_WRAP,
                 color=shell.COLORS["muted"],
             )
-            dpg.add_text(
-                row.boundary,
-                tag=f"diagnostics_trust_self_check_boundary_{index}",
-                wrap=_TRUST_SELF_CHECK_WRAP,
-                color=shell.COLORS["muted"],
-            )
+            extra_boundary = _extra_boundary_text(row.boundary, shared_boundary)
+            if extra_boundary:
+                dpg.add_text(
+                    extra_boundary,
+                    tag=f"diagnostics_trust_self_check_boundary_extra_{index}",
+                    wrap=_TRUST_SELF_CHECK_WRAP,
+                    color=shell.COLORS["muted"],
+                )
             dpg.add_spacer(height=4)
         dpg.add_button(
             label=t("trust_self_check.copy_button"),
@@ -311,6 +394,33 @@ def _build_trust_self_check_card(shell) -> None:
             wrap=_TRUST_SELF_CHECK_WRAP,
             color=shell.COLORS["muted"],
         )
+
+
+def _extra_boundary_text(boundary: str, shared_boundary: str) -> str:
+    """Return the row-specific boundary text beyond the shared sentence."""
+
+    boundary = (boundary or "").strip()
+    shared_boundary = (shared_boundary or "").strip()
+    if not boundary or boundary == shared_boundary:
+        return ""
+    if shared_boundary and shared_boundary in boundary:
+        return boundary.replace(shared_boundary, "", 1).strip()
+    return boundary
+
+
+def _consume_trust_front_door_focus(shell) -> None:
+    target = getattr(shell, trust_front_door.TRUST_FRONT_DOOR_FOCUS_ATTR, None)
+    if not target:
+        return
+    setattr(shell, trust_front_door.TRUST_FRONT_DOOR_FOCUS_ATTR, None)
+
+    tag = _TRUST_FRONT_DOOR_FOCUS_TARGETS.get(str(target))
+    if not tag or not dpg.does_item_exist(tag) or not hasattr(dpg, "focus_item"):
+        return
+    try:
+        dpg.focus_item(tag)
+    except Exception:  # pragma: no cover - focus is best-effort UI anchoring.
+        logger.debug("Diagnostics trust-front-door focus skipped", exc_info=True)
 
 
 def _copy_trust_self_check(shell) -> None:
@@ -390,7 +500,7 @@ def _build_compatibility_report_card(shell) -> None:
             multiline=True,
             readonly=True,
             width=-1,
-            height=220,
+            height=_COMPAT_REPORT_PREVIEW_HEIGHT,
         )
 
 

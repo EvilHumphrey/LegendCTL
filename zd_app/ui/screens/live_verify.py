@@ -76,6 +76,7 @@ from zd_app.ui.controller_diagram_layout import (
     BACK_PADDLE_POS,
     BACK_PADDLE_R,
 )
+from zd_app.ui import right_rail
 from zd_app.ui.components import card
 from zd_app.ui.typography import screen_title, section_title
 
@@ -216,7 +217,9 @@ _BUTTON_CHIP_ORDER = (
 
 # Code-drawn front-face controller model (Phase 1 live visualizer).
 _WORKSPACE_MODEL_CARD_W = 640
+_WORKSPACE_MODEL_CARD_W_WIDE = 780
 _WORKSPACE_INSPECTOR_W = 400
+_WORKSPACE_INSPECTOR_W_WIDE = 360
 _WORKSPACE_GAP = 18
 _INSPECTOR_WRAP = 360
 _WORKSPACE_VIEW_FRONT = "front"
@@ -370,6 +373,7 @@ _TOP_SOURCE_SLOTS = {
 _TOP_CONTROLS = ("L1", "L2", "LK", "R1", "R2", "RK")
 _TOP_BADGE_SIZE = 12
 _CRYSTAL_BLUE = (46, 155, 255, 220)
+_WIDE_DIAGRAM_SCALE = 1.18
 
 
 class _LiveVerifyState:
@@ -563,13 +567,37 @@ def build(shell, parent: str) -> None:
         autosize_y=True,
         border=False,
     ):
-        _build_header(shell)
-        dpg.add_spacer(height=6)
-        _build_controller_workspace(shell)
-        dpg.add_spacer(height=8)
-        _build_demoted_live_cards(shell, state)
+        if right_rail.can_fit_rail(shell, right_rail.LIVE_VERIFY_WORK_WIDTH):
+            with dpg.group(horizontal=True, tag="live_verify_wide_layout"):
+                with dpg.child_window(
+                    tag="live_verify_work_column",
+                    width=right_rail.LIVE_VERIFY_WORK_WIDTH,
+                    border=False,
+                    auto_resize_y=True,
+                    autosize_y=False,
+                ):
+                    _build_live_verify_content(shell, state)
+                spacer = right_rail.trailing_spacer_width(
+                    shell,
+                    right_rail.LIVE_VERIFY_WORK_WIDTH,
+                )
+                if spacer:
+                    dpg.add_spacer(width=spacer)
+                else:
+                    dpg.add_spacer(width=right_rail.RAIL_GAP)
+                right_rail.build(shell)
+        else:
+            _build_live_verify_content(shell, state)
 
     _schedule_live_verify_refresh(shell, state)
+
+
+def _build_live_verify_content(shell, state: "_LiveVerifyState") -> None:
+    _build_header(shell)
+    dpg.add_spacer(height=6)
+    _build_controller_workspace(shell)
+    dpg.add_spacer(height=8)
+    _build_demoted_live_cards(shell, state)
 
 
 def _build_header(shell) -> None:
@@ -718,7 +746,7 @@ def _build_controller_workspace(shell) -> None:
     """Two-pane controller workspace: enlarged front model + inspector."""
 
     with dpg.group(horizontal=True):
-        with _fit_card(width=_WORKSPACE_MODEL_CARD_W):
+        with _fit_card(width=_workspace_model_card_width(shell)):
             section_title(t("diagnostics.live_verify.workspace.title"))
             _build_workspace_controls(shell)
             dpg.add_spacer(height=4)
@@ -729,8 +757,33 @@ def _build_controller_workspace(shell) -> None:
             dpg.add_spacer(height=6)
             _build_control_selectors(shell)
         dpg.add_spacer(width=_WORKSPACE_GAP)
-        with _fit_card(width=_WORKSPACE_INSPECTOR_W):
+        with _fit_card(width=_workspace_inspector_width(shell)):
             _build_inspector(shell)
+
+
+def _workspace_model_card_width(shell) -> int:
+    return _WORKSPACE_MODEL_CARD_W_WIDE if right_rail.is_wide(shell) else _WORKSPACE_MODEL_CARD_W
+
+
+def _workspace_inspector_width(shell) -> int:
+    return _WORKSPACE_INSPECTOR_W_WIDE if right_rail.is_wide(shell) else _WORKSPACE_INSPECTOR_W
+
+
+def _diagram_scale(shell) -> float:
+    return _WIDE_DIAGRAM_SCALE if right_rail.is_wide(shell) else 1.0
+
+
+def _scaled(value: float, scale: float) -> int:
+    return int(round(value * scale))
+
+
+def _apply_node_scale(node, scale: float) -> None:
+    if scale == 1.0:
+        return
+    try:
+        dpg.apply_transform(node, dpg.create_scale_matrix([scale, scale]))
+    except Exception:  # noqa: BLE001 - scaling is cosmetic; keep the diagram visible
+        logger.debug("Live-verify diagram scale skipped", exc_info=True)
 
 
 def _build_workspace_controls(shell) -> None:
@@ -805,9 +858,13 @@ def _refresh_workspace_view_buttons(shell) -> None:
 def _build_demoted_live_cards(shell, state: "_LiveVerifyState") -> None:
     """Keep the legacy numeric/live-write surfaces one disclosure below."""
 
+    open_binding_guide = bool(getattr(shell, "live_verify_binding_guide_open", False))
+    if open_binding_guide:
+        shell.live_verify_binding_guide_open = False
     with dpg.collapsing_header(
         label=t("diagnostics.live_verify.binding_guide.title"),
-        default_open=False,
+        default_open=open_binding_guide,
+        tag="live_verify_binding_guide_header",
     ):
         _build_on_device_binding_guide(shell)
     with dpg.collapsing_header(
@@ -1481,121 +1538,124 @@ def _render_face_diagram(shell, *, show: bool = True) -> None:
         color=shell.COLORS["muted"],
         show=show,
     )
+    scale = _diagram_scale(shell)
     with dpg.drawlist(
-        width=_FACE_DIAGRAM_W,
-        height=_FACE_DIAGRAM_H,
+        width=_scaled(_FACE_DIAGRAM_W, scale),
+        height=_scaled(_FACE_DIAGRAM_H, scale),
         tag=DIAGRAM_FACE_DRAWLIST_TAG,
         show=show,
     ):
-        muted = shell.COLORS["muted"]
-        text = shell.COLORS["text"]
-        source = shell.COLORS["warn"]
-        _draw_face_shell(shell)
+        with dpg.draw_node(tag="diagram_face_scale_node") as node:
+            muted = shell.COLORS["muted"]
+            text = shell.COLORS["text"]
+            source = shell.COLORS["warn"]
+            _draw_face_shell(shell)
 
-        for target, (p1, p2) in _FACE_TRIGGER_RECTS.items():
-            dpg.draw_rectangle(
-                p1,
-                p2,
-                color=muted,
-                fill=_with_alpha(muted, 28),
-                thickness=2,
-                rounding=6,
-                tag=_face_hotspot_tag(target),
-            )
-            _draw_centered_label(
-                target.name,
-                ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2),
-                text,
-            )
-
-        for target, (p1, p2) in _FACE_BUMPER_RECTS.items():
-            dpg.draw_rectangle(
-                p1,
-                p2,
-                color=muted,
-                fill=_with_alpha(muted, 22),
-                thickness=2,
-                rounding=9,
-                tag=_face_hotspot_tag(target),
-            )
-            _draw_centered_label(
-                target.name,
-                ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2),
-                text,
-                tag=_face_label_tag(target),
-            )
-
-        dpg.draw_circle((280, 188), 12, color=muted, thickness=1)
-        _draw_centered_label(
-            t("diagnostics.live_verify.face_diagram.home"),
-            (280, 168),
-            text,
-            size=13,
-        )
-        for label, (cx, cy) in _FACE_SOURCE_LABELS.items():
-            dpg.draw_rectangle(
-                (cx - 20, cy - 11),
-                (cx + 20, cy + 11),
-                color=source,
-                fill=_with_alpha(source, 20),
-                thickness=1,
-                rounding=5,
-            )
-            _draw_centered_label(label, (cx, cy), source, size=13)
-        dpg.draw_text(
-            (166, 360),
-            t("diagnostics.live_verify.face_diagram.source_note"),
-            color=muted,
-            size=12,
-            tag=DIAGRAM_FACE_SOURCE_NOTE_TAG,
-        )
-
-        for target, (cx, cy) in _FACE_BUTTON_POS.items():
-            if target in _FACE_BUMPER_RECTS:
-                continue
-            radius = (
-                _FACE_STICK_R
-                if target in (ControllerButtonTarget.LS, ControllerButtonTarget.RS)
-                else _FACE_BUTTON_R
-            )
-            if target in _FACE_DPAD_TARGETS:
-                _draw_dpad_facet(target, (cx, cy), muted)
-            elif target in (ControllerButtonTarget.LS, ControllerButtonTarget.RS):
-                _draw_stick_collar((cx, cy), muted, _face_hotspot_tag(target))
-            else:
-                dpg.draw_circle(
-                    (cx, cy),
-                    radius,
+            for target, (p1, p2) in _FACE_TRIGGER_RECTS.items():
+                dpg.draw_rectangle(
+                    p1,
+                    p2,
                     color=muted,
-                    fill=_with_alpha(muted, 34),
-                    thickness=2.0,
+                    fill=_with_alpha(muted, 28),
+                    thickness=2,
+                    rounding=6,
                     tag=_face_hotspot_tag(target),
                 )
+                _draw_centered_label(
+                    target.name,
+                    ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2),
+                    text,
+                )
+
+            for target, (p1, p2) in _FACE_BUMPER_RECTS.items():
+                dpg.draw_rectangle(
+                    p1,
+                    p2,
+                    color=muted,
+                    fill=_with_alpha(muted, 22),
+                    thickness=2,
+                    rounding=9,
+                    tag=_face_hotspot_tag(target),
+                )
+                _draw_centered_label(
+                    target.name,
+                    ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2),
+                    text,
+                    tag=_face_label_tag(target),
+                )
+
+            dpg.draw_circle((280, 188), 12, color=muted, thickness=1)
             _draw_centered_label(
-                target.name,
-                _FACE_LABEL_POS_OVERRIDES.get(target, (cx, cy - radius - 13)),
+                t("diagnostics.live_verify.face_diagram.home"),
+                (280, 168),
                 text,
-                tag=_face_label_tag(target),
+                size=13,
             )
-
-        for side, (cx, cy) in _FACE_STICK_CENTERS.items():
-            dpg.draw_circle(
-                (cx, cy),
-                _FACE_STICK_DOT_R,
-                color=muted,
-                fill=muted,
-                tag=_face_stick_dot_tag(side),
-            )
-
-        for target in _FRONT_BINDING_BADGE_TARGETS:
+            for label, (cx, cy) in _FACE_SOURCE_LABELS.items():
+                dpg.draw_rectangle(
+                    (cx - 20, cy - 11),
+                    (cx + 20, cy + 11),
+                    color=source,
+                    fill=_with_alpha(source, 20),
+                    thickness=1,
+                    rounding=5,
+                )
+                _draw_centered_label(label, (cx, cy), source, size=13)
             dpg.draw_text(
-                _front_binding_badge_pos(target),
-                "",
-                color=shell.COLORS["accent"],
-                size=_BINDING_BADGE_SIZE,
-                show=False,
-                tag=_face_binding_badge_tag(target),
+                (166, 360),
+                t("diagnostics.live_verify.face_diagram.source_note"),
+                color=muted,
+                size=12,
+                tag=DIAGRAM_FACE_SOURCE_NOTE_TAG,
             )
+
+            for target, (cx, cy) in _FACE_BUTTON_POS.items():
+                if target in _FACE_BUMPER_RECTS:
+                    continue
+                radius = (
+                    _FACE_STICK_R
+                    if target in (ControllerButtonTarget.LS, ControllerButtonTarget.RS)
+                    else _FACE_BUTTON_R
+                )
+                if target in _FACE_DPAD_TARGETS:
+                    _draw_dpad_facet(target, (cx, cy), muted)
+                elif target in (ControllerButtonTarget.LS, ControllerButtonTarget.RS):
+                    _draw_stick_collar((cx, cy), muted, _face_hotspot_tag(target))
+                else:
+                    dpg.draw_circle(
+                        (cx, cy),
+                        radius,
+                        color=muted,
+                        fill=_with_alpha(muted, 34),
+                        thickness=2.0,
+                        tag=_face_hotspot_tag(target),
+                    )
+                _draw_centered_label(
+                    target.name,
+                    _FACE_LABEL_POS_OVERRIDES.get(target, (cx, cy - radius - 13)),
+                    text,
+                    tag=_face_label_tag(target),
+                )
+
+            for side, (cx, cy) in _FACE_STICK_CENTERS.items():
+                dpg.draw_circle(
+                    (cx, cy),
+                    _FACE_STICK_DOT_R,
+                    color=muted,
+                    fill=muted,
+                    tag=_face_stick_dot_tag(side),
+                )
+
+            for target in _FRONT_BINDING_BADGE_TARGETS:
+                dpg.draw_text(
+                    _front_binding_badge_pos(target),
+                    "",
+                    color=shell.COLORS["accent"],
+                    size=_BINDING_BADGE_SIZE,
+                    show=False,
+                    tag=_face_binding_badge_tag(target),
+                )
+        _apply_node_scale(node, scale)
 
     _bind_diagram_click_handler(shell, _WORKSPACE_VIEW_FRONT)
 
@@ -1603,7 +1663,7 @@ def _render_face_diagram(shell, *, show: bool = True) -> None:
         t("diagnostics.live_verify.face_diagram.note"),
         tag=LIVE_VERIFY_FRONT_NOTE_TAG,
         color=shell.COLORS["muted"],
-        wrap=_FACE_DIAGRAM_W,
+        wrap=_scaled(_FACE_DIAGRAM_W, scale),
         show=show,
     )
 
@@ -1611,6 +1671,7 @@ def _render_face_diagram(shell, *, show: bool = True) -> None:
 def _render_back_diagram(shell, *, show: bool = False) -> None:
     """Code-drawn BACK view: static paddle slots + cached binding badges only."""
 
+    scale = _diagram_scale(shell)
     dpg.add_text(
         t("diagnostics.live_verify.back_diagram.title"),
         tag=LIVE_VERIFY_BACK_TITLE_TAG,
@@ -1618,72 +1679,74 @@ def _render_back_diagram(shell, *, show: bool = False) -> None:
         show=show,
     )
     with dpg.drawlist(
-        width=_BACK_DIAGRAM_W,
-        height=_BACK_DIAGRAM_H,
+        width=_scaled(_BACK_DIAGRAM_W, scale),
+        height=_scaled(_BACK_DIAGRAM_H, scale),
         tag=DIAGRAM_BACK_DRAWLIST_TAG,
         show=show,
     ):
-        muted = shell.COLORS["muted"]
-        text = shell.COLORS["text"]
-        _draw_back_shell(shell)
+        with dpg.draw_node(tag="diagram_back_scale_node") as node:
+            muted = shell.COLORS["muted"]
+            text = shell.COLORS["text"]
+            _draw_back_shell(shell)
 
-        label_size = int(BACK_LABEL_SIZE * _BACK_VIEW_SCALE)
-        for slot in _BACK_PADDLE_SLOTS:
-            cx, cy = _back_paddle_center(slot)
-            label = f"{slot.name}*" if slot in BACK_PADDLE_APPROX else slot.name
-            if slot in BACK_PADDLE_APPROX:
-                _draw_smooth_polygon(
-                    _back_view_points(_back_claw_points(slot)),
-                    color=muted,
-                    fill=_with_alpha(muted, 28),
-                    thickness=2.0,
-                    tag=_back_hotspot_tag(slot),
-                )
-                dpg.draw_line(
-                    _back_view_point(
-                        (
-                            BACK_PADDLE_POS[slot][0] - 18,
-                            BACK_PADDLE_POS[slot][1] + 12,
-                        )
+            label_size = int(BACK_LABEL_SIZE * _BACK_VIEW_SCALE)
+            for slot in _BACK_PADDLE_SLOTS:
+                cx, cy = _back_paddle_center(slot)
+                label = f"{slot.name}*" if slot in BACK_PADDLE_APPROX else slot.name
+                if slot in BACK_PADDLE_APPROX:
+                    _draw_smooth_polygon(
+                        _back_view_points(_back_claw_points(slot)),
+                        color=muted,
+                        fill=_with_alpha(muted, 28),
+                        thickness=2.0,
+                        tag=_back_hotspot_tag(slot),
+                    )
+                    dpg.draw_line(
+                        _back_view_point(
+                            (
+                                BACK_PADDLE_POS[slot][0] - 18,
+                                BACK_PADDLE_POS[slot][1] + 12,
+                            )
+                        ),
+                        _back_view_point(
+                            (
+                                BACK_PADDLE_POS[slot][0] + 18,
+                                BACK_PADDLE_POS[slot][1] + 12,
+                            )
+                        ),
+                        color=_with_alpha(muted, 120),
+                        thickness=1.0,
+                    )
+                else:
+                    p1, p2 = _back_paddle_bounds(slot)
+                    _draw_rounded_polygon(
+                        _back_view_point(p1),
+                        _back_view_point(p2),
+                        10 * _BACK_VIEW_SCALE,
+                        color=muted,
+                        fill=_with_alpha(muted, 26),
+                        thickness=2.0,
+                        tag=_back_hotspot_tag(slot),
+                    )
+                dpg.draw_text(
+                    (
+                        cx - len(label) * label_size * 0.25,
+                        cy - label_size * 0.5,
                     ),
-                    _back_view_point(
-                        (
-                            BACK_PADDLE_POS[slot][0] + 18,
-                            BACK_PADDLE_POS[slot][1] + 12,
-                        )
-                    ),
-                    color=_with_alpha(muted, 120),
-                    thickness=1.0,
+                    label,
+                    color=text,
+                    size=label_size,
+                    tag=_back_label_tag(slot),
                 )
-            else:
-                p1, p2 = _back_paddle_bounds(slot)
-                _draw_rounded_polygon(
-                    _back_view_point(p1),
-                    _back_view_point(p2),
-                    10 * _BACK_VIEW_SCALE,
+                dpg.draw_text(
+                    _back_binding_badge_pos(slot),
+                    "",
                     color=muted,
-                    fill=_with_alpha(muted, 26),
-                    thickness=2.0,
-                    tag=_back_hotspot_tag(slot),
+                    size=_BACK_BADGE_SIZE,
+                    show=False,
+                    tag=_back_binding_badge_tag(slot),
                 )
-            dpg.draw_text(
-                (
-                    cx - len(label) * label_size * 0.25,
-                    cy - label_size * 0.5,
-                ),
-                label,
-                color=text,
-                size=label_size,
-                tag=_back_label_tag(slot),
-            )
-            dpg.draw_text(
-                _back_binding_badge_pos(slot),
-                "",
-                color=muted,
-                size=_BACK_BADGE_SIZE,
-                show=False,
-                tag=_back_binding_badge_tag(slot),
-            )
+        _apply_node_scale(node, scale)
 
     _bind_diagram_click_handler(shell, _WORKSPACE_VIEW_BACK)
 
@@ -1691,7 +1754,7 @@ def _render_back_diagram(shell, *, show: bool = False) -> None:
         t("diagnostics.live_verify.back_diagram.note"),
         tag=LIVE_VERIFY_BACK_NOTE_TAG,
         color=shell.COLORS["muted"],
-        wrap=_BACK_DIAGRAM_W,
+        wrap=_scaled(_BACK_DIAGRAM_W, scale),
         show=show,
     )
 
@@ -1699,6 +1762,7 @@ def _render_back_diagram(shell, *, show: bool = False) -> None:
 def _render_top_diagram(shell, *, show: bool = False) -> None:
     """Code-drawn TOP view: live shoulders/triggers + source-only claws."""
 
+    scale = _diagram_scale(shell)
     dpg.add_text(
         t("diagnostics.live_verify.top_diagram.title"),
         tag=LIVE_VERIFY_TOP_TITLE_TAG,
@@ -1706,49 +1770,51 @@ def _render_top_diagram(shell, *, show: bool = False) -> None:
         show=show,
     )
     with dpg.drawlist(
-        width=_TOP_DIAGRAM_W,
-        height=_TOP_DIAGRAM_H,
+        width=_scaled(_TOP_DIAGRAM_W, scale),
+        height=_scaled(_TOP_DIAGRAM_H, scale),
         tag=DIAGRAM_TOP_DRAWLIST_TAG,
         show=show,
     ):
-        muted = shell.COLORS["muted"]
-        text = shell.COLORS["text"]
-        source = shell.COLORS["warn"]
-        _draw_top_shell(shell)
-        for label in _TOP_CONTROLS:
-            p1, p2 = _top_control_bounds(label)
-            source_only = label in _TOP_SOURCE_SLOTS
-            color = source if source_only else muted
-            _draw_rounded_polygon(
-                p1,
-                p2,
-                10,
-                color=color,
-                fill=_with_alpha(color, 24 if source_only else 30),
-                thickness=2,
-                tag=_top_hotspot_tag(label),
-            )
-            if source_only:
-                dpg.draw_line(
-                    (p1[0] + 10, p2[1] - 8),
-                    (p2[0] - 10, p2[1] - 8),
-                    color=source,
-                    thickness=1,
+        with dpg.draw_node(tag="diagram_top_scale_node") as node:
+            muted = shell.COLORS["muted"]
+            text = shell.COLORS["text"]
+            source = shell.COLORS["warn"]
+            _draw_top_shell(shell)
+            for label in _TOP_CONTROLS:
+                p1, p2 = _top_control_bounds(label)
+                source_only = label in _TOP_SOURCE_SLOTS
+                color = source if source_only else muted
+                _draw_rounded_polygon(
+                    p1,
+                    p2,
+                    10,
+                    color=color,
+                    fill=_with_alpha(color, 24 if source_only else 30),
+                    thickness=2,
+                    tag=_top_hotspot_tag(label),
                 )
-            _draw_centered_label(
-                label,
-                ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2),
-                text,
-                tag=_top_label_tag(label),
-            )
-            dpg.draw_text(
-                _top_binding_badge_pos(label),
-                "",
-                color=shell.COLORS["accent"],
-                size=_TOP_BADGE_SIZE,
-                show=False,
-                tag=_top_binding_badge_tag(label),
-            )
+                if source_only:
+                    dpg.draw_line(
+                        (p1[0] + 10, p2[1] - 8),
+                        (p2[0] - 10, p2[1] - 8),
+                        color=source,
+                        thickness=1,
+                    )
+                _draw_centered_label(
+                    label,
+                    ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2),
+                    text,
+                    tag=_top_label_tag(label),
+                )
+                dpg.draw_text(
+                    _top_binding_badge_pos(label),
+                    "",
+                    color=shell.COLORS["accent"],
+                    size=_TOP_BADGE_SIZE,
+                    show=False,
+                    tag=_top_binding_badge_tag(label),
+                )
+        _apply_node_scale(node, scale)
 
     _bind_diagram_click_handler(shell, _WORKSPACE_VIEW_TOP)
 
@@ -1756,7 +1822,7 @@ def _render_top_diagram(shell, *, show: bool = False) -> None:
         t("diagnostics.live_verify.top_diagram.note"),
         tag=LIVE_VERIFY_TOP_NOTE_TAG,
         color=shell.COLORS["muted"],
-        wrap=_TOP_DIAGRAM_W,
+        wrap=_scaled(_TOP_DIAGRAM_W, scale),
         show=show,
     )
 
@@ -2325,6 +2391,9 @@ def _handle_diagram_click(shell, view: str) -> None:
     point = _diagram_local_mouse_pos(drawlist_tag)
     if point is None:
         return
+    scale = _diagram_scale(shell)
+    if scale != 1.0:
+        point = (point[0] / scale, point[1] / scale)
     control = _diagram_control_at_point(view, point)
     if control is None:
         return

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
@@ -9,6 +13,8 @@ import dearpygui.dearpygui as dpg
 from tests.r2_shell_test_helpers import empty_snapshot, make_shell
 from zd_app.i18n import set_locale, t
 from zd_app.models import DeviceState
+from zd_app.ui import trust_front_door
+from zd_app.ui.fonts import bind_default_font, register_fonts
 from zd_app.ui.screens import home
 
 
@@ -163,12 +169,9 @@ class HomeScreenTests(unittest.TestCase):
             dpg.destroy_context()
 
         titles = [call.args[0] for call in mock_section_title.call_args_list]
-        self.assertIn(t("home.connection.title"), titles)
-        self.assertIn(t("home.profile.title"), titles)
+        self.assertIn(t("home.orientation.title"), titles)
+        self.assertIn(t("home.status.title"), titles)
         self.assertIn(t("home.recent.title"), titles)
-        # The former separate "Quick Actions" + "Next step" cards were merged
-        # into one content-fit actions card titled "Next step" (home.cta.title)
-        # with Health Check emphasized — see home._actions_card.
         self.assertIn(t("home.cta.title"), titles)
 
     def test_home_cards_use_flexible_width_not_fixed_520(self) -> None:
@@ -213,8 +216,8 @@ class HomeScreenTests(unittest.TestCase):
             dpg.destroy_context()
 
     def test_home_connection_card_renders_firmware_and_battery_as_metrics(self) -> None:
-        # The connection stats route through the metric() component; the values
-        # the device service reports should appear verbatim somewhere on screen.
+        # The compact device/profile status card still routes firmware and
+        # battery through metric() and shows the cached service values verbatim.
         shell = make_shell(settings_service=MagicMock())
         shell.device_service.state.connection_state = "connected"
         shell.device_service.state.last_read_time = "2026-05-31T00:00:00"
@@ -260,6 +263,8 @@ class HomeLowerDashboardTests(unittest.TestCase):
 
             values = _all_text_values()
             self.assertIn(t("home.cta.title"), values)
+            self.assertIn(t("home.orientation.what"), values)
+            self.assertIn(t("home.orientation.stance"), values)
             # The dropped summary row's titles must no longer appear on Home.
             # (Asserted as literals — the home.health.*/home.restore.* keys were
             # deleted as orphans when the summary row was removed.)
@@ -277,12 +282,10 @@ class HomeLowerDashboardTests(unittest.TestCase):
             dpg.destroy_context()
 
     def test_actions_card_preserves_every_quick_and_cta_button(self) -> None:
-        # Merging "Quick Actions" + "Next step" must not drop any action. Every
-        # button + target from BOTH former cards survives: Health Check, Read
-        # controller state, Open Controller settings, View diagnostics, About.
-        # ("Read controller state" was doubled across the two former cards; the
-        # merge dedupes it to one, but it must still be present.)
+        # The state-branching next-step card keeps the read/verify path first
+        # while preserving the major navigation exits.
         shell = make_shell(settings_service=MagicMock())
+        shell.device_service.state.connection_state = "connected"
         shell.device_service.recent_events.return_value = []
 
         dpg.create_context()
@@ -301,13 +304,127 @@ class HomeLowerDashboardTests(unittest.TestCase):
 
         for key in (
             "nav.health_report",
-            "home.quick.read",
+            "home.orientation.read_settings",
+            "home.orientation.open_live_verify",
             "home.quick.controller",
-            "home.quick.diagnostics",
-            "home.quick.about",
         ):
             with self.subTest(button=key):
                 self.assertIn(t(key), button_labels)
+
+    def test_actions_card_branches_to_connect_guidance_without_controller(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        shell.device_service.state.connection_state = "no_device"
+        shell.device_service.recent_events.return_value = []
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            home.build(shell, "content_region")
+            values = _all_text_values()
+        finally:
+            dpg.destroy_context()
+
+        self.assertIn(t("home.orientation.no_controller_cta"), values)
+        self.assertIn(t("home.cta.no_controller_helper"), values)
+
+    def test_home_state_explainer_renders_compact_honest_lines(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        shell.device_service.recent_events.return_value = []
+        shell.profile_service.pending_changes_count.return_value = 0
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            home.build(shell, "content_region")
+
+            values = _all_text_values()
+            self.assertTrue(dpg.does_item_exist("home_state_explainer"))
+            self.assertIn(t("home.state_explainer.connected"), values)
+            self.assertIn(t("home.state_explainer.firmware_unknown"), values)
+            self.assertIn(t("home.state_explainer.profile_not_verified"), values)
+            self.assertIn(t("home.state_explainer.pending_changes", count=0), values)
+        finally:
+            dpg.destroy_context()
+
+    def test_home_trust_front_door_routes_to_diagnostics_guidance(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        shell.device_service.recent_events.return_value = []
+        shell.switch_screen = MagicMock()
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            home.build(shell, "content_region")
+
+            values = _all_text_values()
+            self.assertTrue(dpg.does_item_exist("home_trust_front_door_card"))
+            self.assertIn(t("home.trust_front_door.title"), values)
+            for link in trust_front_door.TRUST_FRONT_DOOR_LINKS:
+                tag = trust_front_door.button_tag("home_trust_front_door", link.target)
+                self.assertTrue(dpg.does_item_exist(tag), f"missing {tag}")
+                label = dpg.get_item_configuration(tag)["label"]
+                self.assertEqual(label, t(link.label_key))
+
+            target = "evidence_card"
+            callback = dpg.get_item_callback(
+                trust_front_door.button_tag("home_trust_front_door", target)
+            )
+            callback("sender", None, None)
+        finally:
+            dpg.destroy_context()
+
+        self.assertEqual(shell.diagnostics_active_tab, "guidance")
+        self.assertEqual(
+            getattr(shell, trust_front_door.TRUST_FRONT_DOOR_FOCUS_ATTR),
+            target,
+        )
+        shell.switch_screen.assert_called_once_with("diagnostics")
+
+    def test_home_reference_height_budget_runs_isolated(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        test_id = (
+            "tests.isolated_home_reference_height."
+            "IsolatedHomeReferenceHeightTest."
+            "test_home_reference_height_has_no_scrollbar_with_trust_blocks"
+        )
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "unittest", test_id],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired as exc:
+            output_parts: list[str] = []
+            for part in (exc.stdout, exc.stderr):
+                if isinstance(part, bytes):
+                    output_parts.append(part.decode(errors="replace"))
+                elif part:
+                    output_parts.append(part)
+            output = "\n".join(output_parts)
+            self.fail(
+                "Native render hang reproduced in isolation for the first time. "
+                "See zd_research/_wide_layout_hang_investigation_2026-07-02.md."
+                + (f"\n\nChild output before timeout:\n{output}" if output else "")
+            )
+
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part)
+        if any(line.strip() == "OK" for line in output.splitlines()):
+            return
+
+        self.fail(
+            "Isolated Home reference-height test did not report unittest OK.\n"
+            f"Return code: {result.returncode}\n"
+            f"Command: {sys.executable} -m unittest {test_id}\n\n"
+            f"Child output:\n{output}"
+        )
 
 
 class HomeDisclaimerTests(unittest.TestCase):

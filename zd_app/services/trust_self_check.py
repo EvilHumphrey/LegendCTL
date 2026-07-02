@@ -21,6 +21,7 @@ NETWORK_IMPORT_ROOTS = ("socket", "http", "urllib", "requests", "ssl")
 DRIVER_ARTIFACT_SUFFIXES = (".sys", ".inf")
 VIRTUAL_DEVICE_NAME_TOKENS = ("vigem", "virtualhid", "vhid", "hidguardian")
 BOUNDARY_TEXT_KEY = "trust_self_check.boundary.session"
+_PATH_ELLIPSIS = "\u2026"
 
 
 @dataclass(frozen=True)
@@ -364,7 +365,9 @@ def _display_path(value: str | Path) -> str:
     text = str(value)
     scrubbed = scrub_paths(text)
     placeholder = _env_placeholder_path(text)
-    return placeholder or scrubbed
+    if placeholder is not None:
+        return _collapse_deep_placeholder_path(placeholder)
+    return scrubbed
 
 
 def _env_placeholder_path(text: str) -> str | None:
@@ -393,6 +396,23 @@ def _replace_path_root(text: str, root: str, placeholder: str) -> str | None:
     if not suffix:
         return placeholder
     return placeholder + "\\" + scrub_paths(suffix)
+
+
+def _collapse_deep_placeholder_path(path: str) -> str:
+    normalized = path.replace("/", "\\")
+    parts = [part for part in normalized.split("\\") if part]
+    if len(parts) <= 3:
+        return path
+    placeholder = parts[0]
+    if not (placeholder.startswith("%") and placeholder.endswith("%")):
+        return path
+    tail = parts[1:]
+    # Collapse only when there is more than one intermediate segment between
+    # the placeholder root and the leaf. This preserves common one-leaf paths
+    # like %APPDATA%\ZDUltimateLegend while hiding portable/dev worktree names.
+    if len(tail) <= 2:
+        return path
+    return f"{placeholder}\\{_PATH_ELLIPSIS}\\{tail[-1]}"
 
 
 def _clean_observed_value(value: object) -> str:

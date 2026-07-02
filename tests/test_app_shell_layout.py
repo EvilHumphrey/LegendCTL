@@ -7,6 +7,7 @@ import dearpygui.dearpygui as dpg
 
 from tests.r2_shell_test_helpers import alias_of, make_shell
 from zd_app.ui import app_shell as app_shell_module
+from zd_app.ui import right_rail
 from zd_app.ui.themes import COLORS
 
 
@@ -338,6 +339,61 @@ class ContentSurfaceScrollbarTests(unittest.TestCase):
         finally:
             dpg.destroy_context()
 
+    def test_wide_home_renders_right_rail_without_root_scrollbar(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        shell.device_service.format_firmware_version.return_value = "Unknown"
+        shell.device_service.summary_source_label_for.return_value = "Not verified"
+
+        dpg.create_context()
+        try:
+            shell._setup_theme()
+            with patch.object(shell, "_viewport_client_width", return_value=2560):
+                shell._build_ui()
+
+            self.assertTrue(dpg.does_item_exist(right_rail.RAIL_TAG))
+            root = (dpg.get_item_children("content_region", 1) or [None])[0]
+            self.assertIsNotNone(root)
+            root_cfg = dpg.get_item_configuration(root)
+            self.assertEqual(root_cfg["width"], -1)
+            self.assertFalse(root_cfg["autosize_x"])
+            self.assertTrue(dpg.get_item_configuration("content_region")["no_scrollbar"])
+            self.assertLessEqual(float(dpg.get_y_scroll_max("content_region")), 0.5)
+            self.assertLessEqual(float(dpg.get_y_scroll_max(root)), 0.5)
+            self.assertLessEqual(float(dpg.get_y_scroll_max("main_window")), 0.5)
+        finally:
+            dpg.destroy_context()
+
+    def test_right_rail_hides_below_threshold_and_refreshes_cached_values(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        shell.device_service.state.connection_state = "connected"
+        shell.device_service.state.connection_mode = "USB"
+        shell.device_service.state.product_name = "ZD Ultimate Legend"
+        shell.device_service.format_firmware_version.return_value = "Unknown"
+        shell.device_service.summary_source_label_for.return_value = "Not verified"
+        shell.profile_service.pending_changes_count.return_value = 0
+
+        dpg.create_context()
+        try:
+            shell._setup_theme()
+            with patch.object(shell, "_viewport_client_width", return_value=1599):
+                shell._build_ui()
+                self.assertFalse(dpg.does_item_exist(right_rail.RAIL_TAG))
+
+            with patch.object(shell, "_viewport_client_width", return_value=1600):
+                shell.rebuild_current_screen()
+                self.assertTrue(dpg.does_item_exist(right_rail.RAIL_TAG))
+                self.assertEqual(
+                    dpg.get_value(right_rail.FIRMWARE_VALUE_TAG),
+                    "Unknown",
+                )
+                shell.device_service.format_firmware_version.return_value = "1.24"
+                shell.profile_service.pending_changes_count.return_value = 3
+                shell.refresh_shell()
+                self.assertEqual(dpg.get_value(right_rail.FIRMWARE_VALUE_TAG), "1.24")
+                self.assertEqual(dpg.get_value(right_rail.PENDING_VALUE_TAG), "3")
+        finally:
+            dpg.destroy_context()
+
 
 class NavRebuildTests(unittest.TestCase):
     def test_reclicking_active_nav_screen_skips_rebuild(self) -> None:
@@ -366,6 +422,84 @@ class NavRebuildTests(unittest.TestCase):
             self.assertEqual(shell._canonical_screen_id(shell.current_screen), "home")
         finally:
             dpg.destroy_context()
+
+
+class ResizeLayoutSchedulingTests(unittest.TestCase):
+    def test_viewport_resize_callback_only_queues_layout_drain(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        fake_dpg = MagicMock()
+
+        with patch.object(app_shell_module, "dpg", fake_dpg):
+            shell._bind_viewport_resize_callback()
+            callback = fake_dpg.set_viewport_resize_callback.call_args.args[0]
+            callback("sender", None)
+
+        self.assertTrue(shell._resize_shell_layout_pending)
+        fake_dpg.configure_item.assert_not_called()
+
+    def test_resize_drain_rebuilds_rail_only_on_band_change(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        shell.device_service.format_firmware_version.return_value = "Unknown"
+        shell.device_service.summary_source_label_for.return_value = "Not verified"
+
+        dpg.create_context()
+        try:
+            shell._setup_theme()
+            with patch.object(shell, "_viewport_client_width", return_value=1599):
+                shell._build_ui()
+            self.assertFalse(dpg.does_item_exist(right_rail.RAIL_TAG))
+            self.assertFalse(shell._right_rail_wide_layout_active)
+
+            with patch.object(shell, "_viewport_client_width", return_value=1600), \
+                    patch.object(
+                        shell,
+                        "rebuild_current_screen",
+                        wraps=shell.rebuild_current_screen,
+                    ) as rebuild:
+                shell._queue_resize_shell_layout()
+                shell._drain_resize_shell_layout()
+                self.assertEqual(rebuild.call_count, 1)
+                self.assertTrue(shell._right_rail_wide_layout_active)
+                self.assertTrue(dpg.does_item_exist(right_rail.RAIL_TAG))
+
+                shell._queue_resize_shell_layout()
+                shell._drain_resize_shell_layout()
+                self.assertEqual(rebuild.call_count, 1)
+        finally:
+            dpg.destroy_context()
+
+    def test_reentrant_rail_rebuild_defers_without_advancing_band_cache(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        shell.current_screen = "home"
+        shell._right_rail_wide_layout_active = False
+        shell._right_rail_rebuild_in_progress = True
+
+        with patch.object(right_rail, "screen_wide_state", return_value=True), \
+                patch.object(shell, "rebuild_current_screen") as rebuild:
+            shell._rebuild_if_right_rail_threshold_crossed()
+
+        self.assertFalse(shell._right_rail_wide_layout_active)
+        self.assertTrue(shell._resize_shell_layout_pending)
+        rebuild.assert_not_called()
+
+
+class RightRailGeometryTests(unittest.TestCase):
+    def test_live_verify_rail_requires_room_for_larger_work_column(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        with patch.object(shell, "_viewport_client_width", return_value=1600):
+            self.assertTrue(right_rail.screen_wide_state(shell, "home"))
+            self.assertFalse(right_rail.screen_wide_state(shell, "live_verify"))
+
+    def test_trailing_spacer_keeps_at_least_the_rail_gap(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        with patch.object(shell, "_viewport_client_width", return_value=1600):
+            self.assertGreaterEqual(
+                right_rail.trailing_spacer_width(
+                    shell,
+                    right_rail.WORK_COLUMN_WIDTH,
+                ),
+                right_rail.RAIL_GAP,
+            )
 
 
 if __name__ == "__main__":

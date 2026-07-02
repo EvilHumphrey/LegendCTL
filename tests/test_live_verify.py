@@ -42,6 +42,7 @@ from zd_app.services.settings_service import (
 )
 from zd_app.services.xinput_poll_service import XInputSnapshot
 from zd_app.ui import components, typography
+from zd_app.ui import right_rail
 from zd_app.ui.app_shell import AppShell
 from zd_app.ui.screens import diagnostics, live_verify
 
@@ -203,6 +204,13 @@ def _configure_calls(fake, tag) -> list[dict]:
         for call in fake.configure_item.call_args_list
         if call.args and call.args[0] == tag
     ]
+
+
+def _collapsing_header_call(fake, tag) -> dict:
+    for call in fake.collapsing_header.call_args_list:
+        if call.kwargs.get("tag") == tag:
+            return call.kwargs
+    raise AssertionError(f"missing collapsing_header call for {tag}")
 
 
 def _bounds_center(bounds):
@@ -764,6 +772,28 @@ class LiveVerifyScreenBuildTests(unittest.TestCase):
         finally:
             dpg.destroy_context()
 
+    def test_wide_viewport_renders_rail_and_scaled_workspace(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        shell._xinput_poll_service = _FakeXInputService(_live_snap())
+        shell._viewport_client_width = lambda: 2560
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            live_verify.build(shell, "content_region")
+
+            self.assertTrue(dpg.does_item_exist(right_rail.RAIL_TAG))
+            self.assertTrue(dpg.does_item_exist("live_verify_work_column"))
+            face_cfg = dpg.get_item_configuration(live_verify.DIAGRAM_FACE_DRAWLIST_TAG)
+            self.assertGreater(face_cfg["width"], live_verify._FACE_DIAGRAM_W)
+            self.assertEqual(
+                face_cfg["width"],
+                int(round(live_verify._FACE_DIAGRAM_W * live_verify._WIDE_DIAGRAM_SCALE)),
+            )
+        finally:
+            dpg.destroy_context()
+
     def test_builds_when_xinput_unavailable(self) -> None:
         dpg.create_context()
         try:
@@ -844,6 +874,34 @@ class LiveVerifyFrameCallbackTests(unittest.TestCase):
         _shell, service, fake = self._build_with_fake(_live_snap())
         self.assertEqual(len(fake._registered), 1)
         self.assertGreaterEqual(service.started, 1)
+
+    def test_binding_guide_expand_flag_is_consumed_after_first_build(self) -> None:
+        shell = _make_write_shell(settings_service=MagicMock())
+        shell._xinput_poll_service = _FakeXInputService(_live_snap())
+        shell.live_verify_binding_guide_open = True
+        fake = _fake_dpg()
+
+        with patch.object(live_verify, "dpg", fake), patch.object(
+            typography, "dpg", fake
+        ), patch.object(components, "dpg", fake):
+            live_verify.build(shell, "content_region")
+
+        first_header = _collapsing_header_call(
+            fake, "live_verify_binding_guide_header"
+        )
+        self.assertTrue(first_header["default_open"])
+        self.assertFalse(shell.live_verify_binding_guide_open)
+
+        fake.collapsing_header.reset_mock()
+        with patch.object(live_verify, "dpg", fake), patch.object(
+            typography, "dpg", fake
+        ), patch.object(components, "dpg", fake):
+            live_verify.build(shell, "content_region")
+
+        second_header = _collapsing_header_call(
+            fake, "live_verify_binding_guide_header"
+        )
+        self.assertFalse(second_header["default_open"])
 
     def test_tick_reschedules_while_root_exists(self) -> None:
         _shell, service, fake = self._build_with_fake(_live_snap())

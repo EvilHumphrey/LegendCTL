@@ -78,12 +78,40 @@ class SharedHeightFloorTests(unittest.TestCase):
         )
 
     def test_home_top_card_clears_profile_content_floor(self) -> None:
-        # Probe: the taller top card (Profile: 3 metrics + NO_AUTOMATION badge
-        # + 2 buttons) measured 248px in en AND zh-CN; the prior 200 clipped its
-        # buttons by 48px. Shared so the Connection/Profile row stays even.
+        # Probe: the Home row-one status card clipped by 101px when its values
+        # were stacked as individual rows inside the 257px shared card. The card
+        # now keeps that shared orientation/status height and compacts related
+        # values into paired metric rows; shrinking the height would re-risk the
+        # row-one clip at the shipped fonts.
         self.assertGreaterEqual(
-            home_screen._TOP_CARD_HEIGHT, 248,
-            "Home top-card shared height fell below the 248px Profile floor.",
+            home_screen._TOP_CARD_HEIGHT, 257,
+            "Home top-card shared height fell below the compact row-one floor.",
+        )
+
+    def test_home_device_profile_status_card_keeps_compact_row_shape(self) -> None:
+        # The compact Device & profile card must keep the row count that the
+        # 1480x1040 real-viewport probe verified: connection+badge, model,
+        # firmware+battery, active+pending, and draft. Re-expanding those paired
+        # rows resurrects the inner scrollbar without changing the height
+        # constant, so guard the source shape as well as the floor above.
+        src = inspect.getsource(home_screen._device_profile_status_card)
+        self.assertIn('with section(t("home.status.title"), gap=4)', src)
+        self.assertEqual(
+            src.count("_paired_metrics("),
+            2,
+            "Home Device & profile must keep firmware/battery and active/pending "
+            "on paired compact rows.",
+        )
+        self.assertLess(
+            src.index("safe_import_badges.render_badges"),
+            src.index("dpg.add_text(state.product_name"),
+            "The no-automation badge must stay on the connection row, not add "
+            "another vertical row to the compact card.",
+        )
+        self.assertNotRegex(
+            src,
+            r"metric\(\s*t\(\"home\.profile\.pending\"",
+            "Pending changes must stay in the paired compact row.",
         )
 
     def test_wear_ledger_sparkline_clears_content_floor_but_stays_compact(self) -> None:
@@ -99,6 +127,16 @@ class SharedHeightFloorTests(unittest.TestCase):
             wear_ledger_screen._SPARKLINE_CARD_HEIGHT, 200,
             "Wear Ledger sparkline must stay compact (<=200) so it doesn't push "
             "the event-log table below the fold.",
+        )
+
+    def test_diagnostics_status_trust_strip_clears_content_floor(self) -> None:
+        # Probe: the Diagnostics status-tab "Verify it yourself" strip measured
+        # 63px of content; the prior 58px fixed height produced a 5px sliver
+        # scrollbar. Keep a small margin so the trust-link buttons clear.
+        self.assertGreaterEqual(
+            diagnostics_screen._STATUS_TRUST_STRIP_HEIGHT,
+            63,
+            "Diagnostics status trust strip fell below the measured content floor.",
         )
 
 
@@ -210,20 +248,20 @@ class FitContractTests(unittest.TestCase):
         )
 
     def test_home_stacked_cards_use_content_fit(self) -> None:
-        # Home's variable-height stacked cards — Recent Activity and the merged
-        # actions card (former "Quick Actions" + "Next step") — are content-fit
-        # so they never grow an inner scrollbar, and the merge is what keeps
-        # Home's content extent under the un-maximized clip (measured 950 -> 816
-        # at the shipped fonts, DPG 2.3). They build via the card(fit=True)
-        # helper, not a fixed card(height=...).
+        # Home's variable-height stacked cards — the trust front door, Recent
+        # Activity, and the merged actions card (former "Quick Actions" + "Next
+        # step") — are content-fit so they never grow an inner scrollbar. They
+        # build via the card(fit=True) helper, not a fixed card(height=...).
         for label, func in (
+            ("trust front door", home_screen._trust_front_door_card),
             ("recent activity", home_screen._recent_activity),
             ("actions card", home_screen._actions_card),
         ):
             with self.subTest(card=label):
                 src = inspect.getsource(func)
-                self.assertIn(
-                    "card(fit=True)", src,
+                self.assertRegex(
+                    src,
+                    r"card\(fit=True\b",
                     f"home {label}: must build via card(fit=True) so it can't clip.",
                 )
                 self.assertNotRegex(
@@ -231,6 +269,23 @@ class FitContractTests(unittest.TestCase):
                     f"home {label}: a fixed card height reintroduces the clip / "
                     "page-overflow this trim removed.",
                 )
+
+    def test_home_trust_front_door_budget_uses_compact_default_rows(self) -> None:
+        # The Home no-scrollbar budget is verified with a real 1480x1040 DPG
+        # render in test_screens_home. These source guards pin the assumptions
+        # that make that measured fit durable: the new proof-loop card stays a
+        # compact visible row, the Actions hub stays one row, and the Home-only
+        # inter-block gap stays below the global 16px section gap.
+        self.assertLessEqual(home_screen._HOME_STACK_GAP, 6)
+
+        trust_src = inspect.getsource(home_screen._trust_front_door_card)
+        self.assertIn("dpg.group(horizontal=True)", trust_src)
+        self.assertNotIn("home.trust_front_door.helper", trust_src)
+
+        actions_src = inspect.getsource(home_screen._actions_card)
+        self.assertLessEqual(actions_src.count("dpg.group(horizontal=True)"), 2)
+        self.assertIn("home.cta.connected_helper", actions_src)
+        self.assertIn("home.cta.no_controller_helper", actions_src)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -102,6 +102,7 @@ from zd_app.storage.snapshot_codec import snapshot_to_dict
 from zd_app.storage.wrapper_profile_store import WrapperProfileError, WrapperProfileStore
 from zd_app.ui import (
     diagnostic_bundle_preview,
+    right_rail,
     safe_import_model,
     support_reference,
 )
@@ -138,6 +139,26 @@ from zd_app.version import __app_name__, __build_commit__, __version__
 # Device-settings widget/modal tags.
 SAVE_AS_INCLUDE_DEVICE_CHECKBOX = "wrapper_profile_include_device_checkbox"
 APPLY_DEVICE_CONFIRM_MODAL = "apply_device_confirm_modal"
+CLEAR_DIAGNOSTIC_LOGS_CONFIRM_MODAL = "clear_diagnostic_logs_confirm_modal"
+CLEAR_DIAGNOSTIC_LOGS_CONFIRM_BUTTON = "clear_diagnostic_logs_confirm_button"
+CLEAR_DIAGNOSTIC_LOGS_MODAL_SWAP_DELETE_TAGS = (
+    CLEAR_DIAGNOSTIC_LOGS_CONFIRM_MODAL,
+    APPLY_DEVICE_CONFIRM_MODAL,
+    "wrapper_profile_delete_popup",
+    "wrapper_profile_save_as_modal",
+    "support_guide_modal",
+    "crash_review_modal",
+    "first_run_ack_modal",
+    "rename_profile_modal",
+    "import_profile_modal",
+    safe_import.FILE_MODAL,
+    safe_import.PREVIEW_MODAL,
+    safe_import.CONFIRM_MODAL,
+    safe_import.RESULT_MODAL,
+    diagnostic_bundle_preview.PREVIEW_MODAL_TAG,
+    modules_screen.TAG_EXPORT_MODAL,
+    restore_points.TAG_DELETE_CONFIRM_MODAL,
+)
 
 # Fix B (2026-06-24): the dismissible "save changed step_size into the active
 # profile" nudge rendered under the step-size slider row.
@@ -508,6 +529,10 @@ def _resolve_non_strict(path: Path) -> Path:
 
 _DPG_SAFE_WINDOW_TITLE = "LegendCTL - ZD Ultimate Legend"
 _TOP_STATUS_BAR_HEIGHT = 40
+_WINDOWED_VIEWPORT_WIDTH = 1480
+_WINDOWED_VIEWPORT_HEIGHT = 1040
+_WINDOWED_VIEWPORT_MIN_WIDTH = 1180
+_WINDOWED_VIEWPORT_MIN_HEIGHT = 760
 # Footer bar height bumped 48→56 (UI refresh) so the
 # Profile combo + Save As / Apply / Delete / Read buttons + status text get
 # vertical breathing room instead of feeling cramped against the borders.
@@ -534,6 +559,44 @@ _MAIN_WINDOW_VERTICAL_GUTTER = 56
 # frame has rendered the new layout. Doubles as a resize-drag debounce — each
 # resize event resets the countdown, so only the settled size is logged.
 _GEOMETRY_LOG_SETTLE_FRAMES = 3
+
+
+def _primary_display_size() -> tuple[int, int] | None:
+    try:
+        user32 = getattr(getattr(ctypes, "windll", None), "user32", None)
+        if user32 is None:
+            return None
+        width = int(user32.GetSystemMetrics(0))
+        height = int(user32.GetSystemMetrics(1))
+    except Exception:
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def _windowed_viewport_kwargs() -> dict[str, int]:
+    kwargs = {
+        "width": _WINDOWED_VIEWPORT_WIDTH,
+        "height": _WINDOWED_VIEWPORT_HEIGHT,
+        "min_width": _WINDOWED_VIEWPORT_MIN_WIDTH,
+        "min_height": _WINDOWED_VIEWPORT_MIN_HEIGHT,
+    }
+    display_size = _primary_display_size()
+    if display_size is None:
+        return kwargs
+
+    screen_width, screen_height = display_size
+    width = max(_WINDOWED_VIEWPORT_MIN_WIDTH, min(_WINDOWED_VIEWPORT_WIDTH, screen_width))
+    height = max(_WINDOWED_VIEWPORT_MIN_HEIGHT, min(_WINDOWED_VIEWPORT_HEIGHT, screen_height))
+    kwargs.update(
+        width=width,
+        height=height,
+        x_pos=max((screen_width - width) // 2, 0),
+        y_pos=max((screen_height - height) // 2, 0),
+    )
+    return kwargs
+
 
 # Sidebar nav layout. SIDEBAR_WIDTH 200→208 gives EN "Readiness Check" + the
 # zh-CN labels comfortable room; NAV_ACCENT_STRIP_WIDTH carves out the
@@ -1072,7 +1135,10 @@ class AppShell:
         self._title_manager = TitleManager(
             apply_fn=lambda title: set_window_title_unicode(title),
         )
-        self.controller_active_tab = "vibration"
+        self.controller_active_tab = "sticks"
+        self._right_rail_wide_layout_active: bool | None = None
+        self._right_rail_rebuild_in_progress = False
+        self._resize_shell_layout_pending = False
         # Health Report orchestrator. main_zd.py wires a real one using
         # XInput + the live SettingsService; tests can pass an explicit
         # ``health_report_service`` (with a scripted sample provider) or
@@ -1256,28 +1322,24 @@ class AppShell:
         if self.settings_service is not None:
             self.refresh_from_controller()
         title = self.window_title()
-        dpg.create_viewport(title=_DPG_SAFE_WINDOW_TITLE, width=1480, height=1040, min_width=1180, min_height=760)
+        dpg.create_viewport(title=_DPG_SAFE_WINDOW_TITLE, **_windowed_viewport_kwargs())
         self._dpg_viewport_title_seeded = True
         self._bind_viewport_resize_callback()
         dpg.setup_dearpygui()
         dpg.show_viewport()
-        # Open maximized so the app uses the full screen by default: most panels
-        # then fit with no far-right page scrollbar, and the scroll appears only
-        # when genuinely needed (a small/un-maximized window, or a truly tall
-        # screen like Home on a small monitor). The 1480x1040 create_viewport size
-        # is kept as the restore size: un-maximizing yields a window whose
-        # un-maximized content clip (~876px) clears the trimmed Home dashboard
-        # (~816px content at the shipped fonts, DPG 2.3), so dragging off
-        # maximized does NOT bring back the far-right page scrollbar (the prior
-        # 920 restore clipped Home at ~756px). 1040 <= 1080, so the restore size
-        # still fits common smaller monitors. maximize_viewport is
-        # screen-adaptive — it never exceeds the display — so it is safe on small
-        # monitors too. The screen roots are autosize_x, so cards/tables reflow to
-        # the wider width without breaking.
-        dpg.maximize_viewport()
-        # Record the real maximized geometry once the first frames settle
-        # (permanent diagnostic — lets a post-smoke log read recover the
-        # operator's true maximized client height + Home's real y_scroll_max).
+        # Standard windowed launch per operator decision 2026-07-02. The
+        # 1480x1040 budget is the suite-enforced no-scrollbar size; users can
+        # maximize manually, which also activates the wide right rail at >=1600px.
+        # On smaller displays _windowed_viewport_kwargs sizes down to fit while
+        # preserving the minimum usable window.
+        # The UI is built before create_viewport(), so the first Home render uses
+        # the conservative narrow layout. Once the real viewport exists and has
+        # been shown, run the same resize path used by later user resizes so
+        # window-size-specific rails can appear without waiting for another event.
+        self._resize_shell_layout()
+        # Record the real launch geometry once the first frames settle (permanent
+        # diagnostic: lets a post-smoke log read recover the startup client
+        # height + Home's real y_scroll_max).
         self._request_geometry_log("startup")
         self._set_window_title(title)
         # First-run acknowledgment gate (clickwrap): the one-time legal accept
@@ -1586,6 +1648,11 @@ class AppShell:
                 self.current_screen = "home"
                 builder = self.SCREEN_BUILDERS["home"]
             builder(self, "content_region")
+            self._right_rail_wide_layout_active = (
+                right_rail.screen_wide_state(self, self.current_screen)
+                if right_rail.screen_uses_rail(self.current_screen)
+                else None
+            )
             self.refresh_current_screen()
             if self.current_screen == "controller":
                 self._hydrate_current_settings_screen()
@@ -1634,9 +1701,18 @@ class AppShell:
 
     def _bind_viewport_resize_callback(self) -> None:
         try:
-            dpg.set_viewport_resize_callback(lambda *_args: self._resize_shell_layout())
+            dpg.set_viewport_resize_callback(lambda *_args: self._queue_resize_shell_layout())
         except Exception:
             logger.debug("Dear PyGui viewport resize callback skipped", exc_info=True)
+
+    def _queue_resize_shell_layout(self) -> None:
+        self._resize_shell_layout_pending = True
+
+    def _drain_resize_shell_layout(self) -> None:
+        if not self._resize_shell_layout_pending:
+            return
+        self._resize_shell_layout_pending = False
+        self._resize_shell_layout()
 
     def _resize_shell_layout(self) -> None:
         if not dpg.does_item_exist("middle_band"):
@@ -1648,7 +1724,29 @@ class AppShell:
         # Capture the new (e.g. un-maximized) geometry. The settle countdown
         # resets on every resize event, so a continuous drag debounces to one
         # log emitted once the window stops resizing (permanent diagnostic).
+        self._rebuild_if_right_rail_threshold_crossed()
         self._request_geometry_log("resize")
+
+    def _rebuild_if_right_rail_threshold_crossed(self) -> None:
+        screen = self._canonical_screen_id(self.current_screen)
+        if not right_rail.screen_uses_rail(screen):
+            self._right_rail_wide_layout_active = None
+            return
+        wide_now = right_rail.screen_wide_state(self, screen)
+        if self._right_rail_wide_layout_active is None:
+            self._right_rail_wide_layout_active = wide_now
+            return
+        if wide_now == self._right_rail_wide_layout_active:
+            return
+        if self._right_rail_rebuild_in_progress:
+            self._resize_shell_layout_pending = True
+            return
+        self._right_rail_wide_layout_active = wide_now
+        try:
+            self._right_rail_rebuild_in_progress = True
+            self.rebuild_current_screen()
+        finally:
+            self._right_rail_rebuild_in_progress = False
 
     def _middle_band_height(self) -> int:
         viewport_h = self._viewport_client_height()
@@ -1843,6 +1941,7 @@ class AppShell:
         self._set_if_exists("footer_delete_tooltip_text", t("footer.delete.tooltip"))
         if not _apply_status_active(self):
             self._set_if_exists("footer_status_text", last_apply_result)
+        right_rail.refresh(self)
 
     def _set_if_exists(self, tag: str, value) -> None:
         if dpg.does_item_exist(tag):
@@ -4125,7 +4224,7 @@ class AppShell:
         state = self.device_service.state
         screen = self._canonical_screen_id(self.current_screen)
         if screen == "home" and dpg.does_item_exist("home_recent_events"):
-            dpg.set_value("home_recent_events", "\n".join(self.device_service.recent_events(10)) or t("home.recent.empty"))
+            dpg.set_value("home_recent_events", "\n".join(self.device_service.recent_events(5)) or t("home.recent.empty"))
         elif screen == "legacy_buttons":
             # Live button-press state came from the diagnostics input poller,
             # which has been removed (the wrapper no longer does continuous
@@ -4215,6 +4314,10 @@ class AppShell:
         # was torn down, so swaps run teardown here this frame and the
         # create here next frame.
         self._drain_deferred_ui_calls()
+        # Dear PyGui can invoke viewport callbacks from inside the native render
+        # frame. Keep that callback as a coalescing signal, then apply layout
+        # mutations here on the normal render-thread tick.
+        self._drain_resize_shell_layout()
         # Emit a pending geometry snapshot once its settle countdown elapses
         # (permanent diagnostic — see _log_geometry). Render-thread only.
         self._drain_geometry_log()
@@ -5980,6 +6083,49 @@ class AppShell:
         self.refresh_current_screen()
 
     def clear_diagnostic_logs(self) -> None:
+        def cancel_callback(_sender=None, _app_data=None, _user_data=None) -> None:
+            dpg.delete_item(CLEAR_DIAGNOSTIC_LOGS_CONFIRM_MODAL)
+
+        def confirm_callback(_sender=None, _app_data=None, _user_data=None) -> None:
+            self._clear_diagnostic_logs_confirmed()
+
+        def open_fn() -> None:
+            with dpg.window(
+                tag=CLEAR_DIAGNOSTIC_LOGS_CONFIRM_MODAL,
+                label=t("diagnostics.clear_logs_confirm.title"),
+                modal=True,
+                no_close=False,
+                no_resize=True,
+                width=420,
+                height=170,
+            ):
+                dpg.add_text(
+                    t("diagnostics.clear_logs_confirm.body"),
+                    wrap=380,
+                )
+                dpg.add_spacer(height=8)
+                with dpg.group(horizontal=True):
+                    dpg.add_button(
+                        label=t("actions.cancel"),
+                        width=100,
+                        callback=cancel_callback,
+                    )
+                    dpg.add_button(
+                        label=t("diagnostics.clear_logs_confirm.confirm"),
+                        width=120,
+                        tag=CLEAR_DIAGNOSTIC_LOGS_CONFIRM_BUTTON,
+                        callback=confirm_callback,
+                    )
+
+        self._defer_modal_swap(
+            open_fn,
+            delete_tags=CLEAR_DIAGNOSTIC_LOGS_MODAL_SWAP_DELETE_TAGS,
+            key="clear_diagnostic_logs_confirm",
+        )
+
+    def _clear_diagnostic_logs_confirmed(self) -> None:
+        if dpg.does_item_exist(CLEAR_DIAGNOSTIC_LOGS_CONFIRM_MODAL):
+            dpg.delete_item(CLEAR_DIAGNOSTIC_LOGS_CONFIRM_MODAL)
         self.diagnostics_service.clear_event_log()
         self.device_service.clear_event_log()
         self.device_service.log_i18n_event("log.diagnostics.logs_cleared")

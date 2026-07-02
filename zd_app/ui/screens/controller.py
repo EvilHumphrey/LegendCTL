@@ -5,7 +5,7 @@ from __future__ import annotations
 import dearpygui.dearpygui as dpg
 
 from zd_app.i18n import get_locale, t
-from zd_app.ui import safe_import_badges
+from zd_app.ui import right_rail, safe_import_badges
 from zd_app.ui.fonts import font_for
 from zd_app.ui.themes import SPACE_MD, SPACE_LG, SPACE_XL
 from zd_app.ui.components import Column, action_button, table, table_empty_state
@@ -70,7 +70,7 @@ SENSITIVITY_PRESETS = ["Default", "Instant", "Balanced", "Delayed", "High Perfor
 # ``app_shell.SENSITIVITY_PRESETS_8POINT``; these are just the button order +
 # i18n-label stems (``controller.sticks.preset_8point.<name>``).
 SENSITIVITY_PRESETS_8POINT = ["Linear", "Aggressive", "Smooth", "Balanced"]
-CONTROLLER_TAB_IDS = ("vibration", "triggers", "sticks", "buttons", "lighting", "motion", "profiles")
+CONTROLLER_TAB_IDS = ("sticks", "buttons", "triggers", "vibration", "lighting", "motion", "profiles")
 
 # Quarter-point ticks for the 0-100 sensitivity plot axes. Labelled at 0/25/50/
 # 75/100 so the gridlines read as readable quarters of the input/output range
@@ -282,7 +282,13 @@ def _sensitivity_handle_theme(shell):
 
 
 def build(shell, parent: str) -> None:
-    with dpg.child_window(parent=parent, autosize_x=True, autosize_y=True, border=False):
+    with right_rail.rail_screen(
+        shell,
+        parent,
+        screen_id="controller",
+        root_tag="controller_root",
+        work_tag="controller_work_column",
+    ):
         render(shell)
 
 
@@ -300,21 +306,21 @@ def render(shell) -> None:
     dpg.add_spacer(height=8)
 
     with dpg.tab_bar(tag="controller_tab_bar", callback=lambda _s, selected_tab, _u: _remember_active_tab(shell, selected_tab)):
-        with dpg.tab(label=t("controller.tab.vibration"), tag="tab_vibration"):
-            _render_vibration_tab(shell)
-        with dpg.tab(label=t("controller.tab.triggers"), tag="tab_triggers"):
-            _render_triggers_tab(shell)
         with dpg.tab(label=t("controller.tab.sticks"), tag="tab_sticks"):
             _render_sticks_tab(shell)
         with dpg.tab(label=t("controller.tab.buttons"), tag="tab_buttons"):
             _render_buttons_tab(shell)
+        with dpg.tab(label=t("controller.tab.triggers"), tag="tab_triggers"):
+            _render_triggers_tab(shell)
+        with dpg.tab(label=t("controller.tab.vibration"), tag="tab_vibration"):
+            _render_vibration_tab(shell)
         with dpg.tab(label=t("controller.tab.lighting"), tag="tab_lighting"):
             _render_lighting_tab(shell)
         with dpg.tab(label=t("controller.tab.motion"), tag="tab_motion"):
             _render_motion_tab(shell)
         with dpg.tab(label=t("controller.tab.profiles"), tag="tab_profiles"):
             _render_profiles_tab(shell)
-    active_tab_tag = _tab_id_to_tag(getattr(shell, "controller_active_tab", "vibration"))
+    active_tab_tag = _tab_id_to_tag(getattr(shell, "controller_active_tab", "sticks"))
     if dpg.does_item_exist(active_tab_tag):
         dpg.set_value("controller_tab_bar", active_tab_tag)
 
@@ -1013,6 +1019,30 @@ def _render_back_paddles_section(shell) -> None:
         color=shell.COLORS["muted"],
         wrap=720,
     )
+    dpg.add_spacer(height=4)
+    with dpg.collapsing_header(
+        label=t("diagnostics.live_verify.binding_guide.title"),
+        default_open=False,
+        tag="controller_back_paddles_binding_guide",
+    ):
+        def open_binding_guide_callback(
+            _sender=None,
+            _app_data=None,
+            _user_data=None,
+        ) -> None:
+            _open_live_verify_binding_guide(shell)
+
+        dpg.add_text(
+            t("diagnostics.live_verify.binding_guide.framing"),
+            color=shell.COLORS["warn"],
+            wrap=720,
+        )
+        dpg.add_button(
+            label=t("diagnostics.live_verify.open_button"),
+            tag="controller_back_paddles_open_live_verify",
+            width=200,
+            callback=open_binding_guide_callback,
+        )
     dpg.add_spacer(height=12)
 
     target_options = _back_paddle_target_options()
@@ -1067,6 +1097,15 @@ def _back_paddle_target_label(target: ControllerButtonTarget | None) -> str:
     if target is None:
         return t("controller.back_paddles.unbound")
     return t(f"controller.back_paddles.target.{target.name}")
+
+
+def _open_live_verify_binding_guide(shell) -> None:
+    shell.live_verify_binding_guide_open = True
+    switch_screen = getattr(shell, "switch_screen", None)
+    if callable(switch_screen):
+        switch_screen("live_verify")
+    else:
+        shell.current_screen = "live_verify"
 
 
 def _render_controller_diagram_panel(shell) -> None:
@@ -1298,7 +1337,7 @@ def _remember_active_tab(shell, selected_tab) -> None:
 def _tab_id_to_tag(tab_id: str) -> str:
     if tab_id in CONTROLLER_TAB_IDS:
         return f"tab_{tab_id}"
-    return "tab_vibration"
+    return "tab_sticks"
 
 
 def _tab_tag_to_id(tab_tag) -> str:
@@ -1307,7 +1346,7 @@ def _tab_tag_to_id(tab_tag) -> str:
         tab_id = value.removeprefix("tab_")
         if tab_id in CONTROLLER_TAB_IDS:
             return tab_id
-    return "vibration"
+    return "sticks"
 
 
 def _motion_target_display(target: MotionMappingTarget) -> str:

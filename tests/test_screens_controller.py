@@ -21,7 +21,7 @@ from zd_app.services.settings_service import (
     SensitivityAnchor,
     SetButtonBindingOutcome,
 )
-from zd_app.ui import components, typography
+from zd_app.ui import components, right_rail, typography
 from zd_app.ui.screens import controller
 
 
@@ -40,6 +40,13 @@ class ControllerScreenTests(unittest.TestCase):
                 self.assertTrue(dpg.does_item_exist(tag), tag)
         finally:
             dpg.destroy_context()
+
+    def test_controller_tab_order_leads_with_sticks_and_buttons(self) -> None:
+        self.assertEqual(
+            controller.CONTROLLER_TAB_IDS,
+            ("sticks", "buttons", "triggers", "vibration", "lighting", "motion", "profiles"),
+        )
+        self.assertEqual(controller._tab_id_to_tag("bogus"), "tab_sticks")
 
     def test_polling_rate_combo_defaults_to_safe_rate_not_8000(self) -> None:
         # Pre-release hardening: the polling-rate combo must NOT default to
@@ -1580,6 +1587,8 @@ class _ControllerChildWindowRecorder:
         self._cm = None
         self._cm_typo = None
         self._cm_components = None
+        self._cm_right_rail = None
+        self._cm_right_rail_wide = None
 
     def __enter__(self) -> "_ControllerChildWindowRecorder":
         def record_child_window(*_args, **kw):
@@ -1628,9 +1637,17 @@ class _ControllerChildWindowRecorder:
         # patch.multiple on the shared module, so they cover components for free.)
         self._cm_components = patch.object(components, "dpg", fake_dpg)
         self._cm_components.__enter__()
+        self._cm_right_rail = patch.object(right_rail, "dpg", fake_dpg)
+        self._cm_right_rail.__enter__()
+        self._cm_right_rail_wide = patch.object(right_rail, "is_wide", return_value=False)
+        self._cm_right_rail_wide.__enter__()
         return self
 
     def __exit__(self, *exc) -> None:
+        if self._cm_right_rail_wide is not None:
+            self._cm_right_rail_wide.__exit__(*exc)
+        if self._cm_right_rail is not None:
+            self._cm_right_rail.__exit__(*exc)
         if self._cm_components is not None:
             self._cm_components.__exit__(*exc)
         if self._cm_typo is not None:

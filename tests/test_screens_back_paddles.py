@@ -120,6 +120,29 @@ class BackPaddleScreenTests(unittest.TestCase):
         finally:
             dpg.destroy_context()
 
+    def test_binding_guide_link_reuses_live_verify_copy_and_opens_guide(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        shell.switch_screen = MagicMock()
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            controller.build(shell, "content_region")
+
+            labels = _collect_labels("tab_buttons")
+            self.assertIn(t("diagnostics.live_verify.binding_guide.title"), labels)
+            self.assertIn(t("diagnostics.live_verify.binding_guide.framing"), labels)
+            callback = dpg.get_item_callback("controller_back_paddles_open_live_verify")
+            self.assertIsNotNone(callback)
+            callback("sender", None, None)
+        finally:
+            dpg.destroy_context()
+
+        self.assertTrue(shell.live_verify_binding_guide_open)
+        shell.switch_screen.assert_called_once_with("live_verify")
+
     def test_unbound_is_a_dropdown_action_placeholder_is_not(self) -> None:
         # "Unbound" stays a selectable clear ACTION in the dropdown; the unread
         # placeholder is only ever a default, never a pickable target option.

@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.4.0 — 2026-07-02
+
+Context release: a wide-window layout that keeps device / profile / trust state in view beside a
+focused work column, a Home screen reorganized around orientation, and trust surfaces one click
+from anywhere. Display/layout-only — no new wrapper-written settings, no network calls, nothing
+uploaded; same test discipline (full suite green on Python 3.12 / DearPyGui 2.3.1, with the
+real-window layout budget check now process-isolated for determinism).
+
+- **Adaptive context rail.** On windows wider than ~1600px, Home / Controller / Diagnostics /
+  Live Verify show a right-hand rail: device model, connection, firmware, active profile, pending
+  changes, the trust posture line, and one-click Read / Health Check / Trust Self-Check. Narrow
+  windows keep the single-column layout; the rail renders only where it fits.
+- **Home dashboard.** Orientation card (read → verify → then decide about writes) + compact
+  device & profile status + the trust front door + a state-aware next step; connected and
+  no-controller branches each give honest guidance.
+- **Trust front door.** The v2.3.0 verify-it-yourself surfaces are linked from Home, the
+  Diagnostics status tab, and the rail; several trust texts were tightened so each claim states
+  exactly its scope.
+- **Live Verify wide workspace.** Larger canvas + proportionally scaled diagram on wide windows;
+  behavior and honest labels unchanged (XInput output only).
+- **Sticks-first tab order.** Controller opens on Sticks; order: Sticks, Buttons, Triggers,
+  Vibration, Lighting, Motion, Profiles.
+- **Windowed launch.** Starts as a normal centered window at the reference size (sizes down on
+  small displays) instead of maximized.
+
+
 ## v2.3.0 — 2026-07-01
 
 Verify-it-yourself release: the app now demonstrates its local / no-network / no-driver claims,

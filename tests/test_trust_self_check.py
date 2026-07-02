@@ -72,9 +72,50 @@ class TrustSelfCheckEvidenceTests(unittest.TestCase):
         self.assertNotIn("Avery Stone", combined)
         self.assertIn(r"%APPDATA%\ZDUltimateLegend", combined)
         self.assertIn(
-            r"%LOCALAPPDATA%\Programs\LegendCTL\ZD Ultimate Legend.exe",
+            "%LOCALAPPDATA%\\\u2026\\ZD Ultimate Legend.exe",
             combined,
         )
+        self.assertNotIn(r"%LOCALAPPDATA%\Programs\LegendCTL", combined)
+
+    def test_deep_home_rooted_display_path_collapses_intermediate_segments(self) -> None:
+        env = {"USERPROFILE": r"C:\Users\Avery Stone"}
+        with patch.dict(os.environ, env, clear=False):
+            display = trust_self_check._display_path(
+                r"C:\Users\Avery Stone\Documents\claude code"
+                r"\legendctl-cut-2026-06-30\local-install\ZD Ultimate Legend.exe"
+            )
+
+        self.assertEqual(
+            display,
+            "%USERPROFILE%\\\u2026\\ZD Ultimate Legend.exe",
+        )
+        self.assertNotIn("Avery Stone", display)
+        self.assertNotIn("Documents", display)
+        self.assertNotIn("claude code", display)
+        self.assertNotIn("legendctl-cut-2026-06-30", display)
+        self.assertNotIn("local-install", display)
+
+    def test_appdata_single_leaf_display_path_is_unchanged(self) -> None:
+        env = {"APPDATA": r"C:\Users\Avery Stone\AppData\Roaming"}
+        with patch.dict(os.environ, env, clear=False):
+            display = trust_self_check._display_path(
+                r"C:\Users\Avery Stone\AppData\Roaming\ZDUltimateLegend"
+            )
+
+        self.assertEqual(display, r"%APPDATA%\ZDUltimateLegend")
+
+    def test_non_env_program_files_display_path_uses_scrub_fallback(self) -> None:
+        env = {
+            "APPDATA": r"C:\Users\Avery Stone\AppData\Roaming",
+            "LOCALAPPDATA": r"C:\Users\Avery Stone\AppData\Local",
+            "USERPROFILE": r"C:\Users\Avery Stone",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            path = r"C:\Program Files\LegendCTL\ZD Ultimate Legend.exe"
+            display = trust_self_check._display_path(path)
+
+        self.assertEqual(display, trust_self_check.scrub_paths(path))
+        self.assertNotIn("\u2026", display)
 
     def test_forbidden_overclaim_phrases_are_absent(self) -> None:
         result = trust_self_check.build_trust_self_check(now=_NOW)
@@ -118,6 +159,125 @@ class TrustSelfCheckEvidenceTests(unittest.TestCase):
         self.assertIn(r"Legend\|CTL.exe", markdown)
         self.assertNotIn("Avery Stone", markdown)
         self.assertNotIn("2|[demo](x)`", markdown)
+
+    def test_copy_export_markdown_snapshot_stays_byte_identical(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            package_root = Path(tmp) / "zd_app"
+            package_root.mkdir()
+            (package_root / "__init__.py").write_text("", encoding="utf-8")
+            env = {
+                "APPDATA": r"C:\Users\Avery Stone\AppData\Roaming",
+                "USERPROFILE": r"C:\Users\Avery Stone",
+            }
+            with patch.dict(os.environ, env, clear=False), patch.object(
+                trust_self_check.app_version,
+                "__version__",
+                "2.3.1",
+            ), patch.object(
+                trust_self_check.app_version,
+                "__build_commit__",
+                "abc123",
+            ), patch.object(
+                trust_self_check.app_version,
+                "__build_date__",
+                "2026-07-01",
+            ), patch.object(os, "getpid", return_value=4242):
+                result = trust_self_check.build_trust_self_check(
+                    package_root=package_root,
+                    executable_path=(
+                        r"C:\Users\Avery Stone\LegendCTL\python.exe"
+                    ),
+                    user_data_dir=(
+                        r"C:\Users\Avery Stone\AppData\Roaming\ZDUltimateLegend"
+                    ),
+                    frozen=False,
+                    now=_NOW,
+                )
+
+        expected = r"""# Trust Self-Check
+
+Copyable evidence for this run. Observed for THIS process THIS session - not a system-wide audit.
+
+- Generated: 2026-06-30T12:00:00+00:00
+- Version: 2.3.1
+- Build commit: abc123
+- Build date: 2026-07-01
+- Run mode: source run \(not frozen\)
+
+| Claim | Evidence | Boundary |
+| --- | --- | --- |
+| No network: this build imports no networking modules. | Static scan of zd_app found 0 imports of socket/http/urllib/requests/ssl. No webbrowser.open handoff was found in zd_app. | Observed for THIS process THIS session - not a system-wide audit. |
+| No drivers / virtual devices: this shipped app footprint contains no driver or virtual-device package artifacts. | Static scan of zd_app found 0 driver/virtual-device artifacts across 1 package file\(s\). | Observed for THIS process THIS session - not a system-wide audit. This is an app-footprint check, not a whole-PC or game-compatibility clearance. |
+| No background service / autostart: this app does not install a resident component; closing the window stops this process. | This session is running as source run \(not frozen\); process id 4242; executable path \(scrubbed\): %USERPROFILE%\LegendCTL\python.exe. | Observed for THIS process THIS session - not a system-wide audit. |
+| Local data location + scrub posture: app data stays local and displayed paths are scrubbed to placeholders. | Default data directory \(scrubbed\): %APPDATA%\ZDUltimateLegend. Copy/export text uses path scrubbing and Markdown escaping before it is shareable. | Observed for THIS process THIS session - not a system-wide audit. |
+| Build identity: report what this process can observe. | Version 2.3.1; build commit abc123; build date 2026-07-01; run mode source run \(not frozen\). | Observed for THIS process THIS session - not a system-wide audit. |
+"""
+        self.assertEqual(result.to_markdown(), expected)
+
+    def test_copy_export_text_snapshot_stays_byte_identical(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            package_root = Path(tmp) / "zd_app"
+            package_root.mkdir()
+            (package_root / "__init__.py").write_text("", encoding="utf-8")
+            env = {
+                "APPDATA": r"C:\Users\Avery Stone\AppData\Roaming",
+                "USERPROFILE": r"C:\Users\Avery Stone",
+            }
+            with patch.dict(os.environ, env, clear=False), patch.object(
+                trust_self_check.app_version,
+                "__version__",
+                "2.3.1",
+            ), patch.object(
+                trust_self_check.app_version,
+                "__build_commit__",
+                "abc123",
+            ), patch.object(
+                trust_self_check.app_version,
+                "__build_date__",
+                "2026-07-01",
+            ), patch.object(os, "getpid", return_value=4242):
+                result = trust_self_check.build_trust_self_check(
+                    package_root=package_root,
+                    executable_path=(
+                        r"C:\Users\Avery Stone\LegendCTL\python.exe"
+                    ),
+                    user_data_dir=(
+                        r"C:\Users\Avery Stone\AppData\Roaming\ZDUltimateLegend"
+                    ),
+                    frozen=False,
+                    now=_NOW,
+                )
+
+        expected = r"""Trust Self-Check
+Copyable evidence for this run. Observed for THIS process THIS session - not a system-wide audit.
+
+Generated: 2026-06-30T12:00:00+00:00
+Version: 2.3.1
+Build commit: abc123
+Build date: 2026-07-01
+Run mode: source run (not frozen)
+
+No network: this build imports no networking modules.
+  Static scan of zd_app found 0 imports of socket/http/urllib/requests/ssl. No webbrowser.open handoff was found in zd_app.
+  Observed for THIS process THIS session - not a system-wide audit.
+
+No drivers / virtual devices: this shipped app footprint contains no driver or virtual-device package artifacts.
+  Static scan of zd_app found 0 driver/virtual-device artifacts across 1 package file(s).
+  Observed for THIS process THIS session - not a system-wide audit. This is an app-footprint check, not a whole-PC or game-compatibility clearance.
+
+No background service / autostart: this app does not install a resident component; closing the window stops this process.
+  This session is running as source run (not frozen); process id 4242; executable path (scrubbed): %USERPROFILE%\LegendCTL\python.exe.
+  Observed for THIS process THIS session - not a system-wide audit.
+
+Local data location + scrub posture: app data stays local and displayed paths are scrubbed to placeholders.
+  Default data directory (scrubbed): %APPDATA%\ZDUltimateLegend. Copy/export text uses path scrubbing and Markdown escaping before it is shareable.
+  Observed for THIS process THIS session - not a system-wide audit.
+
+Build identity: report what this process can observe.
+  Version 2.3.1; build commit abc123; build date 2026-07-01; run mode source run (not frozen).
+  Observed for THIS process THIS session - not a system-wide audit.
+"""
+        self.assertEqual(result.to_text(), expected)
 
 
 class TrustSelfCheckI18nTests(unittest.TestCase):
