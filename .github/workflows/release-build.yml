@@ -1,0 +1,180 @@
+name: Release build (CI-built, attested)
+
+# Builds the LegendCTL release artifacts IN PUBLIC CI, generates the checksum
+# manifest, attests build provenance for the binaries, and creates a DRAFT
+# GitHub release with everything attached.
+#
+# Why CI-built: an artifact attestation is an SLSA build-provenance claim —
+# "these exact bytes were produced by this workflow run." That claim is only
+# honest if the workflow actually builds the published bytes. So from the
+# first release this workflow ships, the release binaries ARE the CI-built
+# ones. (Earlier releases were built on the maintainer's machine and uploaded
+# by hand — same SHA-256 discipline, but provenance wasn't machine-checkable.)
+#
+# What deliberately stays HUMAN:
+#   - The draft release is NOT auto-published. The maintainer downloads the
+#     CI-built Setup.exe from the draft, installs it, smokes it on real
+#     hardware, and only then publishes the release (which is when
+#     /releases/latest starts serving it). An unsmoked binary never goes
+#     public.
+#
+# Triggers:
+#   - push of a version tag (v*): full run — build + attest + draft release.
+#   - push to a ci-dryrun/** branch: build-only rehearsal (no attestation,
+#     no release) — proves the CI build path without touching anything
+#     public.
+#   - workflow_dispatch: the same build-only rehearsal, runnable from the
+#     Actions tab once this file is on the default branch.
+#
+# Least privilege: contents:write exists ONLY for the draft-release creation
+# + asset upload; id-token:write + attestations:write are what the attest
+# step requires (OIDC signing + storing the attestation). No third-party
+# release action — the preinstalled gh CLI does the release step — so the
+# only non-actions/* link in the build trust chain is Inno Setup (installed
+# from chocolatey at build time).
+
+on:
+  push:
+    tags: ["v*"]
+    branches: ["ci-dryrun/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-build-${{ github.ref }}
+  cancel-in-progress: false # never kill a release build mid-flight
+
+jobs:
+  build-attest-draft:
+    name: Build, attest, draft release (Windows · Python 3.12)
+    runs-on: windows-latest
+    permissions:
+      contents: write # draft-release creation + asset upload (tag runs only)
+      id-token: write # OIDC identity for sigstore signing (attest step)
+      attestations: write # store the attestation (attest step)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Create the build venv (.venv-zd)
+        shell: pwsh
+        run: |
+          # tools/build_release.ps1 expects the repo-root venv .venv-zd and
+          # itself installs the pinned build toolchain into it
+          # (requirements-build.txt, which chains requirements.txt).
+          python -m venv .venv-zd
+
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          # build_release.ps1 discovers ISCC.exe at the standard
+          # "C:\Program Files (x86)\Inno Setup 6\" install path — which is
+          # where chocolatey's innosetup package installs it.
+          choco install innosetup --no-progress -y
+
+      - name: Guard — tag matches the source version (tag runs only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $versionPy = Get-Content "zd_app\version.py" -Raw
+          if ($versionPy -notmatch '__version__\s*=\s*"([^"]+)"') {
+            throw "Could not parse __version__ from zd_app\version.py"
+          }
+          $version = $Matches[1]
+          $tag = "${{ github.ref_name }}"
+          if ("v$version" -ne $tag) {
+            throw "Tag $tag does not match zd_app/version.py __version__=$version — refusing to build a mislabeled release."
+          }
+
+      - name: Build release artifacts (PyInstaller + Inno Setup)
+        shell: pwsh
+        run: |
+          # The same script the maintainer runs locally. Its trailing
+          # install_local.ps1 step (Desktop/Start-Menu shortcut refresh) is
+          # meaningless on a runner but warn-guarded — a shortcut hiccup
+          # cannot fail the build.
+          & tools\build_release.ps1
+
+      - name: Guard — installer actually built
+        shell: pwsh
+        run: |
+          # build_release.ps1 only WARNS when ISCC.exe is missing and then
+          # produces a zip-only dist. A release without the Setup.exe is
+          # wrong, so that path is a hard failure here.
+          $setup = Get-ChildItem dist\*-Setup.exe -ErrorAction SilentlyContinue
+          $zip   = Get-ChildItem dist\*-windows.zip -ErrorAction SilentlyContinue
+          if (-not $setup) { throw "No dist\*-Setup.exe found — the installer did not build." }
+          if (-not $zip)   { throw "No dist\*-windows.zip found — the portable zip did not build." }
+
+      - name: Regenerate SHA256SUMS.txt (documented shasum binary format)
+        shell: pwsh
+        run: |
+          # Re-hash the actual dist artifacts on this runner and write the
+          # manifest in the exact format actions/attest-build-provenance
+          # documents for subject-checksums (lowercase hex + " *" binary-mode
+          # marker). This one file is BOTH the attestation subject list and
+          # the published checksums asset, so what users verify is
+          # byte-identical to what was attested.
+          $files = @(Get-ChildItem dist\*-Setup.exe) + @(Get-ChildItem dist\*-windows.zip)
+          $lines = foreach ($f in $files) {
+            $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h *$($f.Name)"
+          }
+          Set-Content -Path dist\SHA256SUMS.txt -Value $lines -Encoding utf8
+          Get-Content dist\SHA256SUMS.txt
+
+      - name: Attest build provenance for the release binaries (tag runs only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: attest_release
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-checksums: dist/SHA256SUMS.txt
+
+      - name: Stage the attestation bundle as a release asset (tag runs only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          # The bundle enables OFFLINE verification (gh attestation verify
+          # --bundle ...) without querying the GitHub API. A stable asset
+          # name keeps the install-guide instructions copy-pasteable.
+          Copy-Item "${{ steps.attest_release.outputs.bundle-path }}" dist\attestation-bundle.jsonl
+
+      - name: Create DRAFT release with assets (tag runs only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $notes = "RELEASE_NOTES_$tag.md"
+          if (-not (Test-Path $notes)) {
+            throw "Missing $notes — a release ships with real, written notes or not at all."
+          }
+          gh release create $tag `
+            --draft `
+            --verify-tag `
+            --title "LegendCTL $tag" `
+            --notes-file $notes `
+            (Get-ChildItem dist\*-Setup.exe).FullName `
+            (Get-ChildItem dist\*-windows.zip).FullName `
+            "dist\SHA256SUMS.txt" `
+            "dist\attestation-bundle.jsonl"
+
+      - name: Upload dist as a workflow artifact (all runs, incl. rehearsals)
+        uses: actions/upload-artifact@v4
+        with:
+          name: legendctl-dist-${{ github.run_number }}
+          path: |
+            dist/*-Setup.exe
+            dist/*-windows.zip
+            dist/SHA256SUMS.txt
+          retention-days: 14
