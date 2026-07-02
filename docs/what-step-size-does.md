@@ -6,7 +6,7 @@
 
 ## What we measured
 
-Left stick · firmware 1.24 · wired USB · no deadzones · linear curve. For each step value we set it in LegendCTL and confirmed the readback with a device read, then logged the raw 16-bit XInput axis values (`sThumbLX`/`sThumbLY` — exactly what a game sees, with no deadzone or smoothing applied) at ~1000 Hz. Two protocols: two slow 25-second full-range sweeps per step (~504,000 samples across 9 step values × 2 runs), plus a slow one-way center→edge sweep per step implementing GamepadLA's published StickAnalyzer measurement (monotonic dead-band, SFC = 1/mean-gap).
+Left stick · firmware 1.24 · wired USB · no deadzones · linear curve. For each step value we set it in LegendCTL and confirmed the readback with a device read, then logged the raw 16-bit XInput axis values (`sThumbLX`/`sThumbLY` — exactly what a game sees, with no deadzone or smoothing applied) at ~1000 Hz. The controller's own USB polling setting was **8000 Hz** throughout — our logger reads 1 kHz snapshots of the XInput state and does not measure the device's report rate (see Honest scope). Two protocols: two slow 25-second full-range sweeps per step (~504,000 samples across 9 step values × 2 runs), plus a slow one-way center→edge sweep per step implementing GamepadLA's published StickAnalyzer measurement (monotonic dead-band, SFC = 1/mean-gap).
 
 ## What we found: a motion-increment quantizer
 
@@ -27,7 +27,7 @@ Left stick · firmware 1.24 · wired USB · no deadzones · linear curve. For ea
 
 ![Measured movement between stick reports vs. set step size](what-step-size-does/step_increment_curve.svg)
 
-The jump sizes are extremely tight per step (spread ~6–13% of the median) while the *durations* between reports vary widely with sweep speed — the signature of an increment threshold, not of a rate limiter. The poll cadence itself stays at 1.000 ms at every step: the mechanism is purely value-domain.
+The jump sizes are extremely tight per step (spread ~6–13% of the median) while the *durations* between reports vary widely with sweep speed — the signature of an increment threshold, not of a rate limiter. Our XInput sampling cadence itself stayed a uniform 1.000 ms at every step, so the changes measured here are in the reported values, not in the sampling.
 
 ## So is "255 = 8-bit" right?
 
@@ -57,7 +57,7 @@ Unrelated but often conflated: "I set 255 and it didn't stick" in the official a
 
 ## Honest scope
 
-Manual sweeps (not a motorized fixture); XInput/game-facing layer (not the internal sensor); a secondary population of small catch-up reports exists near direction changes (it nudges mid-step SFC ~15% finer than jump-size alone predicts) — none of which changes the headline. Raw data and every script are published; verify it yourself.
+Manual sweeps (not a motorized fixture); XInput/game-facing layer (not the internal sensor); a secondary population of small catch-up reports exists near direction changes (it nudges mid-step SFC ~15% finer than jump-size alone predicts); and our logger samples the XInput state at ~1 kHz while the controller's USB polling setting was 8000 Hz — the device's own report-rate behavior above 1 kHz is outside what these captures can see (one reason steps ≤ 50 are under-resolved; an 8 kHz-capable HID/ETW capture could examine it). None of this changes the headline. Raw data and every script are published; verify it yourself.
 
 ## Verify it yourself
 
