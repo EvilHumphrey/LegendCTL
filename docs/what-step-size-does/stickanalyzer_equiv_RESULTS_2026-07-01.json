@@ -1,0 +1,122 @@
+[
+ {
+  "step": 1,
+  "run": 1,
+  "kept_points": 1075,
+  "avg_step_resolution": 0.000948,
+  "SFC": 1055,
+  "true_bitness": 11.04,
+  "tremor_pct": 94.6,
+  "span_covered": 1.0179,
+  "pitch_median": 16,
+  "n_plateaus": 13304
+ },
+ {
+  "step": 1,
+  "run": 2,
+  "kept_points": 878,
+  "avg_step_resolution": 0.001165,
+  "SFC": 858,
+  "true_bitness": 10.74,
+  "tremor_pct": 95.6,
+  "span_covered": 1.0218,
+  "pitch_median": 4.0,
+  "n_plateaus": 12787
+ },
+ {
+  "step": 25,
+  "run": 1,
+  "kept_points": 951,
+  "avg_step_resolution": 0.001077,
+  "SFC": 928,
+  "true_bitness": 10.86,
+  "tremor_pct": 95.2,
+  "span_covered": 1.0231,
+  "pitch_median": 30.0,
+  "n_plateaus": 6867
+ },
+ {
+  "step": 25,
+  "run": 2,
+  "kept_points": 993,
+  "avg_step_resolution": 0.001014,
+  "SFC": 986,
+  "true_bitness": 10.95,
+  "tremor_pct": 95.0,
+  "span_covered": 1.0061,
+  "pitch_median": 30,
+  "n_plateaus": 8812
+ },
+ {
+  "step": 73,
+  "run": 1,
+  "kept_points": 523,
+  "avg_step_resolution": 0.001933,
+  "SFC": 517,
+  "true_bitness": 10.01,
+  "tremor_pct": 97.4,
+  "span_covered": 1.009,
+  "pitch_median": 76.0,
+  "n_plateaus": 2821
+ },
+ {
+  "step": 73,
+  "run": 2,
+  "kept_points": 551,
+  "avg_step_resolution": 0.001846,
+  "SFC": 541,
+  "true_bitness": 10.08,
+  "tremor_pct": 97.2,
+  "span_covered": 1.0154,
+  "pitch_median": 77.0,
+  "n_plateaus": 2277
+ },
+ {
+  "step": 144,
+  "run": 1,
+  "kept_points": 253,
+  "avg_step_resolution": 0.003995,
+  "SFC": 250,
+  "true_bitness": 8.97,
+  "tremor_pct": 98.7,
+  "span_covered": 1.0068,
+  "pitch_median": 153,
+  "n_plateaus": 478
+ },
+ {
+  "step": 144,
+  "run": 2,
+  "kept_points": 256,
+  "avg_step_resolution": 0.003975,
+  "SFC": 251,
+  "true_bitness": 8.97,
+  "tremor_pct": 98.7,
+  "span_covered": 1.0135,
+  "pitch_median": 153.0,
+  "n_plateaus": 471
+ },
+ {
+  "step": 255,
+  "run": 1,
+  "kept_points": 129,
+  "avg_step_resolution": 0.007827,
+  "SFC": 127,
+  "true_bitness": 7.99,
+  "tremor_pct": 99.4,
+  "span_covered": 1.0018,
+  "pitch_median": 260.0,
+  "n_plateaus": 191
+ },
+ {
+  "step": 255,
+  "run": 2,
+  "kept_points": 130,
+  "avg_step_resolution": 0.007866,
+  "SFC": 127,
+  "true_bitness": 7.99,
+  "tremor_pct": 99.4,
+  "span_covered": 1.0147,
+  "pitch_median": 260,
+  "n_plateaus": 164
+ }
+]
