@@ -84,13 +84,24 @@ jobs:
       - name: Guard — tag matches the source version (tag runs only)
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
+        env:
+          # Never interpolate ${{ github.ref_name }} directly into a run script:
+          # a tag name is attacker-controllable text and git accepts shell
+          # metacharacters in it, so inline interpolation is a script-injection
+          # surface. Pass it through the environment and read $env:REF_NAME.
+          REF_NAME: ${{ github.ref_name }}
         run: |
+          $tag = $env:REF_NAME
+          # Strict allowlist: only vMAJOR.MINOR.PATCH tags may build a release.
+          # This also neutralizes any exotic tag name before it is used anywhere.
+          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "Refusing to build: tag '$tag' is not a vMAJOR.MINOR.PATCH release tag."
+          }
           $versionPy = Get-Content "zd_app\version.py" -Raw
           if ($versionPy -notmatch '__version__\s*=\s*"([^"]+)"') {
             throw "Could not parse __version__ from zd_app\version.py"
           }
           $version = $Matches[1]
-          $tag = "${{ github.ref_name }}"
           if ("v$version" -ne $tag) {
             throw "Tag $tag does not match zd_app/version.py __version__=$version — refusing to build a mislabeled release."
           }
@@ -104,16 +115,22 @@ jobs:
           # cannot fail the build.
           & tools\build_release.ps1
 
-      - name: Guard — installer actually built
+      - name: Guard — exactly one installer and one portable zip built
         shell: pwsh
         run: |
           # build_release.ps1 only WARNS when ISCC.exe is missing and then
           # produces a zip-only dist. A release without the Setup.exe is
-          # wrong, so that path is a hard failure here.
-          $setup = Get-ChildItem dist\*-Setup.exe -ErrorAction SilentlyContinue
-          $zip   = Get-ChildItem dist\*-windows.zip -ErrorAction SilentlyContinue
-          if (-not $setup) { throw "No dist\*-Setup.exe found — the installer did not build." }
-          if (-not $zip)   { throw "No dist\*-windows.zip found — the portable zip did not build." }
+          # wrong, so that path is a hard failure here. We also require
+          # EXACTLY ONE of each: a stray/extra *-Setup.exe or *-windows.zip
+          # must fail closed rather than be silently hashed, attested, and
+          # published. The two resolved paths are exported so every later
+          # step attests and uploads exactly these bytes (no re-globbing).
+          $setup = @(Get-ChildItem dist\*-Setup.exe -ErrorAction SilentlyContinue)
+          $zip   = @(Get-ChildItem dist\*-windows.zip -ErrorAction SilentlyContinue)
+          if ($setup.Count -ne 1) { throw "Expected exactly one dist\*-Setup.exe, found $($setup.Count) — refusing to release." }
+          if ($zip.Count   -ne 1) { throw "Expected exactly one dist\*-windows.zip, found $($zip.Count) — refusing to release." }
+          "SETUP_PATH=$($setup[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "ZIP_PATH=$($zip[0].FullName)"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Regenerate SHA256SUMS.txt (documented shasum binary format)
         shell: pwsh
@@ -127,10 +144,14 @@ jobs:
           # Written with explicit LF line endings: Set-Content on Windows
           # emits CRLF, and a subject-checksums parser that doesn't strip \r
           # would record subtly wrong subject names in the attestation.
-          $files = @(Get-ChildItem dist\*-Setup.exe) + @(Get-ChildItem dist\*-windows.zip)
-          $lines = foreach ($f in $files) {
-            $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
-            "$h *$($f.Name)"
+          # Use the exact two paths the guard resolved — never re-glob, so the
+          # attested subject set is provably the same two files that passed the
+          # count guard.
+          $paths = @("$env:SETUP_PATH", "$env:ZIP_PATH")
+          $lines = foreach ($p in $paths) {
+            $fi = Get-Item -LiteralPath $p
+            $h = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()
+            "$h *$($fi.Name)"
           }
           [IO.File]::WriteAllText((Join-Path $PWD "dist\SHA256SUMS.txt"), (($lines -join "`n") + "`n"))
           Get-Content dist\SHA256SUMS.txt
@@ -145,30 +166,36 @@ jobs:
       - name: Stage the attestation bundle as a release asset (tag runs only)
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
+        env:
+          # Action outputs are also untrusted text — pass via env + -LiteralPath.
+          BUNDLE_PATH: ${{ steps.attest_release.outputs.bundle-path }}
         run: |
           # The bundle enables OFFLINE verification (gh attestation verify
           # --bundle ...) without querying the GitHub API. A stable asset
           # name keeps the install-guide instructions copy-pasteable.
-          Copy-Item "${{ steps.attest_release.outputs.bundle-path }}" dist\attestation-bundle.jsonl
+          Copy-Item -LiteralPath $env:BUNDLE_PATH -Destination dist\attestation-bundle.jsonl
 
       - name: Create DRAFT release with assets (tag runs only)
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = $env:REF_NAME
           $notes = "RELEASE_NOTES_$tag.md"
-          if (-not (Test-Path $notes)) {
+          if (-not (Test-Path -LiteralPath $notes)) {
             throw "Missing $notes — a release ships with real, written notes or not at all."
           }
+          # Upload exactly the two guard-resolved binaries (via env), plus the
+          # checksum manifest and the offline attestation bundle.
           gh release create $tag `
             --draft `
             --verify-tag `
             --title "LegendCTL $tag" `
             --notes-file $notes `
-            (Get-ChildItem dist\*-Setup.exe).FullName `
-            (Get-ChildItem dist\*-windows.zip).FullName `
+            "$env:SETUP_PATH" `
+            "$env:ZIP_PATH" `
             "dist\SHA256SUMS.txt" `
             "dist\attestation-bundle.jsonl"
 

@@ -46,11 +46,15 @@ This is the same integrity guarantee a signature provides, done in the open — 
 
 ## 4. Verify where it was built (build provenance)
 
-Starting with v2.4.0, release binaries are **built in this repository's public GitHub Actions workflow** ([`release-build.yml`](../.github/workflows/release-build.yml)) — not on a maintainer's machine — and every release carries a **build-provenance attestation**: a cryptographically signed statement, recorded with GitHub, tying the exact bytes of the release files to the workflow run and source commit that produced them.
+<!-- TODO(first-attested-cut): set <FIRST_ATTESTED_VERSION> below to the actual first
+     release built by this workflow. v2.4.0 and earlier were built locally and are NOT
+     attested — do not claim a version as attested until its release was produced by
+     release-build.yml. -->
+From **v\<FIRST_ATTESTED_VERSION\>** onward, release binaries are **built in this repository's public GitHub Actions workflow** ([`release-build.yml`](../.github/workflows/release-build.yml)) — not on a maintainer's machine — and every such release carries a **build-provenance attestation**: a cryptographically signed statement, recorded with GitHub, tying the exact bytes of the release files to the workflow run and source commit that produced them.
 
 **What this proves / doesn't prove — honestly:**
 
-- **Proves:** the file you downloaded is byte-identical to what this repository's public workflow built from the public source. Nobody swapped, modified, or re-uploaded it after the build.
+- **Proves:** the file you downloaded is byte-identical to what this repository's public workflow built from the public source. If someone swapped, modified, or re-uploaded a release file after the build, verification **fails** — so you can detect tampering rather than having to trust that it didn't happen.
 - **Does NOT prove:** that the app is code-signed (it isn't yet), that SmartScreen won't warn (it will — see section 2), or that the software is risk-free. Provenance is about *origin*, not a safety rating.
 
 Checking it needs the [GitHub CLI](https://cli.github.com/) (**v2.67.0 or newer** — older versions had a verification exit-code bug):
@@ -70,17 +74,20 @@ gh attestation verify .\ZDUltimateLegend-v<version>-Setup.exe `
   --signer-workflow EvilHumphrey/LegendCTL/.github/workflows/release-build.yml
 ```
 
-**Offline:** each release also ships its attestation as the `attestation-bundle.jsonl` asset, so you can verify without querying GitHub's API:
+**Offline / API-free:** each attested release also ships its attestation as the `attestation-bundle.jsonl` asset, so you can verify without querying GitHub's attestation API. You do need to fetch the trust root **once while online** (`gh attestation trusted-root`) and keep the resulting file — after that, verification runs fully offline:
 
 ```powershell
+# Run once while online; keep trusted_root.jsonl for later offline use:
 gh attestation trusted-root > trusted_root.jsonl
+
+# Then verify offline, against the bundle shipped with the release:
 gh attestation verify .\ZDUltimateLegend-v<version>-Setup.exe `
   --repo EvilHumphrey/LegendCTL `
   --bundle .\attestation-bundle.jsonl `
   --custom-trusted-root .\trusted_root.jsonl
 ```
 
-*(Releases older than v2.4.0 predate CI-built provenance — for those, the SHA-256 check in section 3 is the verification path.)*
+*(Releases built locally, before this workflow existed, are not attested — for those, the SHA-256 check in section 3 is the verification path.)*
 
 ## 5. Why you can trust it beyond the hash
 
