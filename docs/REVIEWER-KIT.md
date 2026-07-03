@@ -104,7 +104,7 @@ LegendCTL's pitch is the inverse, and it's verifiable rather than asserted.
 
 - **Demo GIF** (in-repo): [docs/media/legendctl-liveverify-demo.gif](media/legendctl-liveverify-demo.gif)
 - **Screenshots:**
-  - Live Verify circularity sweep — ![Live Verify circularity](media/screenshot-live-verify-circularity.png)
+  - Live Verify — live XInput view (the demo GIF above shows a full circularity sweep) — ![Live Verify](media/screenshot-live-verify-circularity.png)
   - Sensitivity-curve editor — ![Sensitivity curves](media/screenshot-sensitivity-curves.png)
   - Overview / Home — ![Overview](media/screenshot-overview.png)
 - More screens (dual-stick Live Verify, controller settings, diagnostics) are in
