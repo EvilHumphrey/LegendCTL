@@ -71,9 +71,8 @@ short version is **trust you can verify**:
 - **Fully local — no network, no telemetry.** The LegendCTL process makes
   **zero** network calls — no telemetry, no analytics, no auto-update. (The one
   outbound action is the About screen's GitHub links, which hand a URL to your
-  browser; the app itself opens no socket.) Closed controller and peripheral
-  software often phones home and bundles analytics SDKs; this one doesn't — and
-  you don't have to take that on faith. You can
+  browser; the app itself opens no socket.) You don't have to take any of that
+  on faith: you can
   [confirm the no-network behavior yourself](docs/verifying-no-network.md) in a
   couple of minutes.
 - **No drivers, no virtual devices, no background service.** Nothing installs a
@@ -102,7 +101,6 @@ can and can't do.
 
 **Live Verify** reads both sticks straight from XInput. Start a stick test and sweep — each stick's trace fills its circle, sweep-coverage climbs, and the per-stick circularity settles to a percentage, so you can see how round your sticks really are and catch a flat spot or off-center rest. Everything runs locally; no network, no telemetry.
 
-<!-- TODO(operator): Add current v2.3.0 screenshots under assets/screenshots/ and reference them here. -->
 
 ## Features
 

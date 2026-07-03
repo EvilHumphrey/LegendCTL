@@ -43,7 +43,7 @@ Four legs, independently:
 
 1. **Two sweep protocols** on the same device agree (the 1 kHz full-range sweeps and the StickAnalyzer-style one-way sweeps).
 2. **A blind re-analysis of the raw CSVs by an independent analyst** — given no access to our conclusions — derived the same mechanism, with a functional fit `jump ≈ √((1.03·step)² + 34²)` at R² = 0.999 across all nine steps.
-3. **GamepadLA's published ZD Ultimate Legend test** (independent rig, wired XInput, stock settings) measured Step Resolution 0.00226 — that's **74 raw counts per step, i.e. the factory-default step size (73) showing up on an independent tool**, matching our step-73 jump measurement (76–82). Their 443 SFC / 9.8-bit figures line up with the same rule (our fw-1.24 unit measures 517–541 / ~10.0 at step 73 — same ballpark; firmware and unit differences apply).
+3. **[GamepadLA's published ZD Ultimate Legend test](https://gamepadla.com/zd-ultimate-legend.html)** (independent rig, wired XInput, stock settings) measured Step Resolution 0.00226 — that's **74 raw counts per step, i.e. the factory-default step size (73) showing up on an independent tool**, matching our step-73 jump measurement (76–82). Their 443 SFC / 9.8-bit figures line up with the same rule (our fw-1.24 unit measures 517–541 / ~10.0 at step 73 — same ballpark; firmware and unit differences apply).
 4. **GamepadLA's own algorithm, re-run on the device at each step:** at 255 it reports **0.0078 step resolution / 127 SFC / 7.99 True Bitness — in both runs, identically.** Anyone with the controller and their tool can reproduce this.
 
 ## What it means for feel and settings

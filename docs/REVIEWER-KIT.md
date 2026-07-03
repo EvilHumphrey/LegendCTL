@@ -66,7 +66,7 @@ features; the UI and Live Verify open without one.
    confirms no driver / virtual device / background service, and copies the result
    out; and/or follow [docs/verifying-no-network.md](verifying-no-network.md) to
    watch Resource Monitor show zero connections while the app runs and writes.
-6. **Create a Compatibility Report + evidence card (new in v2.3.0).** From
+6. **Create a Compatibility Report + evidence card.** From
    Diagnostics, generate a share-safe **Compatibility Report** (your variant /
    firmware + what you actually tested) — it aligns to the public
    [compatibility matrix](compatibility-matrix.md) — and export the one-page
@@ -109,7 +109,7 @@ LegendCTL's pitch is the inverse, and it's verifiable rather than asserted.
   - Overview / Home — ![Overview](media/screenshot-overview.png)
 - More screens (dual-stick Live Verify, controller settings, diagnostics) are in
   [docs/media/](media/). Need a specific shot, a higher-res capture, or a short
-  clip of a particular flow? Open a Discussion or email and it's easy to provide.
+  clip of a particular flow? Open a Discussion and it's easy to provide.
 
 ## What feedback is most useful
 
