@@ -26,12 +26,37 @@ name: Release build (CI-built, attested)
 #   - workflow_dispatch: the same build-only rehearsal, runnable from the
 #     Actions tab once this file is on the default branch.
 #
-# Least privilege: contents:write exists ONLY for the draft-release creation
-# + asset upload; id-token:write + attestations:write are what the attest
-# step requires (OIDC signing + storing the attestation). No third-party
+# Job split (least privilege): the `build` job holds contents:read ONLY and
+# runs for every trigger — so rehearsals and any future compromise of the
+# build path never see a write-capable token or the OIDC identity. The
+# `release` job (tag pushes only) is the sole holder of contents:write +
+# id-token:write + attestations:write; it attests and drafts the release from
+# the build job's artifact after re-verifying the hashes. No third-party
 # release action — the preinstalled gh CLI does the release step — so the
 # only non-actions/* link in the build trust chain is Inno Setup (installed
-# from chocolatey at build time).
+# from chocolatey at build time, pinned below).
+#
+# An attested release must not skip the honesty gates: the build job runs the
+# same summary-based unittest suite and pip-audit CVE gate as ci.yml BEFORE
+# building. (ci.yml only runs on push/PR to main, not on tags — without this
+# mirror, a tag push would build and attest unverified code.)
+#
+# Supply-chain pins:
+#   - runs-on is pinned to `windows-2025`, the image family the proven-good
+#     CI run used (run 28626143061 resolved windows-latest to image
+#     "windows-2025-vs2026", version 20260628.158.1 — since June 2026 the
+#     `windows-2025` label serves that same Windows Server 2025 + VS2026
+#     image, while `windows-latest` is free to move to whatever comes next).
+#   - Inno Setup is pinned (chocolatey package 6.7.1) and asserted
+#     post-install, matching the maintainer's local 6.7.1 so CI builds and
+#     local builds are the same toolchain.
+#   - ACCEPTED RISK (deliberate, documented): Python dependencies are
+#     version-pinned via requirements.txt / requirements-build.txt but NOT
+#     hash-pinned (no pip --require-hashes / pip-compile --generate-hashes).
+#     Full hash-locking of the transitive tree is a maintenance burden
+#     disproportionate to this project today; revisit if byte-reproducible
+#     builds become a goal. Standing mitigations: exact version pins,
+#     Dependabot freshness, and the pip-audit gate in this workflow.
 
 on:
   push:
@@ -47,13 +72,11 @@ concurrency:
   cancel-in-progress: false # never kill a release build mid-flight
 
 jobs:
-  build-attest-draft:
-    name: Build, attest, draft release (Windows · Python 3.12)
-    runs-on: windows-latest
+  build:
+    name: Test-gate + build (Windows · Python 3.12)
+    runs-on: windows-2025
     permissions:
-      contents: write # draft-release creation + asset upload (tag runs only)
-      id-token: write # OIDC identity for sigstore signing (attest step)
-      attestations: write # store the attestation (attest step)
+      contents: read # build + rehearsal runs never hold a write-capable token
 
     steps:
       - name: Checkout
@@ -64,22 +87,6 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-
-      - name: Create the build venv (.venv-zd)
-        shell: pwsh
-        run: |
-          # tools/build_release.ps1 expects the repo-root venv .venv-zd and
-          # itself installs the pinned build toolchain into it
-          # (requirements-build.txt, which chains requirements.txt).
-          python -m venv .venv-zd
-
-      - name: Install Inno Setup 6
-        shell: pwsh
-        run: |
-          # build_release.ps1 discovers ISCC.exe at the standard
-          # "C:\Program Files (x86)\Inno Setup 6\" install path — which is
-          # where chocolatey's innosetup package installs it.
-          choco install innosetup --no-progress -y
 
       - name: Guard — tag matches the source version (tag runs only)
         if: startsWith(github.ref, 'refs/tags/v')
@@ -94,6 +101,8 @@ jobs:
           $tag = $env:REF_NAME
           # Strict allowlist: only vMAJOR.MINOR.PATCH tags may build a release.
           # This also neutralizes any exotic tag name before it is used anywhere.
+          # The release job below runs only after this job succeeds (needs:),
+          # so a tag that fails this allowlist never reaches the write-token job.
           if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
             throw "Refusing to build: tag '$tag' is not a vMAJOR.MINOR.PATCH release tag."
           }
@@ -105,6 +114,95 @@ jobs:
           if ("v$version" -ne $tag) {
             throw "Tag $tag does not match zd_app/version.py __version__=$version — refusing to build a mislabeled release."
           }
+
+      - name: Install runtime dependencies (test gate)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run test suite before building (constraint gates included)
+        shell: pwsh
+        run: |
+          # Mirrors ci.yml exactly: an attested "trustworthy" release that
+          # skipped the honesty/constraint gates would be self-contradictory.
+          # Pass/fail comes from the unittest *summary line*, not the raw exit
+          # code — exit code 139 on teardown is a known DPG segfault artifact,
+          # not a failure (docs/ARCHITECTURE.md, "Test architecture").
+          # unittest writes its output to stderr, hence 2>&1.
+          $ErrorActionPreference = 'Continue'
+          python -m unittest discover -s tests 2>&1 | Tee-Object -FilePath test_output.txt
+          $code = $LASTEXITCODE
+          $log  = Get-Content test_output.txt -Raw
+
+          if ($log -match '(?m)^FAILED \(') {
+            Write-Host "::error::unittest reported FAILED — see summary above."
+            exit 1
+          }
+          elseif ($log -match '(?m)^OK\b') {
+            Write-Host "Suite PASSED. (process exit code = $code; 139 = known DPG teardown artifact, ignored)"
+            exit 0
+          }
+          else {
+            Write-Host "::error::No unittest 'OK' summary found (exit code $code). Likely a crash/segfault BEFORE the summary — investigate; do not treat as green."
+            exit 1
+          }
+
+      - name: Audit dependencies for known CVEs before building (pip-audit)
+        run: |
+          # Mirrors ci.yml's audit job. Same triage pattern applies: suppress a
+          # non-applicable finding with a written --ignore-vuln reason rather
+          # than dropping the gate.
+          python -m pip install --upgrade pip-audit
+          pip install -r requirements-build.txt
+          pip-audit
+
+      - name: Create the build venv (.venv-zd)
+        shell: pwsh
+        run: |
+          # tools/build_release.ps1 expects the repo-root venv .venv-zd and
+          # itself installs the pinned build toolchain into it
+          # (requirements-build.txt, which chains requirements.txt).
+          python -m venv .venv-zd
+
+      - name: Install Inno Setup 6 (pinned 6.7.1)
+        shell: pwsh
+        run: |
+          # build_release.ps1 discovers ISCC.exe at the standard
+          # "C:\Program Files (x86)\Inno Setup 6\" install path — which is
+          # where chocolatey's innosetup package installs it.
+          # Pinned to the package version that installs Inno Setup 6.7.1 —
+          # the maintainer's local version — so the shipped+attested bytes
+          # don't float with chocolatey's latest.
+          choco install innosetup --version 6.7.1 --no-progress -y
+
+      - name: Assert Inno Setup version is exactly 6.7.1
+        shell: pwsh
+        run: |
+          # Assert via the uninstall registry DisplayVersion (with the ISCC
+          # banner line as fallback). Deliberately NOT the ISCC.exe file
+          # resource: ISCC.exe ships no version resource, so its FileVersion
+          # reads 0.0.0.0.
+          $expected = '6.7.1'
+          $keys = @(
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1',
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1'
+          )
+          $display = $null
+          foreach ($k in $keys) {
+            if (Test-Path -LiteralPath $k) {
+              $display = (Get-ItemProperty -LiteralPath $k).DisplayVersion
+              break
+            }
+          }
+          if (-not $display) {
+            # Fallback: parse the compiler banner (first line, e.g.
+            # "Inno Setup 6 Command-Line Compiler ... 6.7.1 ...").
+            $banner = & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" 2>&1 | Select-Object -First 2 | Out-String
+            if ($banner -match '(\d+\.\d+\.\d+)') { $display = $Matches[1] }
+          }
+          if (-not $display) { throw "Could not determine the installed Inno Setup version (registry key missing and banner unparseable)." }
+          if ($display -ne $expected) { throw "Inno Setup version drift: installed '$display', pinned '$expected' — refusing to build." }
+          Write-Host "Inno Setup $display confirmed (pinned $expected)."
 
       - name: Build release artifacts (PyInstaller + Inno Setup)
         shell: pwsh
@@ -124,7 +222,7 @@ jobs:
           # EXACTLY ONE of each: a stray/extra *-Setup.exe or *-windows.zip
           # must fail closed rather than be silently hashed, attested, and
           # published. The two resolved paths are exported so every later
-          # step attests and uploads exactly these bytes (no re-globbing).
+          # step hashes exactly these bytes (no re-globbing).
           $setup = @(Get-ChildItem dist\*-Setup.exe -ErrorAction SilentlyContinue)
           $zip   = @(Get-ChildItem dist\*-windows.zip -ErrorAction SilentlyContinue)
           if ($setup.Count -ne 1) { throw "Expected exactly one dist\*-Setup.exe, found $($setup.Count) — refusing to release." }
@@ -156,15 +254,71 @@ jobs:
           [IO.File]::WriteAllText((Join-Path $PWD "dist\SHA256SUMS.txt"), (($lines -join "`n") + "`n"))
           Get-Content dist\SHA256SUMS.txt
 
-      - name: Attest build provenance for the release binaries (tag runs only)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Upload dist as a workflow artifact (all runs, incl. rehearsals)
+        uses: actions/upload-artifact@v4
+        with:
+          name: legendctl-dist-${{ github.run_number }}
+          path: |
+            dist/*-Setup.exe
+            dist/*-windows.zip
+            dist/SHA256SUMS.txt
+          retention-days: 14
+
+  release:
+    name: Attest + draft release (tag runs only)
+    # Tag pushes only — rehearsal runs never reach this job, so the write
+    # permissions below never exist for a ci-dryrun/** or dispatch run.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: windows-2025
+    permissions:
+      contents: write # draft-release creation + asset upload
+      id-token: write # OIDC identity for sigstore signing (attest step)
+      attestations: write # store the attestation (attest step)
+
+    steps:
+      - name: Checkout
+        # Needed for RELEASE_NOTES_<tag>.md and gh --verify-tag.
+        uses: actions/checkout@v7
+
+      - name: Download the built dist from the build job
+        uses: actions/download-artifact@v4
+        with:
+          name: legendctl-dist-${{ github.run_number }}
+          path: dist
+
+      - name: Guard — re-verify the downloaded artifacts against SHA256SUMS.txt
+        shell: pwsh
+        run: |
+          # The artifacts crossed a job boundary (via workflow-artifact
+          # storage). Before attesting, prove the bytes we are about to attest
+          # and publish are exactly the bytes the build job hashed: same
+          # exactly-one-of-each rule, then every manifest line must match a
+          # fresh hash of the downloaded file. Fail closed on any drift.
+          $manifest = @(Get-Content dist\SHA256SUMS.txt | Where-Object { $_ -ne '' })
+          if ($manifest.Count -ne 2) { throw "Expected exactly 2 manifest lines in SHA256SUMS.txt, found $($manifest.Count)." }
+          $setup = @(Get-ChildItem dist\*-Setup.exe -ErrorAction SilentlyContinue)
+          $zip   = @(Get-ChildItem dist\*-windows.zip -ErrorAction SilentlyContinue)
+          if ($setup.Count -ne 1) { throw "Expected exactly one dist\*-Setup.exe after download, found $($setup.Count)." }
+          if ($zip.Count   -ne 1) { throw "Expected exactly one dist\*-windows.zip after download, found $($zip.Count)." }
+          foreach ($f in @($setup[0], $zip[0])) {
+            $h = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash.ToLower()
+            $line = "$h *$($f.Name)"
+            if ($manifest -notcontains $line) {
+              throw "Hash mismatch after artifact transfer for $($f.Name) — refusing to attest/publish."
+            }
+          }
+          "SETUP_PATH=$($setup[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "ZIP_PATH=$($zip[0].FullName)"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Downloaded artifacts match the build job's manifest."
+
+      - name: Attest build provenance for the release binaries
         id: attest_release
         uses: actions/attest-build-provenance@v4
         with:
           subject-checksums: dist/SHA256SUMS.txt
 
-      - name: Stage the attestation bundle as a release asset (tag runs only)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Stage the attestation bundle as a release asset
         shell: pwsh
         env:
           # Action outputs are also untrusted text — pass via env + -LiteralPath.
@@ -175,13 +329,15 @@ jobs:
           # name keeps the install-guide instructions copy-pasteable.
           Copy-Item -LiteralPath $env:BUNDLE_PATH -Destination dist\attestation-bundle.jsonl
 
-      - name: Create DRAFT release with assets (tag runs only)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Create DRAFT release with assets
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           REF_NAME: ${{ github.ref_name }}
         run: |
+          # REF_NAME passed via env (same injection rule as the build job);
+          # the build job's strict allowlist already validated this tag —
+          # this job cannot run unless that guard passed.
           $tag = $env:REF_NAME
           $notes = "RELEASE_NOTES_$tag.md"
           if (-not (Test-Path -LiteralPath $notes)) {
@@ -198,13 +354,3 @@ jobs:
             "$env:ZIP_PATH" `
             "dist\SHA256SUMS.txt" `
             "dist\attestation-bundle.jsonl"
-
-      - name: Upload dist as a workflow artifact (all runs, incl. rehearsals)
-        uses: actions/upload-artifact@v4
-        with:
-          name: legendctl-dist-${{ github.run_number }}
-          path: |
-            dist/*-Setup.exe
-            dist/*-windows.zip
-            dist/SHA256SUMS.txt
-          retention-days: 14
