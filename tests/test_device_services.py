@@ -9,15 +9,141 @@ from unittest.mock import patch
 
 from zd_app import i18n
 from zd_app.models import DeviceState
+from zd_app.services import device_service as device_service_module
 from zd_app.services.device_service import DeviceService
 from zd_app.services.diagnostics_service import DiagnosticsService
 from zd_app.services.official_app_summary_service import OfficialAppSummary, OfficialAppSummaryService
 
 
-PUBLIC_PNP_OUTPUT = """Instance ID: USB\\VID_413D&PID_2104\\ABC123
-Device Description: ZD Ultimate Legend
-Status: Started
-"""
+PUBLIC_DEVICE_ENTRY = {
+    "instance_id": "USB\\VID_413D&PID_2104\\ABC123",
+    "description": "ZD Ultimate Legend",
+    "status": "Present",
+}
+PUBLIC_DEVICE_ENTRIES = [PUBLIC_DEVICE_ENTRY]
+
+LOCALIZED_PNPUTIL_OUTPUTS = {
+    "ru": """ИД экземпляра устройства: USB\\VID_413D&PID_2104\\ABC123
+Описание устройства: ZD Ultimate Legend
+Состояние: Запущено
+""",
+    "de": """Instanz-ID: USB\\VID_413D&PID_2104\\ABC123
+Gerätebeschreibung: ZD Ultimate Legend
+Status: Gestartet
+""",
+    "zh": """实例 ID: USB\\VID_413D&PID_2104\\ABC123
+设备描述: ZD Ultimate Legend
+状态: 已启动
+""",
+}
+
+
+def _legacy_english_label_parser_matches_zd(output: str) -> bool:
+    """Mirror the removed bug: only the English label key can identify a device."""
+
+    entries: list[dict[str, str]] = []
+    current: dict[str, str] = {}
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            if current:
+                entries.append(current)
+                current = {}
+            continue
+        if ":" in line:
+            key, value = line.split(":", 1)
+            current[key.strip().lower()] = value.strip()
+    if current:
+        entries.append(current)
+    return any(
+        device_service_module.instance_id_is_allowlisted_zd(entry.get("instance id", ""))
+        for entry in entries
+    )
+
+
+class _FakeKernel32:
+    def __init__(self) -> None:
+        self.last_error = 0
+
+    def GetLastError(self) -> int:
+        return self.last_error
+
+
+class _FakeSetupApi:
+    def __init__(
+        self,
+        kernel32: _FakeKernel32,
+        devices_by_enumerator: dict[str | None, list[dict[str, str]]],
+    ) -> None:
+        self.kernel32 = kernel32
+        self.devices_by_enumerator = devices_by_enumerator
+        self.enumerators: list[str | None] = []
+        self.destroyed_handles: list[str] = []
+        self._handles: dict[str, list[dict[str, str]]] = {}
+
+    def SetupDiGetClassDevsW(self, class_guid, enumerator, _hwnd, flags):
+        # Enforce the REAL API contract the mocked layer previously hid: a NULL
+        # ClassGuid requires DIGCF_ALLCLASSES, else the call fails with
+        # ERROR_INVALID_PARAMETER (87) and enumeration sees zero devices. The
+        # shipped 2026-07-02 recognition regression (operator's controller
+        # unrecognized on EN-Windows) passed the old permissive fake exactly
+        # because it ignored flags — keep this fake strict.
+        if class_guid is None and not (flags & device_service_module.DIGCF_ALLCLASSES):
+            self.kernel32.last_error = 87  # ERROR_INVALID_PARAMETER
+            return None  # _setupdi_handle_failed treats None as a failed handle
+        self.enumerators.append(enumerator)
+        handle = f"info-set-{len(self.enumerators)}"
+        self._handles[handle] = list(self.devices_by_enumerator.get(enumerator, []))
+        return handle
+
+    def SetupDiEnumDeviceInfo(self, info_set, index, device_info_ptr):
+        devices = self._handles[info_set]
+        if index >= len(devices):
+            self.kernel32.last_error = device_service_module.ERROR_NO_MORE_ITEMS
+            return False
+        self.kernel32.last_error = 0
+        device_info_ptr._obj.DevInst = index
+        return True
+
+    def SetupDiGetDeviceInstanceIdW(
+        self,
+        info_set,
+        device_info_ptr,
+        instance_id_buffer,
+        instance_id_buffer_chars,
+        required_size_ptr,
+    ):
+        instance_id = self._handles[info_set][device_info_ptr._obj.DevInst]["instance_id"]
+        required_size_ptr._obj.value = len(instance_id) + 1
+        if instance_id_buffer_chars <= len(instance_id):
+            return False
+        instance_id_buffer.value = instance_id
+        return True
+
+    def SetupDiGetDeviceRegistryPropertyW(
+        self,
+        info_set,
+        device_info_ptr,
+        _property_id,
+        _property_type_ptr,
+        property_buffer,
+        property_buffer_bytes,
+        required_size_ptr,
+    ):
+        description = self._handles[info_set][device_info_ptr._obj.DevInst].get(
+            "description",
+            "Unknown device",
+        )
+        required_bytes = (len(description) + 1) * 2
+        required_size_ptr._obj.value = required_bytes
+        if property_buffer_bytes < required_bytes:
+            return False
+        property_buffer.value = description
+        return True
+
+    def SetupDiDestroyDeviceInfoList(self, info_set) -> bool:
+        self.destroyed_handles.append(info_set)
+        return True
 
 
 class FakeSummaryProbeService(OfficialAppSummaryService):
@@ -43,62 +169,174 @@ class DeviceServicePresenceCacheTests(unittest.TestCase):
         )
 
     def test_connected_presence_probe_uses_cache_within_ttl(self) -> None:
-        result = SimpleNamespace(stdout=PUBLIC_PNP_OUTPUT)
-        with patch("zd_app.services.device_service.silent_run", return_value=result) as run_mock:
+        with patch(
+            "zd_app.services.device_service._enumerate_present_device_entries",
+            return_value=PUBLIC_DEVICE_ENTRIES,
+        ) as enumerate_mock:
             first = self.service._find_zd_entries()
             self.now = 1.0
             second = self.service._find_zd_entries()
 
-        self.assertEqual(run_mock.call_count, 1)
+        self.assertEqual(enumerate_mock.call_count, 1)
         self.assertEqual(first, second)
         self.assertEqual(first[0]["instance_id"], "USB\\VID_413D&PID_2104\\ABC123")
 
     def test_force_refresh_bypasses_presence_cache(self) -> None:
-        result = SimpleNamespace(stdout=PUBLIC_PNP_OUTPUT)
-        with patch("zd_app.services.device_service.silent_run", return_value=result) as run_mock:
+        with patch(
+            "zd_app.services.device_service._enumerate_present_device_entries",
+            return_value=PUBLIC_DEVICE_ENTRIES,
+        ) as enumerate_mock:
             self.service._find_zd_entries()
             self.now = 1.0
             self.service._find_zd_entries(force_refresh=True)
 
-        self.assertEqual(run_mock.call_count, 2)
+        self.assertEqual(enumerate_mock.call_count, 2)
 
-    def test_allow_probe_false_skips_subprocess_on_cold_cache(self) -> None:
-        # The non-blocking UI-tick path must never shell out to pnputil.
-        with patch("zd_app.services.device_service.silent_run") as run_mock:
+    def test_allow_probe_false_skips_presence_probe_on_cold_cache(self) -> None:
+        # The non-blocking UI-tick path must never run the SetupDi probe.
+        with patch("zd_app.services.device_service._enumerate_present_device_entries") as enumerate_mock:
             entries = self.service._find_zd_entries(allow_probe=False)
 
         self.assertEqual(entries, [])
-        run_mock.assert_not_called()
+        enumerate_mock.assert_not_called()
 
-    def test_allow_probe_false_returns_stale_cache_without_subprocess(self) -> None:
-        result = SimpleNamespace(stdout=PUBLIC_PNP_OUTPUT)
-        with patch("zd_app.services.device_service.silent_run", return_value=result) as run_mock:
+    def test_allow_probe_false_returns_stale_cache_without_presence_probe(self) -> None:
+        with patch(
+            "zd_app.services.device_service._enumerate_present_device_entries",
+            return_value=PUBLIC_DEVICE_ENTRIES,
+        ) as enumerate_mock:
             warmed = self.service._find_zd_entries()  # warms the cache (1 probe)
             self.now = 100.0  # well past the 10s connected TTL -> stale
             stale = self.service._find_zd_entries(allow_probe=False)
 
-        self.assertEqual(run_mock.call_count, 1)
+        self.assertEqual(enumerate_mock.call_count, 1)
         self.assertEqual(stale, warmed)
         self.assertEqual(stale[0]["instance_id"], "USB\\VID_413D&PID_2104\\ABC123")
 
-    def test_allow_probe_false_serves_fresh_cache_without_subprocess(self) -> None:
-        result = SimpleNamespace(stdout=PUBLIC_PNP_OUTPUT)
-        with patch("zd_app.services.device_service.silent_run", return_value=result) as run_mock:
+    def test_allow_probe_false_serves_fresh_cache_without_presence_probe(self) -> None:
+        with patch(
+            "zd_app.services.device_service._enumerate_present_device_entries",
+            return_value=PUBLIC_DEVICE_ENTRIES,
+        ) as enumerate_mock:
             self.service._find_zd_entries()  # warms the cache (1 probe)
             self.now = 1.0  # within the connected TTL
             fresh = self.service._find_zd_entries(allow_probe=False)
 
-        self.assertEqual(run_mock.call_count, 1)
+        self.assertEqual(enumerate_mock.call_count, 1)
         self.assertEqual(fresh[0]["instance_id"], "USB\\VID_413D&PID_2104\\ABC123")
 
     def test_force_probe_overrides_allow_probe_false(self) -> None:
-        result = SimpleNamespace(stdout=PUBLIC_PNP_OUTPUT)
-        with patch("zd_app.services.device_service.silent_run", return_value=result) as run_mock:
+        with patch(
+            "zd_app.services.device_service._enumerate_present_device_entries",
+            return_value=PUBLIC_DEVICE_ENTRIES,
+        ) as enumerate_mock:
             self.service._find_zd_entries()
             self.now = 100.0
             self.service._find_zd_entries(force_refresh=True, allow_probe=False)
 
-        self.assertEqual(run_mock.call_count, 2)
+        self.assertEqual(enumerate_mock.call_count, 2)
+
+
+class DeviceServiceLocalizedRecognitionTests(unittest.TestCase):
+    def test_legacy_english_label_parser_misses_localized_pnputil_output(self) -> None:
+        for locale, output in LOCALIZED_PNPUTIL_OUTPUTS.items():
+            with self.subTest(locale=locale):
+                self.assertFalse(_legacy_english_label_parser_matches_zd(output))
+
+    def test_find_zd_entries_uses_setupdi_instance_id_not_localized_labels(self) -> None:
+        for locale in LOCALIZED_PNPUTIL_OUTPUTS:
+            with self.subTest(locale=locale):
+                service = DeviceService(clock=lambda: 0.0)
+                with patch(
+                    "zd_app.services.device_service._enumerate_present_device_entries",
+                    return_value=PUBLIC_DEVICE_ENTRIES,
+                ):
+                    entries = service._find_zd_entries(force_refresh=True)
+                self.assertEqual(entries[0]["instance_id"], "USB\\VID_413D&PID_2104\\ABC123")
+
+    def test_find_zd_entries_filters_allowlist_and_sorts_usb_first(self) -> None:
+        entries = [
+            {
+                "instance_id": "BTHENUM\\DEV_VID_413D&PID_2104\\BT123",
+                "description": "ZD Ultimate Legend",
+                "status": "Present",
+            },
+            {
+                "instance_id": "USB\\VID_045E&PID_028E\\XBOX",
+                "description": "Xbox-compatible controller",
+                "status": "Present",
+            },
+            {
+                "instance_id": "USB\\VID_413D&PID_2104\\USB123",
+                "description": "ZD Ultimate Legend",
+                "status": "Present",
+            },
+        ]
+        service = DeviceService(clock=lambda: 0.0)
+
+        with patch(
+            "zd_app.services.device_service._enumerate_present_device_entries",
+            return_value=entries,
+        ):
+            matches = service._find_zd_entries(force_refresh=True)
+
+        self.assertEqual(
+            [entry["instance_id"] for entry in matches],
+            [
+                "USB\\VID_413D&PID_2104\\USB123",
+                "BTHENUM\\DEV_VID_413D&PID_2104\\BT123",
+            ],
+        )
+
+
+class DeviceServiceSetupDiEnumerationTests(unittest.TestCase):
+    def _enumerate(
+        self,
+        devices_by_enumerator: dict[str | None, list[dict[str, str]]],
+    ) -> tuple[list[dict[str, str]], _FakeSetupApi]:
+        kernel32 = _FakeKernel32()
+        setupapi = _FakeSetupApi(kernel32, devices_by_enumerator)
+        with patch.object(
+            device_service_module._Win32,
+            "setupapi",
+            return_value=setupapi,
+        ), patch.object(
+            device_service_module._Win32,
+            "kernel32",
+            return_value=kernel32,
+        ):
+            entries = device_service_module._enumerate_present_device_entries()
+        return entries, setupapi
+
+    def test_setupdi_usb_enumerator_returns_present_instance_entries(self) -> None:
+        entries, setupapi = self._enumerate({"USB": PUBLIC_DEVICE_ENTRIES})
+
+        self.assertEqual(setupapi.enumerators, ["USB"])
+        self.assertEqual(setupapi.destroyed_handles, ["info-set-1"])
+        self.assertEqual(entries, PUBLIC_DEVICE_ENTRIES)
+
+    def test_setupdi_falls_back_to_all_present_when_usb_scope_misses_zd(self) -> None:
+        entries, setupapi = self._enumerate(
+            {
+                "USB": [
+                    {
+                        "instance_id": "USB\\VID_045E&PID_028E\\XBOX",
+                        "description": "Xbox-compatible controller",
+                        "status": "Present",
+                    }
+                ],
+                None: PUBLIC_DEVICE_ENTRIES,
+            }
+        )
+
+        self.assertEqual(setupapi.enumerators, ["USB", None])
+        self.assertEqual(
+            [entry["instance_id"] for entry in entries],
+            [
+                "USB\\VID_045E&PID_028E\\XBOX",
+                "USB\\VID_413D&PID_2104\\ABC123",
+            ],
+        )
 
 
 class DeviceServicePresencePrimerTests(unittest.TestCase):
@@ -107,8 +345,10 @@ class DeviceServicePresencePrimerTests(unittest.TestCase):
 
     def test_start_presence_primer_warms_cache_then_stops(self) -> None:
         service = DeviceService()
-        result = SimpleNamespace(stdout=PUBLIC_PNP_OUTPUT)
-        with patch("zd_app.services.device_service.silent_run", return_value=result):
+        with patch(
+            "zd_app.services.device_service._enumerate_present_device_entries",
+            return_value=PUBLIC_DEVICE_ENTRIES,
+        ):
             service.start_presence_primer(interval_seconds=0.05)
             try:
                 deadline = time.monotonic() + 3.0
@@ -126,7 +366,10 @@ class DeviceServicePresencePrimerTests(unittest.TestCase):
 
     def test_start_presence_primer_is_idempotent(self) -> None:
         service = DeviceService()
-        with patch("zd_app.services.device_service.silent_run", return_value=SimpleNamespace(stdout="")):
+        with patch(
+            "zd_app.services.device_service._enumerate_present_device_entries",
+            return_value=[],
+        ):
             service.start_presence_primer(interval_seconds=0.5)
             try:
                 first = service._presence_primer_thread
@@ -143,19 +386,51 @@ class DeviceServicePresencePrimerTests(unittest.TestCase):
     def test_refresh_presence_cache_never_raises(self) -> None:
         service = DeviceService()
         with patch(
-            "zd_app.services.device_service.silent_run",
-            side_effect=OSError("boom"),
+            "zd_app.services.device_service._enumerate_present_device_entries",
+            side_effect=RuntimeError("boom"),
         ):
             service.refresh_presence_cache()  # swallows the failure
 
 
 class DeviceServiceRefreshStateTests(unittest.TestCase):
-    def _refresh_with_zd_entry(self, service: DeviceService):
+    def _refresh_with_zd_entry(
+        self,
+        service: DeviceService,
+        instance_id: str = "USB\\VID_413D&PID_2104\\ABC123",
+    ):
         with patch.object(
             service,
             "_find_zd_entries",
-            return_value=[{"instance_id": "USB\\VID_413D&PID_2104\\ABC123"}],
+            return_value=[{"instance_id": instance_id}],
         ), patch(
+            "zd_app.services.device_service.get_connected_controllers",
+            return_value=[],
+        ):
+            return service.refresh_state()
+
+    def _refresh_with_zd_entry_and_slots(
+        self,
+        service: DeviceService,
+        instance_id: str = "USB\\VID_413D&PID_2104\\ABC123",
+        slots: list[int] | None = None,
+        **refresh_kwargs,
+    ):
+        slots = list(slots or [])
+        with patch.object(
+            service,
+            "_find_zd_entries",
+            return_value=[{"instance_id": instance_id}],
+        ), patch(
+            "zd_app.services.device_service.get_connected_controllers",
+            return_value=slots,
+        ), patch(
+            "zd_app.services.device_service.describe_battery_level",
+            return_value="Wired",
+        ):
+            return service.refresh_state(**refresh_kwargs)
+
+    def _refresh_with_no_device(self, service: DeviceService):
+        with patch.object(service, "_find_zd_entries", return_value=[]), patch(
             "zd_app.services.device_service.get_connected_controllers",
             return_value=[],
         ):
@@ -193,6 +468,138 @@ class DeviceServiceRefreshStateTests(unittest.TestCase):
 
         self.assertEqual(state.connection_state, "connected")
         self.assertEqual(state.sync_status, "Reading")
+
+    def test_disconnect_keeps_retained_read_values_but_marks_stale(self) -> None:
+        service = DeviceService(clock=lambda: 0.0)
+        service.state.connection_state = "connected"
+        service.state.stable_identifier = "USB\\VID_413D&PID_2104\\ABC123"
+        service._last_connected_identifier = service.state.stable_identifier
+        service.state.firmware_version = "1.24"
+        service.state.active_onboard_profile = 3
+        service.state.last_read_time = "2026-05-04T16:25:26+00:00"
+        service.state.data_freshness = "fresh"
+        service.state.summary_sources["firmware"] = "official_app_ui"
+        service.state.summary_sources["active_profile"] = "protocol"
+
+        state = self._refresh_with_no_device(service)
+
+        self.assertEqual(state.connection_state, "no_device")
+        self.assertEqual(state.firmware_version, "1.24")
+        self.assertEqual(state.active_onboard_profile, 3)
+        self.assertEqual(state.last_read_time, "2026-05-04T16:25:26+00:00")
+        self.assertEqual(state.data_freshness, "stale")
+        self.assertEqual(state.summary_sources["firmware"], "official_app_ui")
+        self.assertEqual(state.summary_sources["active_profile"], "protocol")
+
+    def test_slot_drop_while_same_identity_connected_does_not_log_detected(self) -> None:
+        service = DeviceService(clock=lambda: 0.0)
+        instance_id = "USB\\VID_413D&PID_2104\\ABC123"
+        self._refresh_with_zd_entry_and_slots(service, instance_id, [0])
+        service.event_log.clear()
+
+        self._refresh_with_zd_entry_and_slots(
+            service,
+            instance_id,
+            [],
+            background=True,
+            allow_probe=False,
+        )
+
+        self.assertEqual(service.recent_events(5), [])
+
+    def test_replug_transition_logs_detected_once(self) -> None:
+        service = DeviceService(clock=lambda: 0.0)
+        instance_id = "USB\\VID_413D&PID_2104\\ABC123"
+        self._refresh_with_zd_entry_and_slots(service, instance_id, [0])
+        self._refresh_with_no_device(service)
+        service.event_log.clear()
+
+        self._refresh_with_zd_entry_and_slots(service, instance_id, [0])
+
+        events = service.recent_events(5)
+        self.assertEqual(len(events), 1)
+        self.assertIn("Detected ZD Ultimate Legend on USB.", events[0])
+
+    def test_connected_identity_change_logs_detected_once(self) -> None:
+        service = DeviceService(clock=lambda: 0.0)
+        self._refresh_with_zd_entry_and_slots(
+            service,
+            "USB\\VID_413D&PID_2104\\OLD",
+            [0],
+        )
+        service.event_log.clear()
+
+        self._refresh_with_zd_entry_and_slots(
+            service,
+            "USB\\VID_413D&PID_2104\\NEW",
+            [0],
+        )
+
+        events = service.recent_events(5)
+        self.assertEqual(len(events), 1)
+        self.assertIn("Detected ZD Ultimate Legend on USB.", events[0])
+
+    def test_identity_change_clears_retained_read_state(self) -> None:
+        service = DeviceService(clock=lambda: 0.0)
+        service.state.connection_state = "connected"
+        service.state.stable_identifier = "USB\\VID_413D&PID_2104\\OLD"
+        service._last_connected_identifier = service.state.stable_identifier
+        service.state.firmware_version = "1.24"
+        service.state.battery_level = "Full"
+        service.state.sleep_setting = "10m"
+        service.state.active_onboard_profile = 4
+        service.state.last_read_time = "2026-05-04T16:25:26+00:00"
+        service.state.data_freshness = "fresh"
+        service.state.sync_status = "Ready"
+        service.state.summary_sources.update(
+            {
+                "battery": "official_app_ui",
+                "firmware": "official_app_ui",
+                "active_profile": "protocol",
+                "sleep": "official_app_ui",
+            }
+        )
+
+        state = self._refresh_with_zd_entry(
+            service,
+            "USB\\VID_413D&PID_2104\\NEW",
+        )
+
+        self.assertEqual(state.stable_identifier, "USB\\VID_413D&PID_2104\\NEW")
+        self.assertEqual(state.firmware_version, "Unknown")
+        self.assertEqual(state.battery_level, "Unknown")
+        self.assertEqual(state.sleep_setting, "Unknown")
+        self.assertEqual(state.active_onboard_profile, 1)
+        self.assertIsNone(state.last_read_time)
+        self.assertEqual(state.data_freshness, "never_read")
+        self.assertEqual(state.sync_status, "Connected")
+        for field_name in ("battery", "firmware", "active_profile", "sleep"):
+            self.assertEqual(state.summary_sources[field_name], "unknown")
+
+    def test_reconnect_same_identity_keeps_retained_read_state(self) -> None:
+        service = DeviceService(clock=lambda: 0.0)
+        service.state.connection_state = "no_device"
+        service.state.stable_identifier = "unknown"
+        service._last_connected_identifier = "USB\\VID_413D&PID_2104\\ABC123"
+        service.state.firmware_version = "1.24"
+        service.state.active_onboard_profile = 2
+        service.state.last_read_time = "2026-05-04T16:25:26+00:00"
+        service.state.data_freshness = "stale"
+        service.state.summary_sources["firmware"] = "official_app_ui"
+        service.state.summary_sources["active_profile"] = "protocol"
+
+        state = self._refresh_with_zd_entry(
+            service,
+            "USB\\VID_413D&PID_2104\\ABC123",
+        )
+
+        self.assertEqual(state.connection_state, "connected")
+        self.assertEqual(state.firmware_version, "1.24")
+        self.assertEqual(state.active_onboard_profile, 2)
+        self.assertEqual(state.last_read_time, "2026-05-04T16:25:26+00:00")
+        self.assertEqual(state.data_freshness, "stale")
+        self.assertEqual(state.summary_sources["firmware"], "official_app_ui")
+        self.assertEqual(state.summary_sources["active_profile"], "protocol")
 
 
 class DeviceServiceEventLogTests(unittest.TestCase):
@@ -423,9 +830,11 @@ class DeviceServiceSummaryPrecedenceTests(unittest.TestCase):
             ],
             clock=lambda: 0.0,
         )
-        result = SimpleNamespace(stdout=PUBLIC_PNP_OUTPUT)
 
-        with patch("zd_app.services.device_service.silent_run", return_value=result), patch(
+        with patch(
+            "zd_app.services.device_service._enumerate_present_device_entries",
+            return_value=PUBLIC_DEVICE_ENTRIES,
+        ), patch(
             "zd_app.services.device_service.get_connected_controllers",
             return_value=[0],
         ), patch(
@@ -440,14 +849,15 @@ class DeviceServiceSummaryPrecedenceTests(unittest.TestCase):
         self.assertEqual(state.summary_sources["battery"], "official_app_ui")
         self.assertIn("Protocol-owned active config was retained.", self.service.recent_events(1)[0])
 
-    def test_find_zd_entries_uses_silent_subprocess(self) -> None:
-        result = SimpleNamespace(stdout=PUBLIC_PNP_OUTPUT)
-
-        with patch("zd_app.services.device_service.silent_run", return_value=result) as run_mock:
+    def test_find_zd_entries_uses_setupdi_enumeration(self) -> None:
+        with patch(
+            "zd_app.services.device_service._enumerate_present_device_entries",
+            return_value=PUBLIC_DEVICE_ENTRIES,
+        ) as enumerate_mock:
             entries = self.service._find_zd_entries(force_refresh=True)
 
         self.assertEqual(entries[0]["instance_id"], "USB\\VID_413D&PID_2104\\ABC123")
-        run_mock.assert_called_once()
+        enumerate_mock.assert_called_once()
 
 
 class DeviceValueLocalizationTests(unittest.TestCase):

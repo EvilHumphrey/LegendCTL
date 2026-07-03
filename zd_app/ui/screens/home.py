@@ -165,9 +165,9 @@ def _device_profile_status_card(shell) -> None:
             _paired_metrics(
                 (
                     t("home.connection.firmware"),
-                    shell.device_service.format_firmware_version(),
+                    _firmware_status_value(shell),
                     "home_status_firmware",
-                    None,
+                    _firmware_status_color(shell),
                 ),
                 (
                     t("home.connection.battery"),
@@ -179,9 +179,9 @@ def _device_profile_status_card(shell) -> None:
             _paired_metrics(
                 (
                     t("home.profile.active"),
-                    _localized_active_config_label(state),
+                    _active_profile_status_value(shell),
                     "home_profile_active",
-                    None,
+                    _active_profile_status_color(shell),
                 ),
                 (
                     t("home.profile.pending"),
@@ -424,6 +424,50 @@ def _localized_active_config_label(state) -> str:
     if label.startswith("Config "):
         return t("profile.config_state.config", n=label.removeprefix("Config "))
     return label
+
+
+def _firmware_status_value(shell) -> str:
+    value = shell.device_service.format_firmware_version()
+    if _has_retained_firmware(shell.device_service.state) and not _is_connected(shell):
+        return t("device.value.last_read", value=value)
+    return value
+
+
+def _firmware_status_color(shell):
+    if _has_retained_firmware(shell.device_service.state) and not _is_connected(shell):
+        return shell.COLORS["muted"]
+    return None
+
+
+def _active_profile_status_value(shell) -> str:
+    value = _localized_active_config_label(shell.device_service.state)
+    if _has_retained_active_profile(shell.device_service.state) and not _is_connected(
+        shell
+    ):
+        return t("device.value.last_read", value=value)
+    return value
+
+
+def _active_profile_status_color(shell):
+    if _has_retained_active_profile(shell.device_service.state) and not _is_connected(
+        shell
+    ):
+        return shell.COLORS["muted"]
+    return None
+
+
+def _is_connected(shell) -> bool:
+    return shell.device_service.state.connection_state == "connected"
+
+
+def _has_retained_firmware(state) -> bool:
+    firmware = str(getattr(state, "firmware_version", "") or "").strip()
+    return bool(firmware and firmware != "Unknown")
+
+
+def _has_retained_active_profile(state) -> bool:
+    sources = getattr(state, "summary_sources", {}) or {}
+    return sources.get("active_profile", "unknown") != "unknown"
 
 
 def _localized_draft_label(profile) -> str:

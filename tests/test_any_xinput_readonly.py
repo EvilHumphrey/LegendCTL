@@ -139,7 +139,7 @@ class DeviceClassificationAndCapabilityTests(unittest.TestCase):
         self.assertEqual(state.connection_state, "connected")
 
     def test_generic_xinput_classified_read_only(self) -> None:
-        # No ZD via pnputil, but an XInput pad is present.
+        # No allowlisted ZD presence entry, but an XInput pad is present.
         state = self._refresh([], [0])
         self.assertEqual(state.device_class, "generic_xinput")
         self.assertFalse(state.write_supported)

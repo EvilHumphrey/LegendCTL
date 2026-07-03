@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
+import ctypes as c
 import logging
-import os
-import subprocess
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from ctypes import wintypes as w
 from typing import Any
 
 from zd_app.services.xinput import describe_battery_level, get_connected_controllers
 from zd_app.i18n import t
 from zd_app.models import DeviceClass, DeviceState, utc_now_iso
-from zd_app.services._subprocess_helpers import silent_run
 from zd_app.services.official_app_summary_service import OfficialAppSummary, OfficialAppSummaryService
 
 
@@ -30,24 +29,245 @@ from zd_app.services._log_entry import (
 from zd_app.services.path_scrub import scrub_paths
 
 
-# Absolute path to pnputil.exe (avoids a PATH search-order hijack).
-_PNPUTIL_EXE = os.path.join(
-    os.environ.get("SystemRoot", r"C:\Windows"), "System32", "pnputil.exe"
-)
+DIGCF_PRESENT = 0x2
+# Required whenever SetupDiGetClassDevsW is called with a NULL ClassGuid (as the
+# enumeration below does): without DIGCF_ALLCLASSES the call fails with
+# ERROR_INVALID_PARAMETER (87) and recognition sees ZERO devices — proven live
+# on the operator's machine 2026-07-02 (the mocked-API tests cannot catch this).
+DIGCF_ALLCLASSES = 0x4
+ERROR_NO_MORE_ITEMS = 259
+SPDRP_DEVICEDESC = 0x0
+_INVALID_HANDLE_VALUE = w.HANDLE(-1).value
+_DEVICE_INSTANCE_ID_BUFFER_CHARS = 512
+_DEVICE_DESCRIPTION_BUFFER_CHARS = 512
+
+
+class _GUID(c.Structure):
+    _fields_ = [
+        ("Data1", w.DWORD),
+        ("Data2", w.WORD),
+        ("Data3", w.WORD),
+        ("Data4", c.c_ubyte * 8),
+    ]
+
+
+class _SP_DEVINFO_DATA(c.Structure):
+    _fields_ = [
+        ("cbSize", w.DWORD),
+        ("ClassGuid", _GUID),
+        ("DevInst", w.DWORD),
+        ("Reserved", c.c_void_p),
+    ]
+
+
+class _Win32:
+    """Small lazy-bound Win32 surface for locale-independent presence probes."""
+
+    _kernel32 = None
+    _setupapi = None
+
+    @classmethod
+    def kernel32(cls):
+        if cls._kernel32 is None:
+            cls._kernel32 = c.windll.kernel32
+            cls._kernel32.GetLastError.argtypes = []
+            cls._kernel32.GetLastError.restype = w.DWORD
+        return cls._kernel32
+
+    @classmethod
+    def setupapi(cls):
+        if cls._setupapi is None:
+            cls._setupapi = c.WinDLL("setupapi")
+            cls._setupapi.SetupDiGetClassDevsW.argtypes = [
+                c.POINTER(_GUID),
+                w.LPCWSTR,
+                w.HWND,
+                w.DWORD,
+            ]
+            cls._setupapi.SetupDiGetClassDevsW.restype = c.c_void_p
+            cls._setupapi.SetupDiEnumDeviceInfo.argtypes = [
+                c.c_void_p,
+                w.DWORD,
+                c.POINTER(_SP_DEVINFO_DATA),
+            ]
+            cls._setupapi.SetupDiEnumDeviceInfo.restype = w.BOOL
+            cls._setupapi.SetupDiGetDeviceInstanceIdW.argtypes = [
+                c.c_void_p,
+                c.POINTER(_SP_DEVINFO_DATA),
+                w.LPWSTR,
+                w.DWORD,
+                c.POINTER(w.DWORD),
+            ]
+            cls._setupapi.SetupDiGetDeviceInstanceIdW.restype = w.BOOL
+            cls._setupapi.SetupDiGetDeviceRegistryPropertyW.argtypes = [
+                c.c_void_p,
+                c.POINTER(_SP_DEVINFO_DATA),
+                w.DWORD,
+                c.POINTER(w.DWORD),
+                c.c_void_p,
+                w.DWORD,
+                c.POINTER(w.DWORD),
+            ]
+            cls._setupapi.SetupDiGetDeviceRegistryPropertyW.restype = w.BOOL
+            cls._setupapi.SetupDiDestroyDeviceInfoList.argtypes = [c.c_void_p]
+            cls._setupapi.SetupDiDestroyDeviceInfoList.restype = w.BOOL
+        return cls._setupapi
 
 
 # Allowlist of USB ``VID&PID`` needles (lowercase) for controllers verified as a
-# ZD Ultimate Legend: the only hardware whose HID settings/write protocol this
-# app implements. A non-allowlisted controller remains eligible for read-only
-# XInput live verification, but all HID write/settings surfaces stay gated.
+# ZD Ultimate Legend — the only hardware whose HID settings/write protocol this
+# app implements. Matched as a substring against the PnP instance id. A
+# controller NOT on this allowlist is treated as a generic XInput pad: the
+# read-only live tester works, but every HID write/settings surface stays gated
+# and labeled "unverified" (see ``DeviceState.write_supported``). This is a tuple
+# (not a single literal) so a future verified ZD revision can be added by id
+# without touching the detection logic. The MI_02 HID write transport in
+# ``settings_service`` is independently scoped to the same VID/PID, so widening
+# this list is the ONLY place a new device id becomes write-eligible.
 ZD_ULTIMATE_LEGEND_DEVICE_IDS: tuple[str, ...] = ("vid_413d&pid_2104",)
 
 
 def instance_id_is_allowlisted_zd(instance_id: str) -> bool:
-    """True if ``instance_id`` belongs to an allowlisted ZD Ultimate Legend."""
+    """True if ``instance_id`` belongs to an allowlisted ZD Ultimate Legend.
+
+    Case-insensitive substring match against :data:`ZD_ULTIMATE_LEGEND_DEVICE_IDS`
+    (the PnP instance id embeds the ``VID_xxxx&PID_xxxx`` needle). The
+    single hard-coded ``vid_413d&pid_2104`` filter this replaces matched exactly
+    this way, so behaviour is unchanged for today's lone id.
+    """
 
     lowered = instance_id.lower()
     return any(needle in lowered for needle in ZD_ULTIMATE_LEGEND_DEVICE_IDS)
+
+
+def _setupdi_handle_failed(info_set: object) -> bool:
+    return info_set in (None, 0, _INVALID_HANDLE_VALUE)
+
+
+def _setupdi_device_instance_id(setupapi, info_set, device_info: _SP_DEVINFO_DATA) -> str:
+    required_size = w.DWORD(0)
+    buffer = c.create_unicode_buffer(_DEVICE_INSTANCE_ID_BUFFER_CHARS)
+    ok = bool(
+        setupapi.SetupDiGetDeviceInstanceIdW(
+            info_set,
+            c.byref(device_info),
+            buffer,
+            len(buffer),
+            c.byref(required_size),
+        )
+    )
+    if not ok and required_size.value > len(buffer):
+        buffer = c.create_unicode_buffer(required_size.value)
+        ok = bool(
+            setupapi.SetupDiGetDeviceInstanceIdW(
+                info_set,
+                c.byref(device_info),
+                buffer,
+                len(buffer),
+                c.byref(required_size),
+            )
+        )
+    if not ok:
+        return ""
+    return buffer.value.strip()
+
+
+def _setupdi_device_description(setupapi, info_set, device_info: _SP_DEVINFO_DATA) -> str:
+    reg_type = w.DWORD(0)
+    required_size = w.DWORD(0)
+    buffer = c.create_unicode_buffer(_DEVICE_DESCRIPTION_BUFFER_CHARS)
+    ok = bool(
+        setupapi.SetupDiGetDeviceRegistryPropertyW(
+            info_set,
+            c.byref(device_info),
+            SPDRP_DEVICEDESC,
+            c.byref(reg_type),
+            buffer,
+            c.sizeof(buffer),
+            c.byref(required_size),
+        )
+    )
+    if not ok and required_size.value > c.sizeof(buffer):
+        buffer = c.create_unicode_buffer((required_size.value // c.sizeof(w.WCHAR)) + 1)
+        ok = bool(
+            setupapi.SetupDiGetDeviceRegistryPropertyW(
+                info_set,
+                c.byref(device_info),
+                SPDRP_DEVICEDESC,
+                c.byref(reg_type),
+                buffer,
+                c.sizeof(buffer),
+                c.byref(required_size),
+            )
+        )
+    if not ok:
+        return "Unknown device"
+    return buffer.value.strip() or "Unknown device"
+
+
+def _enumerate_present_device_entries_for(enumerator: str | None) -> list[dict[str, str]]:
+    try:
+        setupapi = _Win32.setupapi()
+        kernel32 = _Win32.kernel32()
+    except (OSError, AttributeError):  # pragma: no cover - non-Windows fallback
+        return []
+
+    info_set = setupapi.SetupDiGetClassDevsW(
+        None, enumerator, None, DIGCF_PRESENT | DIGCF_ALLCLASSES
+    )
+    if _setupdi_handle_failed(info_set):
+        return []
+
+    entries: list[dict[str, str]] = []
+    try:
+        index = 0
+        while True:
+            device_info = _SP_DEVINFO_DATA()
+            device_info.cbSize = c.sizeof(_SP_DEVINFO_DATA)
+            ok = bool(setupapi.SetupDiEnumDeviceInfo(info_set, index, c.byref(device_info)))
+            if not ok:
+                if kernel32.GetLastError() == ERROR_NO_MORE_ITEMS:
+                    break
+                index += 1
+                continue
+
+            instance_id = _setupdi_device_instance_id(setupapi, info_set, device_info)
+            if instance_id:
+                entries.append(
+                    {
+                        "instance_id": instance_id,
+                        "description": _setupdi_device_description(
+                            setupapi, info_set, device_info
+                        ),
+                        "status": "Present",
+                    }
+                )
+            index += 1
+    finally:
+        setupapi.SetupDiDestroyDeviceInfoList(info_set)
+    return entries
+
+
+def _enumerate_present_device_entries() -> list[dict[str, str]]:
+    """Enumerate present device instance ids without localized text parsing."""
+
+    usb_entries = _enumerate_present_device_entries_for("USB")
+    if any(instance_id_is_allowlisted_zd(entry["instance_id"]) for entry in usb_entries):
+        return usb_entries
+
+    all_present_entries = _enumerate_present_device_entries_for(None)
+    if not usb_entries:
+        return all_present_entries
+
+    combined: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for entry in [*usb_entries, *all_present_entries]:
+        key = entry["instance_id"].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        combined.append(entry)
+    return combined
 
 
 class DeviceService:
@@ -100,19 +320,18 @@ class DeviceService:
         self.last_apply_result: str | LogEntry | None = None
         self.last_read_duration_ms: float | None = None
         self.last_write_duration_ms: float | None = None
-        self._last_presence_signature: tuple[str, int | None] = ("", None)
+        self._last_presence_signature: tuple[str, str] = ("", "")
+        self._last_connected_identifier: str = ""
         self._clock = clock or time.monotonic
         self._presence_cache_ttl_connected_seconds = max(0.0, presence_cache_ttl_connected_seconds)
         self._presence_cache_ttl_disconnected_seconds = max(0.0, presence_cache_ttl_disconnected_seconds)
         self._cached_zd_entries: list[dict[str, str]] = []
         self._has_cached_zd_entries = False
         self._last_zd_probe_at = 0.0
-        # The presence probe shells out to ``pnputil`` (~60-70ms on a typical
-        # machine). When that ran inline on the Dear PyGui render thread it
-        # produced a periodic multi-frame hitch the operator felt as nav
-        # stutter. The cache fields above are now read/written under this lock
-        # so a background primer thread can refresh them off the UI thread
-        # while ``_tick`` reads them without ever blocking on the subprocess.
+        # The SetupDi presence probe can still take long enough to be felt if it
+        # runs inline on the Dear PyGui render thread. The cache fields above are
+        # read/written under this lock so a background primer thread can refresh
+        # them off the UI thread while ``_tick`` reads the warmed result.
         self._presence_cache_lock = threading.Lock()
         self._presence_primer_thread: threading.Thread | None = None
         self._presence_primer_stop = threading.Event()
@@ -128,9 +347,9 @@ class DeviceService:
 
         ``allow_probe=False`` is the non-blocking path used by the per-frame UI
         tick: it reads whatever the background presence primer last cached and
-        never launches the ``pnputil`` subprocess on the calling thread. XInput
+        never launches the SetupDi presence probe on the calling thread. XInput
         enumeration (~0.2ms) still runs so connect/disconnect is detected
-        promptly; the slower ZD-specific identification rides the primed cache.
+        promptly; the ZD-specific identification rides the primed cache.
         ``force_probe`` (startup / reconnect / explicit Read) always probes.
         """
         started = time.perf_counter()
@@ -140,6 +359,7 @@ class DeviceService:
         slot = xinput_slots[0] if xinput_slots else None
         battery_level = describe_battery_level(slot) if slot is not None else "Unknown"
         was_connected = self.state.connection_state == "connected"
+        previous_stable_identifier = self.state.stable_identifier
         if pnp_entries:
             chosen = pnp_entries[0]
             product_name = "ZD Ultimate Legend"
@@ -163,17 +383,35 @@ class DeviceService:
             connection_state = "no_device"
             sync_status = "Disconnected"
 
-        signature = (stable_identifier, slot)
+        signature = (connection_state, stable_identifier)
         if signature != self._last_presence_signature:
             self._last_presence_signature = signature
             if connection_state == "connected":
-                self.log_i18n_event(
-                    "log.controller.detected",
-                    product_name=product_name,
-                    connection_mode=connection_mode,
+                identity_changed_while_connected = (
+                    was_connected and stable_identifier != previous_stable_identifier
                 )
+                if not was_connected or identity_changed_while_connected:
+                    self.log_i18n_event(
+                        "log.controller.detected",
+                        product_name=product_name,
+                        connection_mode=connection_mode,
+                    )
             elif not background:
                 self.log_i18n_event("log.controller.not_detected")
+
+        identity_changed = False
+        if connection_state == "connected" and self._known_device_identifier(
+            stable_identifier
+        ):
+            previous_identifier = self._last_connected_identifier
+            if not previous_identifier and self._known_device_identifier(
+                self.state.stable_identifier
+            ):
+                previous_identifier = self.state.stable_identifier
+            if previous_identifier and stable_identifier != previous_identifier:
+                self._clear_retained_read_state_for_identity_change()
+                identity_changed = True
+            self._last_connected_identifier = stable_identifier
 
         self.state.product_name = product_name
         self.state.device_class = device_class
@@ -183,8 +421,10 @@ class DeviceService:
         if self.state.summary_sources.get("battery") != "official_app_ui":
             self.state.battery_level = battery_level
             self.state.summary_sources["battery"] = "xinput" if battery_level != "Unknown" else "unknown"
-        self.state.sync_status = sync_status
+        self.state.sync_status = "Connected" if identity_changed else sync_status
         self.state.xinput_slot = slot
+        if connection_state == "no_device" and was_connected:
+            self.state.data_freshness = "stale"
         self.last_read_duration_ms = round((time.perf_counter() - started) * 1000.0, 2)
         return self.state
 
@@ -371,52 +611,29 @@ class DeviceService:
             if not force_refresh and not allow_probe:
                 # Non-blocking UI-tick path: hand back whatever the background
                 # presence primer last cached (possibly stale or empty) rather
-                # than block this thread on the pnputil subprocess.
+                # than block this thread on the SetupDi presence probe.
                 return [entry.copy() for entry in self._cached_zd_entries]
 
-        # The subprocess runs OUTSIDE the lock so a concurrent UI-thread cache
-        # read is never stalled for the ~60ms pnputil enumeration.
+        # SetupDi enumeration runs OUTSIDE the lock so a concurrent UI-thread
+        # cache read is never stalled by OS device-tree traversal.
         try:
-            result = silent_run(
-                [_PNPUTIL_EXE, "/enum-devices", "/connected"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="ignore",
-                timeout=8,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
+            entries = _enumerate_present_device_entries()
+        except (OSError, AttributeError):
             with self._presence_cache_lock:
                 if self._has_cached_zd_entries:
                     return [entry.copy() for entry in self._cached_zd_entries]
             return []
 
-        entries: list[dict[str, str]] = []
-        current: dict[str, str] = {}
-        for raw_line in result.stdout.splitlines():
-            line = raw_line.strip()
-            if not line:
-                if current:
-                    entries.append(current)
-                    current = {}
-                continue
-            if ":" in line:
-                key, value = line.split(":", 1)
-                current[key.strip().lower()] = value.strip()
-        if current:
-            entries.append(current)
-
         matches = [
             entry for entry in entries
-            if instance_id_is_allowlisted_zd(entry.get("instance id", ""))
+            if instance_id_is_allowlisted_zd(entry.get("instance_id", ""))
         ]
         normalized = []
         for entry in matches:
             normalized.append(
                 {
-                    "instance_id": entry.get("instance id", "unknown"),
-                    "description": entry.get("device description", "Unknown device"),
+                    "instance_id": entry.get("instance_id", "unknown"),
+                    "description": entry.get("description", "Unknown device"),
                     "status": entry.get("status", "Unknown"),
                 }
             )
@@ -433,7 +650,7 @@ class DeviceService:
         return [entry.copy() for entry in normalized]
 
     def refresh_presence_cache(self) -> None:
-        """Refresh the pnputil presence cache, honoring the configured TTL.
+        """Refresh the SetupDi presence cache, honoring the configured TTL.
 
         Side-effect only: updates the lock-guarded cache fields and never
         touches ``self.state`` or the event log, so it is safe to call from a
@@ -449,9 +666,8 @@ class DeviceService:
         """Start a daemon thread that keeps the presence cache warm off-thread.
 
         Idempotent. The thread wakes every ``interval_seconds`` and refreshes
-        the cache only when its TTL has expired, so the pnputil probe cadence
-        is unchanged from the inline version — it just no longer runs on the
-        render thread. No-op if already running.
+        the cache only when its TTL has expired, so the presence-probe cadence
+        stays bounded. No-op if already running.
         """
         if self._presence_primer_thread is not None and self._presence_primer_thread.is_alive():
             return
@@ -499,6 +715,21 @@ class DeviceService:
             self.state.sleep_setting = summary.sleep_setting
             self.state.summary_sources["sleep"] = "official_app_ui"
         return retained_protocol_active_profile
+
+    @staticmethod
+    def _known_device_identifier(value: str | None) -> bool:
+        text = (value or "").strip()
+        return bool(text and text.lower() != "unknown")
+
+    def _clear_retained_read_state_for_identity_change(self) -> None:
+        self.state.firmware_version = "Unknown"
+        self.state.battery_level = "Unknown"
+        self.state.sleep_setting = "Unknown"
+        self.state.active_onboard_profile = 1
+        self.state.last_read_time = None
+        self.state.data_freshness = "never_read"
+        for field_name in ("battery", "firmware", "active_profile", "sleep"):
+            self.state.summary_sources[field_name] = "unknown"
 
     @staticmethod
     def _infer_transport(instance_id: str) -> str:

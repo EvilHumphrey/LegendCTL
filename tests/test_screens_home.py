@@ -34,6 +34,9 @@ def _item_types() -> set[str]:
 
 
 class HomeScreenTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_locale("en")
+
     def test_home_renders_connection_card_with_state_data(self) -> None:
         shell = make_shell(settings_service=MagicMock())
         shell.device_service.state.connection_state = "connected"
@@ -237,6 +240,46 @@ class HomeScreenTests(unittest.TestCase):
             # The metric label is rendered as its own (muted) text item, kept
             # separate from the value so each can carry its own color/tag.
             self.assertIn(t("home.connection.firmware"), values)
+        finally:
+            dpg.destroy_context()
+
+    def test_connected_explainer_names_shipped_device_profile_card(self) -> None:
+        set_locale("en")
+        en_text = t("home.state_explainer.connected")
+        self.assertIn("Device & profile", en_text)
+        self.assertNotIn("Connection card", en_text)
+
+        set_locale("zh-CN")
+        zh_text = t("home.state_explainer.connected")
+        self.assertIn("设备与配置", zh_text)
+        self.assertNotIn("主页“连接”卡", zh_text)
+
+    def test_home_status_card_marks_retained_values_as_last_read_when_disconnected(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        shell.device_service.state.connection_state = "no_device"
+        shell.device_service.state.last_read_time = "2026-05-31T00:00:00"
+        shell.device_service.state.firmware_version = "1.24"
+        shell.device_service.state.active_onboard_profile = 3
+        shell.device_service.state.summary_sources["active_profile"] = "protocol"
+        shell.device_service.format_firmware_version.return_value = "1.24"
+        shell.device_service.format_battery_level.return_value = "Unknown"
+        shell.device_service.recent_events.return_value = []
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            home.build(shell, "content_region")
+
+            self.assertEqual(
+                dpg.get_value("home_status_firmware"),
+                "1.24 (last read)",
+            )
+            self.assertEqual(
+                dpg.get_value("home_profile_active"),
+                "Profile 3 (last read)",
+            )
         finally:
             dpg.destroy_context()
 

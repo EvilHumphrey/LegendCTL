@@ -1580,6 +1580,7 @@ class SettingsService:
         # 3x each) runs synchronously on the UI thread — minutes of freeze
         # without a batch-level cap. 0 or negative disables the budget.
         self._batch_read_budget_s = batch_read_budget_s
+        self.last_read_skipped_fields = 0
 
         self._write_handle: Optional[int] = None
         self._read_write_handle: Optional[int] = None
@@ -2760,6 +2761,7 @@ class SettingsService:
         issued = 0
         skipped = 0
         exhausted = False
+        self.last_read_skipped_fields = 0
 
         def _within_budget() -> bool:
             # One guard per getter call (the 8-point capability probe
@@ -2834,6 +2836,7 @@ class SettingsService:
         step_size = self.get_step_size() if _within_budget() else None
 
         if skipped:
+            self.last_read_skipped_fields = skipped
             logger.warning(
                 "get_all_settings: batch read budget (%.1fs) exhausted after "
                 "%d of %d reads; remaining fields unread",

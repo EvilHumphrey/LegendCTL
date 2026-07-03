@@ -229,7 +229,7 @@ def build_compatibility_report(
         product_name=_clean(getattr(state, "product_name", ""), t("common.unknown")),
         device_model_id=model_id,
         variant=_clean(variant, t("compat_report.value.unknown")),
-        firmware=_clean(firmware, t("compat_report.value.unknown")),
+        firmware=_firmware_value(firmware, state),
         active_xinput_slot=xinput_slot,
         live_verify_availability=live_verify,
         checklist=items,
@@ -364,6 +364,23 @@ def _xinput_slot_label(slot: object | None) -> str:
     if slot is None:
         return t("compat_report.value.not_observed")
     return t("compat_report.xinput_slot.value", slot=slot)
+
+
+def _firmware_value(raw_value: object, state: DeviceState) -> str:
+    explicit = _known_text(raw_value)
+    if explicit:
+        return explicit
+    cached = _known_text(getattr(state, "firmware_version", ""))
+    if cached:
+        return cached
+    return t("compat_report.value.unknown")
+
+
+def _known_text(value: object) -> str:
+    text = _clean(value, "")
+    if text.lower() == "unknown":
+        return ""
+    return text
 
 
 def _overall_result(

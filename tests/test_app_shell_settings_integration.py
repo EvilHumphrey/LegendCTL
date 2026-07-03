@@ -1361,6 +1361,97 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         shell.settings_service.stop.assert_not_called()
         self.assertEqual(shell._last_connection_state, "no_device")
 
+    def test_tick_disconnect_logs_event_and_defers_screen_rebuild_once(self) -> None:
+        shell = _make_shell(MagicMock())
+        shell.settings.auto_read_on_connect = False
+        shell._defer_ui_armed = True
+        shell.device_service.state = DeviceState(
+            connection_state="connected",
+            device_class="zd_ultimate_legend",
+            xinput_slot=0,
+        )
+        shell._last_connection_state = "connected"
+        shell._last_tick = 10.0
+        shell.rebuild_current_screen = MagicMock()
+
+        def refresh_state(*, background: bool = False, force_probe: bool = False, allow_probe: bool = True):
+            del background, force_probe, allow_probe
+            shell.device_service.state.connection_state = "no_device"
+            shell.device_service.state.device_class = "none"
+            shell.device_service.state.xinput_slot = None
+            return shell.device_service.state
+
+        shell.device_service.refresh_state.side_effect = refresh_state
+
+        with patch("zd_app.ui.app_shell.right_rail.refresh") as rail_refresh:
+            with patch("zd_app.ui.app_shell.time.time", return_value=10.0):
+                shell._tick()
+
+            shell.device_service.log_i18n_event.assert_called_once_with(
+                "log.controller.disconnected"
+            )
+            shell.rebuild_current_screen.assert_not_called()
+            rail_refresh.assert_not_called()
+
+            shell._drain_deferred_ui_calls()
+            shell.rebuild_current_screen.assert_called_once_with()
+            rail_refresh.assert_called_once_with(shell)
+
+            shell.device_service.log_i18n_event.reset_mock()
+            shell.rebuild_current_screen.reset_mock()
+            rail_refresh.reset_mock()
+            shell._last_presence_poll = 0.0
+            shell._last_tick = 13.0
+            with patch("zd_app.ui.app_shell.time.time", return_value=13.0):
+                shell._tick()
+
+            shell.device_service.log_i18n_event.assert_not_called()
+            shell.rebuild_current_screen.assert_not_called()
+            rail_refresh.assert_not_called()
+
+    def test_tick_fast_disconnect_force_probe_runs_once_for_slot_drop(self) -> None:
+        shell = _make_shell(MagicMock())
+        shell.settings.auto_read_on_connect = False
+        shell._defer_ui_armed = True
+        shell.device_service.state = DeviceState(
+            connection_state="connected",
+            device_class="zd_ultimate_legend",
+            stable_identifier="USB\\VID_413D&PID_2104\\ABC123",
+            xinput_slot=0,
+        )
+        shell._last_connection_state = "connected"
+        shell._last_tick = 10.0
+
+        def refresh_state(*, background: bool = False, force_probe: bool = False, allow_probe: bool = True):
+            if force_probe:
+                shell.device_service.state.connection_state = "connected"
+                shell.device_service.state.device_class = "zd_ultimate_legend"
+                shell.device_service.state.xinput_slot = None
+                return shell.device_service.state
+            self.assertTrue(background)
+            self.assertFalse(allow_probe)
+            shell.device_service.state.connection_state = "connected"
+            shell.device_service.state.device_class = "zd_ultimate_legend"
+            shell.device_service.state.xinput_slot = None
+            return shell.device_service.state
+
+        shell.device_service.refresh_state.side_effect = refresh_state
+
+        with patch("zd_app.ui.app_shell.time.time", return_value=10.0):
+            shell._tick()
+        shell._last_presence_poll = 0.0
+        shell._last_tick = 13.0
+        with patch("zd_app.ui.app_shell.time.time", return_value=13.0):
+            shell._tick()
+
+        force_probe_calls = [
+            call
+            for call in shell.device_service.refresh_state.call_args_list
+            if call.kwargs.get("force_probe") is True
+        ]
+        self.assertEqual(len(force_probe_calls), 1)
+        self.assertEqual(shell._last_connection_state, "connected")
+
     def test_on_binding_source_changed_updates_target_combo(self) -> None:
         shell = _make_shell(MagicMock())
         shell.last_controller_snapshot = _full_snapshot(
@@ -3642,6 +3733,24 @@ class ReadSettleRetryTests(unittest.TestCase):
         self.assertEqual(shell.last_snapshot_status, i18n.t("apply.read.success"))
         shell.device_service.log_i18n_event.assert_called_with(
             "log.snapshot.refreshed_ok"
+        )
+
+    def test_refresh_surfaces_budget_skipped_fields_in_status_line(self) -> None:
+        snapshot = _full_snapshot()
+        service = _FlakyReadSettingsService([], snapshot)
+        service.last_read_skipped_fields = 7
+        shell = _make_shell(service)
+        shell.restore_point_service = None
+
+        values = _run_with_widget_capture(shell.refresh_from_controller)
+
+        expected = i18n.t("apply.read.partial_budget", count=7)
+        self.assertEqual(shell.last_snapshot_status, expected)
+        self.assertIn("7 fields not read", values["settings_v2_status_text"])
+        self.assertIn("Read again", values["settings_v2_status_text"])
+        shell.device_service.log_i18n_event.assert_called_with(
+            "log.snapshot.refreshed_partial_budget",
+            count=7,
         )
 
     # R2 — the retry times out too: failure path exactly as today, and no

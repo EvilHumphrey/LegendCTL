@@ -1108,6 +1108,7 @@ class AppShell:
         self._last_tick = 0.0
         self._last_presence_poll = 0.0
         self._last_connection_state: str | None = None
+        self._fast_disconnect_force_probe_armed = True
         self._stick_preview_deadline = 0.0
         self._stick_preview_backup: tuple[StickSettings, StickSettings] | None = None
         self._active_nav_theme: int | None = None
@@ -1355,7 +1356,7 @@ class AppShell:
 
         self._emit_session_start_event()
 
-        # Keep the (pnputil) presence cache warm on a background thread so the
+        # Keep the SetupDi presence cache warm on a background thread so the
         # per-frame tick's refresh_state(allow_probe=False) never blocks the
         # render loop on device enumeration.
         self.device_service.start_presence_primer()
@@ -1747,6 +1748,15 @@ class AppShell:
             self.rebuild_current_screen()
         finally:
             self._right_rail_rebuild_in_progress = False
+
+    def _request_presence_rebuild(self) -> None:
+        """Rebuild the current screen after a presence transition."""
+
+        def rebuild_and_refresh_rail() -> None:
+            self.rebuild_current_screen()
+            right_rail.refresh(self)
+
+        self._defer_ui_call(rebuild_and_refresh_rail)
 
     def _middle_band_height(self) -> int:
         viewport_h = self._viewport_client_height()
@@ -2333,7 +2343,7 @@ class AppShell:
             ),
         )
 
-    def _refresh_read_job(self) -> tuple[ControllerSnapshot, DeviceIdentity | None]:
+    def _refresh_read_job(self) -> tuple[ControllerSnapshot, DeviceIdentity | None, int]:
         """DPG-free job half of :meth:`refresh_from_controller`.
 
         Full settings read plus the first-readable-connect RP capture (the
@@ -2342,12 +2352,23 @@ class AppShell:
         """
 
         snapshot = self._read_all_settings_with_timeout_retry()
+        raw_skipped_fields = getattr(
+            self.settings_service,
+            "last_read_skipped_fields",
+            0,
+        )
+        skipped_fields = (
+            int(raw_skipped_fields)
+            if isinstance(raw_skipped_fields, (int, float))
+            and raw_skipped_fields > 0
+            else 0
+        )
         # Trigger model #1 — first readable connect. Fire at most
         # once per (product_string, app session) so reconnecting the same
         # controller within one session doesn't spam the vault. The capture
         # itself is best-effort and never blocks the read.
         first_connect_identity = self._capture_first_readable_connect()
-        return snapshot, first_connect_identity
+        return snapshot, first_connect_identity, skipped_fields
 
     def _refresh_read_on_done(self, outcome, *, include_device: bool) -> None:
         """DPG on_done half of :meth:`refresh_from_controller`."""
@@ -2371,7 +2392,11 @@ class AppShell:
             self.refresh_shell()
             return
 
-        snapshot, first_connect_identity = outcome
+        if len(outcome) == 2:
+            snapshot, first_connect_identity = outcome
+            skipped_fields = 0
+        else:
+            snapshot, first_connect_identity, skipped_fields = outcome
         # Hydrate from what the store actually folded in (under the lock), NOT the
         # pre-fold local: a worker-thread back-paddle landing in the merge->store
         # gap is folded into last_controller_snapshot but is absent from this
@@ -2389,12 +2414,22 @@ class AppShell:
 
         missing: list[str] = []
         self._hydrate_controller_snapshot(stored, missing, include_device=include_device)
-        if missing:
+        if skipped_fields:
+            self.last_snapshot_status = t(
+                "apply.read.partial_budget",
+                count=skipped_fields,
+            )
+        elif missing:
             self.last_snapshot_status = t("apply.read.missing_fields", fields=", ".join(missing))
         else:
             self.last_snapshot_status = t("apply.read.success")
 
-        if missing:
+        if skipped_fields:
+            self.device_service.log_i18n_event(
+                "log.snapshot.refreshed_partial_budget",
+                count=skipped_fields,
+            )
+        elif missing:
             self.device_service.log_i18n_event(
                 "log.snapshot.refreshed_missing",
                 fields=", ".join(missing),
@@ -4337,13 +4372,29 @@ class AppShell:
 
         if now - self._last_presence_poll > 2.5:
             self._last_presence_poll = now
+            previous_connection_state = self.device_service.state.connection_state
+            previous_xinput_slot = self.device_service.state.xinput_slot
             # allow_probe=False keeps the per-frame presence poll off the
-            # pnputil subprocess: it reads the cache the background primer
+            # SetupDi presence probe: it reads the cache the background primer
             # keeps warm (started in run()) so the render thread never stalls
             # ~60ms on device enumeration. XInput still runs here, so
             # connect/disconnect is still detected within one poll interval.
             self.device_service.refresh_state(background=True, allow_probe=False)
             current_connection_state = self.device_service.state.connection_state
+
+            if self.device_service.state.xinput_slot is not None:
+                self._fast_disconnect_force_probe_armed = True
+            xinput_slot_dropped = (
+                previous_connection_state == "connected"
+                and previous_xinput_slot is not None
+                and current_connection_state == "connected"
+                and self.device_service.state.device_class == "zd_ultimate_legend"
+                and self.device_service.state.xinput_slot is None
+            )
+            if xinput_slot_dropped and self._fast_disconnect_force_probe_armed:
+                self._fast_disconnect_force_probe_armed = False
+                self.device_service.refresh_state(background=False, force_probe=True)
+                current_connection_state = self.device_service.state.connection_state
 
             was_disconnected = self._last_connection_state in (None, "no_device")
             is_connected = current_connection_state == "connected"
@@ -4368,6 +4419,12 @@ class AppShell:
                     self.device_service.log_event(
                         "Controller reconnected; refreshing Wrapper Settings."
                     )
+            elif (
+                self._last_connection_state == "connected"
+                and current_connection_state == "no_device"
+            ):
+                self.device_service.log_i18n_event("log.controller.disconnected")
+                self._request_presence_rebuild()
             self._last_connection_state = current_connection_state
 
             if self.settings.auto_read_on_connect and self.device_service.state.connection_state == "connected" and self.device_service.state.last_read_time is None:

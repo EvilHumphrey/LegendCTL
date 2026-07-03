@@ -391,6 +391,31 @@ class ContentSurfaceScrollbarTests(unittest.TestCase):
                 shell.refresh_shell()
                 self.assertEqual(dpg.get_value(right_rail.FIRMWARE_VALUE_TAG), "1.24")
                 self.assertEqual(dpg.get_value(right_rail.PENDING_VALUE_TAG), "3")
+
+                shell.device_service.state.connection_state = "no_device"
+                shell.device_service.state.firmware_version = "1.24"
+                shell.device_service.state.active_onboard_profile = 3
+                shell.device_service.state.summary_sources["active_profile"] = "protocol"
+                shell.device_service.summary_source_label_for.return_value = (
+                    "Controller Protocol"
+                )
+                shell.refresh_shell()
+                self.assertEqual(
+                    dpg.get_value(right_rail.FIRMWARE_VALUE_TAG),
+                    "1.24 (last read)",
+                )
+                self.assertEqual(
+                    dpg.get_value(right_rail.PROFILE_VALUE_TAG),
+                    "Profile 3 (last read) - Controller Protocol",
+                )
+
+                shell.device_service.state.connection_state = "connected"
+                shell.refresh_shell()
+                self.assertEqual(dpg.get_value(right_rail.FIRMWARE_VALUE_TAG), "1.24")
+                self.assertEqual(
+                    dpg.get_value(right_rail.PROFILE_VALUE_TAG),
+                    "Profile 3 - Controller Protocol",
+                )
         finally:
             dpg.destroy_context()
 

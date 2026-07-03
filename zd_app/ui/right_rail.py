@@ -14,6 +14,7 @@ import dearpygui.dearpygui as dpg
 
 from zd_app.i18n import t
 from zd_app.ui import trust_front_door, trust_labels
+from zd_app.ui.themes import COLORS
 from zd_app.ui.typography import section_title
 
 
@@ -127,8 +128,18 @@ def build(shell) -> None:
         section_title(t("right_rail.title"))
         _metric(t("right_rail.device_model"), _device_model(shell), DEVICE_VALUE_TAG)
         _metric(t("right_rail.connection"), _connection_value(shell), CONNECTION_VALUE_TAG)
-        _metric(t("right_rail.firmware"), _firmware_value(shell), FIRMWARE_VALUE_TAG)
-        _metric(t("right_rail.active_profile"), _active_profile_value(shell), PROFILE_VALUE_TAG)
+        _metric(
+            t("right_rail.firmware"),
+            _firmware_value(shell),
+            FIRMWARE_VALUE_TAG,
+            value_color=_firmware_value_color(shell),
+        )
+        _metric(
+            t("right_rail.active_profile"),
+            _active_profile_value(shell),
+            PROFILE_VALUE_TAG,
+            value_color=_active_profile_value_color(shell),
+        )
         _metric(
             t("right_rail.pending_changes"),
             str(_pending_count(shell)),
@@ -167,21 +178,30 @@ def refresh(shell) -> None:
         return
     _set(DEVICE_VALUE_TAG, _device_model(shell))
     _set(CONNECTION_VALUE_TAG, _connection_value(shell))
-    _set(FIRMWARE_VALUE_TAG, _firmware_value(shell))
-    _set(PROFILE_VALUE_TAG, _active_profile_value(shell))
+    _set(FIRMWARE_VALUE_TAG, _firmware_value(shell), _firmware_value_color(shell))
+    _set(
+        PROFILE_VALUE_TAG,
+        _active_profile_value(shell),
+        _active_profile_value_color(shell),
+    )
     _set(PENDING_VALUE_TAG, str(_pending_count(shell)))
     _set(TRUST_VALUE_TAG, t("right_rail.trust_posture"))
 
 
-def _metric(label: str, value: str, tag: str) -> None:
+def _metric(label: str, value: str, tag: str, *, value_color=None) -> None:
     dpg.add_text(label, color=(144, 153, 170, 255), wrap=_RAIL_WRAP)
-    dpg.add_text(value, tag=tag, wrap=_RAIL_WRAP)
+    kwargs = {"tag": tag, "wrap": _RAIL_WRAP}
+    if value_color is not None:
+        kwargs["color"] = value_color
+    dpg.add_text(value, **kwargs)
     dpg.add_spacer(height=5)
 
 
-def _set(tag: str, value: str) -> None:
+def _set(tag: str, value: str, color=None) -> None:
     if dpg.does_item_exist(tag):
         dpg.set_value(tag, value)
+        if color is not None:
+            dpg.configure_item(tag, color=color)
 
 
 def _viewport_width(shell) -> int:
@@ -233,9 +253,13 @@ def _connection_value(shell) -> str:
 def _firmware_value(shell) -> str:
     formatter = getattr(shell.device_service, "format_firmware_version", None)
     if callable(formatter):
-        return str(formatter())
-    firmware = getattr(shell.device_service.state, "firmware_version", "")
-    return str(firmware or t("common.unknown"))
+        value = str(formatter())
+    else:
+        firmware = getattr(shell.device_service.state, "firmware_version", "")
+        value = str(firmware or t("common.unknown"))
+    if _has_retained_firmware(shell.device_service.state) and not _is_connected(shell):
+        return t("device.value.last_read", value=value)
+    return value
 
 
 def _active_profile_value(shell) -> str:
@@ -245,9 +269,39 @@ def _active_profile_value(shell) -> str:
         profile = t("profile.config_state.not_verified")
     elif profile.startswith("Config "):
         profile = t("profile.config_state.config", n=profile.removeprefix("Config "))
+    if _has_retained_active_profile(state) and not _is_connected(shell):
+        profile = t("device.value.last_read", value=profile)
     source_fn = getattr(shell.device_service, "summary_source_label_for", None)
     source = source_fn("active_profile") if callable(source_fn) else t("common.unknown")
     return t("right_rail.active_profile.value", profile=profile, source=source)
+
+
+def _firmware_value_color(shell):
+    if _has_retained_firmware(shell.device_service.state) and not _is_connected(shell):
+        return COLORS["text.secondary"]
+    return COLORS["text.primary"]
+
+
+def _active_profile_value_color(shell):
+    if _has_retained_active_profile(shell.device_service.state) and not _is_connected(
+        shell
+    ):
+        return COLORS["text.secondary"]
+    return COLORS["text.primary"]
+
+
+def _is_connected(shell) -> bool:
+    return getattr(shell.device_service.state, "connection_state", "") == "connected"
+
+
+def _has_retained_firmware(state) -> bool:
+    firmware = str(getattr(state, "firmware_version", "") or "").strip()
+    return bool(firmware and firmware != "Unknown")
+
+
+def _has_retained_active_profile(state) -> bool:
+    sources = getattr(state, "summary_sources", {}) or {}
+    return sources.get("active_profile", "unknown") != "unknown"
 
 
 def _pending_count(shell) -> int:

@@ -3919,6 +3919,7 @@ class TestGetAllSettingsBatchReadBudget(unittest.TestCase):
         # The critical guarantee: no further HID round-trips after exhaustion.
         self.assertEqual(1, sum(1 for e in rec.events if e[0] == "read_file"))
         self.assertEqual(1, sum(1 for e in rec.events if e[0] == "write_file"))
+        self.assertGreater(service.last_read_skipped_fields, 0)
         # Exactly one budget warning for the whole batch.
         self.assertEqual(len(cm.records), 1)
         self.assertIn("batch read budget (8.0s) exhausted", cm.output[0])
@@ -3943,6 +3944,7 @@ class TestGetAllSettingsBatchReadBudget(unittest.TestCase):
         # count) matched the pre-change batch, not just the totals.
         self.assertEqual(rec.read_results, [])
         self.assertEqual(snapshot.polling_rate, PollingRate.HZ_8000)
+        self.assertEqual(service.last_read_skipped_fields, 0)
         self.assertEqual(
             snapshot.vibration,
             VibrationSettings(10, 20, 30, 40, TriggerVibrationMode.STEREO_RESONANCE),

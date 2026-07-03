@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.4.1 — 2026-07-03
+
+Fix release: locale-independent device recognition (a reviewer's screenshot exposed our
+detection bug on non-English Windows — recognition now uses the SetupDi device API instead of
+parsing localized system-tool text; regression-tested against RU/DE/zh configurations), plus an
+honesty batch: disconnects now update every screen in place with retained values labeled
+"(last read)" (cleared on device-identity change), the spurious post-unplug "Detected" line is
+gone, partial reads report how many fields were skipped, the Compatibility Report's firmware
+field falls back to the last-read value so post-unplug reports stay complete, and a Home
+explainer text was corrected in both languages. No new write paths; recognition and disconnect flows hardware-smoked before the cut.
+
+
 ## v2.4.0 — 2026-07-02
 
 Context release: a wide-window layout that keeps device / profile / trust state in view beside a

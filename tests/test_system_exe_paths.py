@@ -1,9 +1,9 @@
 """Audit M7 — system executables are invoked by absolute System32 path.
 
-Bare-name ``powershell`` / ``tasklist`` / ``pnputil`` are vulnerable to PATH
-search-order hijacking (a planted exe earlier on PATH). Each call site now
-anchors on ``%SystemRoot%\\System32``. These tests pin that invariant on the
-module-level constants, so a regression back to a bare name is caught.
+Bare-name ``powershell`` / ``tasklist`` are vulnerable to PATH search-order
+hijacking (a planted exe earlier on PATH). Each call site now anchors on
+``%SystemRoot%\\System32``. These tests pin that invariant on the module-level
+constants, so a regression back to a bare name is caught.
 
 Windows-path assertions use ``ntpath`` so the test is correct on any platform
 (this suite runs hardware-free on non-Windows too).
@@ -16,7 +16,6 @@ import unittest
 
 from zd_app.protocol import preflight_visibility
 from zd_app.services import (
-    device_service,
     host_environment,
     official_app_summary_service,
 )
@@ -35,9 +34,6 @@ class SystemExePathTests(unittest.TestCase):
 
     def test_tasklist_paths_absolute_under_system32(self) -> None:
         self._assert_system32_exe(host_environment._TASKLIST_EXE, "tasklist.exe")
-
-    def test_pnputil_path_absolute_under_system32(self) -> None:
-        self._assert_system32_exe(device_service._PNPUTIL_EXE, "pnputil.exe")
 
     def test_powershell_paths_absolute_under_system32(self) -> None:
         self._assert_system32_exe(preflight_visibility._POWERSHELL_EXE, "powershell.exe")

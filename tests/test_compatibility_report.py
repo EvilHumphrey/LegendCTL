@@ -110,6 +110,28 @@ class CompatibilityReportRendererTests(unittest.TestCase):
         self.assertIn("read OK", body)
         self.assertIn("No settings write was recorded", body)
 
+    def test_unrecognized_device_report_includes_model_vid_pid_and_raw_firmware(self) -> None:
+        state = DeviceState(
+            product_name="Unrecognized controller",
+            device_class="generic_xinput",
+            connection_state="connected",
+            stable_identifier=r"HID\VID_9999&PID_0001&MI_02\SERIALTAIL",
+            firmware_version="v9.99-beta",
+            xinput_slot=0,
+        )
+
+        report = build_compatibility_report(
+            device_state=state,
+            variant="",
+            firmware="",
+            now=_NOW,
+        )
+        combined = report.to_markdown() + report.to_issue_body()
+
+        self.assertIn(r"HID\VID_9999&PID_0001", combined)
+        self.assertIn("v9.99-beta", combined)
+        self.assertNotIn("SERIALTAIL", combined)
+
     def test_no_controller_does_not_claim_live_verify_available(self) -> None:
         report = build_compatibility_report(device_state=DeviceState(), now=_NOW)
         body = report.to_issue_body()
