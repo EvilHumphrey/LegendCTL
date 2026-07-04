@@ -57,6 +57,20 @@ name: Release build (CI-built, attested)
 #     disproportionate to this project today; revisit if byte-reproducible
 #     builds become a goal. Standing mitigations: exact version pins,
 #     Dependabot freshness, and the pip-audit gate in this workflow.
+#   - CPython: pinned exactly to 3.13.14, the 2026-07-03 CVE sweep's primary
+#     recommendation. Staying on 3.12 was preferred (all local suite evidence
+#     is 3.12) but is not securable in CI: 3.12 is in security-only phase and
+#     ships NO Windows binaries past 3.12.10 (python.org and the setup-python
+#     manifest both — verified 2026-07-04 after a failed preflight assert on
+#     the windows-2025 toolcache's 3.12.10). Mitigation for the runtime bump:
+#     the full unittest suite runs on 3.13.14 in this workflow BEFORE the
+#     build, and the operator hardware-smokes the built Setup before publish.
+#     The "Assert Python security-patch floor" step fails the build below
+#     3.13.14. The CVE-sweep-flagged stdlib modules (webbrowser/gzip/bz2/
+#     lzma/http.client) are not imported by the app; an automated
+#     import-graph exclusion assert is DEFERRED (PyInstaller's own tooling
+#     may legitimately pull archive modules, and an untested assert must not
+#     false-fail a tag run).
 
 on:
   push:
@@ -73,7 +87,7 @@ concurrency:
 
 jobs:
   build:
-    name: Test-gate + build (Windows · Python 3.12)
+    name: Test-gate + build (Windows · Python 3.13)
     runs-on: windows-2025
     permissions:
       contents: read # build + rehearsal runs never hold a write-capable token
@@ -82,11 +96,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Set up Python 3.12
+      - name: Set up Python 3.13
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          # Exact pin (see the CPython supply-chain note in the header). Keep
+          # in sync with the floor asserted below.
+          python-version: '3.13.14'
           cache: pip
+
+      - name: Assert Python security-patch floor
+        shell: pwsh
+        run: |
+          python -c "import sys; v = '%d.%d.%d' % sys.version_info[:3]; assert sys.version_info >= (3, 13, 14), 'CPython ' + v + ' is below the 3.13.14 security floor (2026-07-03 CVE sweep)'; print('CPython ' + v + ' meets the 3.13.14 floor')"
 
       - name: Guard — tag matches the source version (tag runs only)
         if: startsWith(github.ref, 'refs/tags/v')

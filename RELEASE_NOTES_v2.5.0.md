@@ -33,7 +33,8 @@ you're set up.
   test suite grew ordering-aware coverage for state that arrives after a screen builds.
 
 No new wrapper-written controller settings, no network calls, nothing uploaded. Same release
-discipline: full suite green on Python 3.12 / DearPyGui, and the fingerprint and First-steps
+discipline: full suite green on Python 3.13 / DearPyGui in the CI build that produced these
+assets, and the fingerprint and First-steps
 paths were smoke-tested on real hardware before this cut. This is also the first LegendCTL
 release built and attested by CI — the release assets carry GitHub build provenance you can
 verify with `gh attestation verify`.

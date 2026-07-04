@@ -49,11 +49,9 @@ This is the same integrity guarantee a signature provides, done in the open — 
 
 ## 4. Verify where it was built (build provenance)
 
-<!-- TODO(first-attested-cut): set <FIRST_ATTESTED_VERSION> below to the actual first
-     release built by this workflow. v2.4.0 and earlier were built locally and are NOT
-     attested — do not claim a version as attested until its release was produced by
-     release-build.yml. -->
-From **v\<FIRST_ATTESTED_VERSION\>** onward, release binaries are **built in this repository's public GitHub Actions workflow** ([`release-build.yml`](../.github/workflows/release-build.yml)) — not on a maintainer's machine — and every such release carries a **build-provenance attestation**: a cryptographically signed statement, recorded with GitHub, tying the exact bytes of the release files to the workflow run and source commit that produced them.
+From **v2.5.0** onward, release binaries are **built in this repository's public GitHub Actions workflow** ([`release-build.yml`](../.github/workflows/release-build.yml)) — not on a maintainer's machine — and every such release carries a **build-provenance attestation**: a cryptographically signed statement, recorded with GitHub, tying the exact bytes of the release files to the workflow run and source commit that produced them.
+
+Releases **v2.4.1 and earlier were built locally** by the maintainer and are **not** attested — for those, the SHA-256 checksums (section 3) are the verification path.
 
 **What this proves / doesn't prove — honestly:**
 
