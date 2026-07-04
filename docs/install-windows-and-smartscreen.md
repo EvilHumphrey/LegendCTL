@@ -1,6 +1,6 @@
 ---
 title: Installing LegendCTL on Windows (and the SmartScreen warning)
-description: How to download, verify, and run LegendCTL on Windows — including why Windows shows a SmartScreen warning for unsigned apps and how to verify your download is genuine.
+description: How to download, verify, and run LegendCTL on Windows — including why Windows shows a SmartScreen warning for unsigned apps, how to verify your download is genuine, and how to verify each release's build provenance.
 ---
 
 # Installing LegendCTL on Windows
@@ -43,16 +43,64 @@ Because LegendCTL is unsigned, the honest way to be sure your download is the re
 
 3. Compare the printed hash to the matching line in `SHA256SUMS.txt`. **If they match, the file is exactly what was published.** If they don't match, delete it and re-download.
 
+*(In `SHA256SUMS.txt`, a leading `*` on a filename is standard `sha256sum` notation marking binary-mode hashing — it's not part of the filename.)*
+
 This is the same integrity guarantee a signature provides, done in the open — fitting for a tool whose whole point is being honest about what it is.
 
-## 4. Why you can trust it beyond the hash
+## 4. Verify where it was built (build provenance)
+
+<!-- TODO(first-attested-cut): set <FIRST_ATTESTED_VERSION> below to the actual first
+     release built by this workflow. v2.4.0 and earlier were built locally and are NOT
+     attested — do not claim a version as attested until its release was produced by
+     release-build.yml. -->
+From **v\<FIRST_ATTESTED_VERSION\>** onward, release binaries are **built in this repository's public GitHub Actions workflow** ([`release-build.yml`](../.github/workflows/release-build.yml)) — not on a maintainer's machine — and every such release carries a **build-provenance attestation**: a cryptographically signed statement, recorded with GitHub, tying the exact bytes of the release files to the workflow run and source commit that produced them.
+
+**What this proves / doesn't prove — honestly:**
+
+- **Proves:** the file you downloaded is byte-identical to what this repository's public workflow built from the public source. If someone swapped, modified, or re-uploaded a release file after the build, verification **fails** — so you can detect tampering rather than having to trust that it didn't happen.
+- **Does NOT prove:** that the app is code-signed (it isn't yet), that SmartScreen won't warn (it will — see section 2), or that the software is risk-free. Provenance is about *origin*, not a safety rating.
+
+Checking it needs the [GitHub CLI](https://cli.github.com/) (**v2.67.0 or newer** — older versions had a verification exit-code bug):
+
+```powershell
+gh attestation verify .\ZDUltimateLegend-v<version>-Setup.exe --repo EvilHumphrey/LegendCTL
+gh attestation verify .\ZDUltimateLegend-v<version>-windows.zip --repo EvilHumphrey/LegendCTL
+```
+
+A good result ends with `✓ Verification succeeded!`.
+
+Reviewers who want a stricter policy check can also pin the exact builder workflow:
+
+```powershell
+gh attestation verify .\ZDUltimateLegend-v<version>-Setup.exe `
+  --repo EvilHumphrey/LegendCTL `
+  --signer-workflow EvilHumphrey/LegendCTL/.github/workflows/release-build.yml
+```
+
+**Offline / API-free:** each attested release also ships its attestation as the `attestation-bundle.jsonl` asset, so you can verify without querying GitHub's attestation API. You do need to fetch the trust root **once while online** (`gh attestation trusted-root`) and keep the resulting file — after that, verification runs fully offline:
+
+```powershell
+# Run once while online; keep trusted_root.jsonl for later offline use:
+gh attestation trusted-root > trusted_root.jsonl
+
+# Then verify offline, against the bundle shipped with the release:
+gh attestation verify .\ZDUltimateLegend-v<version>-Setup.exe `
+  --repo EvilHumphrey/LegendCTL `
+  --bundle .\attestation-bundle.jsonl `
+  --custom-trusted-root .\trusted_root.jsonl
+```
+
+*(Releases built locally, before this workflow existed, are not attested — for those, the SHA-256 check in section 3 is the verification path.)*
+
+## 5. Why you can trust it beyond the hash
 
 - **Open source.** The full source is on [GitHub](https://github.com/EvilHumphrey/LegendCTL) — read exactly what it does.
+- **Built in public CI, with provenance.** Release binaries are produced by a public GitHub Actions workflow and carry a verifiable build attestation (section 4).
 - **No telemetry, no network calls.** It talks only to your controller over USB/HID; it doesn't phone home.
 - **No drivers, no background service.** It's a plain desktop app; closing it stops it completely.
 - **Standalone.** It doesn't need (or touch) the official ZD app.
 
-## 5. Install via winget (when available)
+## 6. Install via winget (when available)
 
 Once the manifest is accepted into the Windows Package Manager community repo, you'll be able to install and update with:
 
@@ -62,7 +110,7 @@ winget install EvilHumphrey.LegendCTL
 
 winget installs are a smoother path because the package is fetched and hash-checked for you.
 
-## 6. Uninstall
+## 7. Uninstall
 
 - **Portable ZIP:** delete the folder.
 - **Installer:** Settings → Apps → "ZD Ultimate Legend Wrapper" → Uninstall. (User data lives in `%APPDATA%\ZDUltimateLegend\`; delete that folder too if you want a completely clean removal.)
