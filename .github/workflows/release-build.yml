@@ -337,7 +337,16 @@ jobs:
         id: attest_release
         uses: actions/attest-build-provenance@v4
         with:
-          subject-checksums: dist/SHA256SUMS.txt
+          # subject-path (not subject-checksums): the checksums parser
+          # mis-handled our LF-only shasum binary-format file in the first
+          # v2.5.0 run — it collapsed both lines into ONE subject (Setup's
+          # digest, garbled multi-line name), leaving the zip unattested.
+          # Attesting from the file bytes needs no parser and cannot skew;
+          # the digests these files carry were already re-verified against
+          # the build job's SHA256SUMS.txt two steps above.
+          subject-path: |
+            dist/ZDUltimateLegend-v*-Setup.exe
+            dist/ZDUltimateLegend-v*-windows.zip
 
       - name: Stage the attestation bundle as a release asset
         shell: pwsh
