@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.5.0 — 2026-07-03
+## v2.5.0 — 2026-07-04
 
 Feature release: a read-only model fingerprint (VID/PID, usage page, report shape, interface
 inventory, SHA-256 digest — serial excluded, local-only, shared only via the manual
