@@ -104,7 +104,7 @@ can and can't do.
 
 ## Features
 
-v2.4.0 — feature-complete for normal use.
+Feature-complete for normal use.
 
 Controller settings (all written as standard HID feature reports; a normal Apply
 reports each field's write outcome and refreshes the on-screen state from the
