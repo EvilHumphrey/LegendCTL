@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import time
 import unittest
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from zd_app.models import DeviceState
 from zd_app.services import device_service as device_service_module
 from zd_app.services.device_service import DeviceService
 from zd_app.services.diagnostics_service import DiagnosticsService
+from zd_app.services.model_fingerprint import InterfaceInventory, ModelFingerprint
 from zd_app.services.official_app_summary_service import OfficialAppSummary, OfficialAppSummaryService
 
 
@@ -144,6 +146,54 @@ class _FakeSetupApi:
     def SetupDiDestroyDeviceInfoList(self, info_set) -> bool:
         self.destroyed_handles.append(info_set)
         return True
+
+
+class _ImmediateThread:
+    def __init__(self, *, target, args=(), kwargs=None, name=None, daemon=None):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+        self.name = name
+        self.daemon = daemon
+        self._alive = False
+
+    def start(self) -> None:
+        self._alive = True
+        try:
+            self._target(*self._args, **self._kwargs)
+        finally:
+            self._alive = False
+
+    def is_alive(self) -> bool:
+        return self._alive
+
+    def join(self, timeout=None) -> None:
+        return None
+
+
+class _CapturedThread:
+    instances = []
+
+    def __init__(self, *, target, args=(), kwargs=None, name=None, daemon=None):
+        self._target = target
+        self._args = args
+        self._kwargs = kwargs or {}
+        self.name = name
+        self.daemon = daemon
+        self.started = False
+        _CapturedThread.instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+    def run(self) -> None:
+        self._target(*self._args, **self._kwargs)
+
+    def is_alive(self) -> bool:
+        return False
+
+    def join(self, timeout=None) -> None:
+        return None
 
 
 class FakeSummaryProbeService(OfficialAppSummaryService):
@@ -601,6 +651,276 @@ class DeviceServiceRefreshStateTests(unittest.TestCase):
         self.assertEqual(state.summary_sources["firmware"], "official_app_ui")
         self.assertEqual(state.summary_sources["active_profile"], "protocol")
 
+    def test_model_fingerprint_runs_after_recognition_and_logs_i18n_info(self) -> None:
+        service = DeviceService(clock=lambda: 0.0)
+        fingerprint = ModelFingerprint(
+            vid=0x413D,
+            pid=0x2104,
+            version_number=0x0124,
+            product_string="ZD Ultimate Legend",
+            manufacturer_string="ZD",
+            usage_page=0xFF00,
+            usage=0x0001,
+            input_report_len=64,
+            output_report_len=65,
+            feature_report_len=17,
+            button_caps_count=10,
+            value_caps_count=6,
+            interface_inventory=InterfaceInventory(count=2, mi_indices=(0, 2)),
+        )
+        entries = [
+            {
+                "instance_id": r"USB\VID_413D&PID_2104&MI_02\ABC123",
+                "description": "ZD Ultimate Legend",
+                "status": "Present",
+            }
+        ]
+
+        with patch.object(
+            service,
+            "_find_zd_entries",
+            return_value=entries,
+        ), patch(
+            "zd_app.services.device_service.get_connected_controllers",
+            return_value=[],
+        ), patch(
+            "zd_app.services.device_service.collect_model_fingerprint",
+            return_value=fingerprint,
+        ) as collect_mock, patch(
+            "zd_app.services.device_service.threading.Thread",
+            _ImmediateThread,
+        ), self.assertLogs("zd_app.services.device_service", level="INFO") as logs:
+            state = service.refresh_state()
+
+        self.assertEqual(state.connection_state, "connected")
+        self.assertTrue(state.write_supported)
+        self.assertIs(state.model_fingerprint, fingerprint)
+        collect_mock.assert_called_once_with(pnp_entries=entries)
+        events = service.recent_events(3)
+        self.assertIn(fingerprint.short_digest or "", events[0])
+        self.assertIn("product string: ZD Ultimate Legend", events[0])
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn(fingerprint.short_digest or "", logs.output[0])
+
+    def test_model_fingerprint_failure_never_blocks_connected_state(self) -> None:
+        service = DeviceService(clock=lambda: 0.0)
+        entries = [
+            {
+                "instance_id": r"USB\VID_413D&PID_2104&MI_02\ABC123",
+                "description": "ZD Ultimate Legend",
+                "status": "Present",
+            }
+        ]
+
+        with patch.object(
+            service,
+            "_find_zd_entries",
+            return_value=entries,
+        ), patch(
+            "zd_app.services.device_service.get_connected_controllers",
+            return_value=[],
+        ), patch(
+            "zd_app.services.device_service.collect_model_fingerprint",
+            side_effect=RuntimeError("boom"),
+        ), patch(
+            "zd_app.services.device_service.threading.Thread",
+            _ImmediateThread,
+        ):
+            state = service.refresh_state()
+
+        self.assertEqual(state.connection_state, "connected")
+        self.assertTrue(state.write_supported)
+        self.assertIsNone(getattr(state, "model_fingerprint", None))
+
+    def test_stale_model_fingerprint_worker_cannot_overwrite_newer_request(self) -> None:
+        service = DeviceService(clock=lambda: 0.0)
+        stable_identifier = r"USB\VID_413D&PID_2104&MI_02\SAME"
+        old_entries = [
+            {
+                "instance_id": stable_identifier,
+                "description": "ZD Ultimate Legend",
+                "status": "Present",
+            },
+            {
+                "instance_id": r"HID\VID_413D&PID_2104&MI_00\OLD",
+                "description": "ZD Ultimate Legend",
+                "status": "Present",
+            },
+        ]
+        new_entries = [
+            {
+                "instance_id": stable_identifier,
+                "description": "ZD Ultimate Legend",
+                "status": "Present",
+            },
+            {
+                "instance_id": r"HID\VID_413D&PID_2104&MI_03\NEW",
+                "description": "ZD Ultimate Legend",
+                "status": "Present",
+            },
+        ]
+        old_fingerprint = ModelFingerprint(
+            product_string="old",
+            interface_inventory=InterfaceInventory(count=2, mi_indices=(0, 2)),
+        )
+        new_fingerprint = ModelFingerprint(
+            product_string="new",
+            interface_inventory=InterfaceInventory(count=2, mi_indices=(2, 3)),
+        )
+
+        def fake_collect(*, pnp_entries):
+            ids = "\n".join(entry["instance_id"] for entry in pnp_entries)
+            return old_fingerprint if "OLD" in ids else new_fingerprint
+
+        service.state.stable_identifier = stable_identifier
+        service.state.device_class = "zd_ultimate_legend"
+        _CapturedThread.instances = []
+        with patch(
+            "zd_app.services.device_service.collect_model_fingerprint",
+            side_effect=fake_collect,
+        ), patch(
+            "zd_app.services.device_service.threading.Thread",
+            _CapturedThread,
+        ):
+            service._schedule_model_fingerprint_collection(stable_identifier, old_entries)
+            service._schedule_model_fingerprint_collection(stable_identifier, new_entries)
+
+            self.assertEqual(len(_CapturedThread.instances), 2)
+            self.assertTrue(all(thread.daemon for thread in _CapturedThread.instances))
+            self.assertTrue(all(thread.name == "zd-model-fingerprint" for thread in _CapturedThread.instances))
+
+            _CapturedThread.instances[1].run()
+            self.assertIs(service.state.model_fingerprint, new_fingerprint)
+
+            _CapturedThread.instances[0].run()
+            self.assertIs(service.state.model_fingerprint, new_fingerprint)
+
+    def test_inventory_only_fingerprint_recollects_then_short_circuits_on_complete(self) -> None:
+        # Fix A: an inventory-only result (vid None — first-connect HID-interface
+        # lag, or F2's ambiguous-path abstain) must NOT be cached as final. It
+        # re-collects on the next refresh; only a COMPLETE result (vid populated)
+        # short-circuits. A repeated same-digest collection must not re-log.
+        service = DeviceService(clock=lambda: 0.0)
+        stable_identifier = r"USB\VID_413D&PID_2104&MI_02\SAME"
+        entries = [
+            {
+                "instance_id": stable_identifier,
+                "description": "ZD Ultimate Legend",
+                "status": "Present",
+            },
+            {
+                "instance_id": r"HID\VID_413D&PID_2104&MI_00\SAME",
+                "description": "ZD Ultimate Legend",
+                "status": "Present",
+            },
+        ]
+        inventory_only = ModelFingerprint(
+            interface_inventory=InterfaceInventory(count=2, mi_indices=(0, 2)),
+        )
+        complete = ModelFingerprint(
+            vid=0x413D,
+            pid=0x2104,
+            interface_inventory=InterfaceInventory(count=2, mi_indices=(0, 2)),
+        )
+        results = [inventory_only, inventory_only, complete]
+
+        def fake_collect(*, pnp_entries):
+            return results.pop(0)
+
+        service.state.stable_identifier = stable_identifier
+        service.state.device_class = "zd_ultimate_legend"
+        _CapturedThread.instances = []
+        with patch(
+            "zd_app.services.device_service.collect_model_fingerprint",
+            side_effect=fake_collect,
+        ), patch(
+            "zd_app.services.device_service.threading.Thread",
+            _CapturedThread,
+        ), self.assertLogs("zd_app.services.device_service", level="INFO") as logs:
+            # 1st collection caches an inventory-only fingerprint (vid None).
+            service._schedule_model_fingerprint_collection(stable_identifier, entries)
+            self.assertEqual(len(_CapturedThread.instances), 1)
+            _CapturedThread.instances[0].run()
+            self.assertIs(service.state.model_fingerprint, inventory_only)
+            self.assertIsNone(service.state.model_fingerprint.vid)
+
+            # Same request key but incomplete -> MUST re-collect (not short-circuit).
+            service._schedule_model_fingerprint_collection(stable_identifier, entries)
+            self.assertEqual(len(_CapturedThread.instances), 2)
+            _CapturedThread.instances[1].run()
+            self.assertIs(service.state.model_fingerprint, inventory_only)
+
+            # Third collection returns a COMPLETE fingerprint.
+            service._schedule_model_fingerprint_collection(stable_identifier, entries)
+            self.assertEqual(len(_CapturedThread.instances), 3)
+            _CapturedThread.instances[2].run()
+            self.assertIs(service.state.model_fingerprint, complete)
+            self.assertEqual(service.state.model_fingerprint.vid, 0x413D)
+
+            # Complete + same request key -> short-circuit (no new collection).
+            service._schedule_model_fingerprint_collection(stable_identifier, entries)
+            self.assertEqual(len(_CapturedThread.instances), 3)
+
+        # Log dedup: the repeated same-digest inventory-only collection logged
+        # once; the complete fingerprint logged once. Two records total.
+        self.assertEqual(len(logs.records), 2)
+
+    def test_refresh_state_dedups_fingerprint_collection_per_identity(self) -> None:
+        # G1: two identical refresh_state ticks collect once (same request key +
+        # complete result short-circuits); an identity change re-collects.
+        service = DeviceService(clock=lambda: 0.0)
+        entries_a = [
+            {
+                "instance_id": r"USB\VID_413D&PID_2104&MI_02\UNIT_A",
+                "description": "ZD Ultimate Legend",
+                "status": "Present",
+            }
+        ]
+        entries_b = [
+            {
+                "instance_id": r"USB\VID_413D&PID_2104&MI_02\UNIT_B",
+                "description": "ZD Ultimate Legend",
+                "status": "Present",
+            }
+        ]
+        fingerprint_a = ModelFingerprint(
+            vid=0x413D,
+            pid=0x2104,
+            interface_inventory=InterfaceInventory(count=1, mi_indices=(2,)),
+        )
+        fingerprint_b = ModelFingerprint(
+            vid=0x413D,
+            pid=0x2104,
+            version_number=0x0125,
+            interface_inventory=InterfaceInventory(count=1, mi_indices=(2,)),
+        )
+
+        def fake_collect(*, pnp_entries):
+            ids = "".join(entry["instance_id"] for entry in pnp_entries)
+            return fingerprint_b if "UNIT_B" in ids else fingerprint_a
+
+        with patch.object(
+            service,
+            "_find_zd_entries",
+            side_effect=[entries_a, entries_a, entries_b],
+        ), patch(
+            "zd_app.services.device_service.get_connected_controllers",
+            return_value=[],
+        ), patch(
+            "zd_app.services.device_service.collect_model_fingerprint",
+            side_effect=fake_collect,
+        ) as collect_mock, patch(
+            "zd_app.services.device_service.threading.Thread",
+            _ImmediateThread,
+        ):
+            service.refresh_state()  # unit A -> collect #1
+            self.assertIs(service.state.model_fingerprint, fingerprint_a)
+            service.refresh_state()  # identical -> short-circuit, no collect
+            self.assertEqual(collect_mock.call_count, 1)
+            service.refresh_state()  # identity change -> collect #2
+            self.assertEqual(collect_mock.call_count, 2)
+            self.assertIs(service.state.model_fingerprint, fingerprint_b)
+
 
 class DeviceServiceEventLogTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -1047,6 +1367,27 @@ class OfficialAppSummaryServiceCacheTests(unittest.TestCase):
 
         self.assertEqual(payload["window_title"], "Controller Settings")
         run_mock.assert_called_once()
+
+
+@unittest.skipUnless(sys.platform == "win32", "real Win32 DLL binding")
+class DeviceServiceSetupApiRealDllBindingTests(unittest.TestCase):
+    """Bind the REAL setupapi.dll (no device I/O) so a wrong library name or a
+    renamed SetupDi export fails here. Mirrors ModelFingerprintRealDllBindingTests:
+    the strict _FakeSetupApi patches _Win32.setupapi, so it can never catch a bad
+    raw binding (C1's finding — the strict fake shouldn't be the only raw-binding
+    contract for the SetupDi surface)."""
+
+    def test_setupapi_exports_bind_from_real_dll(self) -> None:
+        setupapi = device_service_module._Win32.setupapi()
+        for name in (
+            "SetupDiGetClassDevsW",
+            "SetupDiEnumDeviceInfo",
+            "SetupDiGetDeviceInstanceIdW",
+            "SetupDiGetDeviceRegistryPropertyW",
+            "SetupDiDestroyDeviceInfoList",
+        ):
+            with self.subTest(export=name):
+                self.assertTrue(callable(getattr(setupapi, name)))
 
 
 if __name__ == "__main__":

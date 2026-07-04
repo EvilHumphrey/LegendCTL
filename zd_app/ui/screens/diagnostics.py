@@ -12,6 +12,8 @@ from zd_app.services.compatibility_report import build_compatibility_report
 from zd_app.services.diagnostic_bundle import DiagnosticBundleService
 from zd_app.services.diagnostics_service import _redact_instance_id
 from zd_app.services.share_card import build_share_card
+from zd_app.services.model_fingerprint import fingerprint_display_rows
+from zd_app.services.path_scrub import scrub_paths
 from zd_app.services.trust_self_check import build_trust_self_check
 from zd_app.ui import right_rail, support_reference, trust_front_door, trust_labels
 from zd_app.ui.screens import about, preferences
@@ -49,6 +51,7 @@ TRUST_SELF_CHECK_INTRO_TAG = "diagnostics_trust_self_check_intro"
 TRUST_SELF_CHECK_SCOPE_DETAILS_TAG = "diagnostics_trust_self_check_scope_details"
 TRUST_SELF_CHECK_COPY_TAG = "diagnostics_trust_self_check_copy"
 TRUST_SELF_CHECK_STATUS_TAG = "diagnostics_trust_self_check_status"
+TRUST_SELF_CHECK_MODEL_FINGERPRINT_TAG = "diagnostics_trust_self_check_model_fingerprint"
 _TRUST_SELF_CHECK_WRAP = 840
 
 _CONNECTION_DETAILS_CARD_WIDTH = 500
@@ -322,10 +325,24 @@ def _build_guidance_tab(shell) -> None:
 
 def _trust_self_check_result(shell):
     result = getattr(shell, "_trust_self_check_result", None)
-    if result is None or not hasattr(result, "to_markdown"):
-        result = build_trust_self_check()
+    fingerprint = _current_model_fingerprint(shell)
+    fingerprint_digest = getattr(fingerprint, "digest", None)
+    cached_digest = getattr(shell, "_trust_self_check_fingerprint_digest", None)
+    if (
+        result is None
+        or not hasattr(result, "to_markdown")
+        or cached_digest != fingerprint_digest
+    ):
+        result = build_trust_self_check(model_fingerprint=fingerprint)
         shell._trust_self_check_result = result
+        shell._trust_self_check_fingerprint_digest = fingerprint_digest
     return result
+
+
+def _current_model_fingerprint(shell):
+    device_service = getattr(shell, "device_service", None)
+    state = getattr(device_service, "state", None)
+    return getattr(state, "model_fingerprint", None)
 
 
 def _build_trust_self_check_card(shell) -> None:
@@ -382,6 +399,8 @@ def _build_trust_self_check_card(shell) -> None:
                     color=shell.COLORS["muted"],
                 )
             dpg.add_spacer(height=4)
+        if result.model_fingerprint is not None:
+            _build_model_fingerprint_block(shell, result.model_fingerprint)
         dpg.add_button(
             label=t("trust_self_check.copy_button"),
             tag=TRUST_SELF_CHECK_COPY_TAG,
@@ -406,6 +425,33 @@ def _extra_boundary_text(boundary: str, shared_boundary: str) -> str:
     if shared_boundary and shared_boundary in boundary:
         return boundary.replace(shared_boundary, "", 1).strip()
     return boundary
+
+
+def _build_model_fingerprint_block(shell, fingerprint) -> None:
+    dpg.add_spacer(height=4)
+    with dpg.group(tag=TRUST_SELF_CHECK_MODEL_FINGERPRINT_TAG):
+        dpg.add_text(
+            t("model_fingerprint.title"),
+            wrap=_TRUST_SELF_CHECK_WRAP,
+        )
+        for index, (label_key, value) in enumerate(fingerprint_display_rows(fingerprint)):
+            safe_value = scrub_paths(value)
+            dpg.add_text(
+                f"{t(label_key)}: {safe_value}",
+                tag=f"diagnostics_model_fingerprint_row_{index}",
+                wrap=_TRUST_SELF_CHECK_WRAP,
+                color=shell.COLORS["muted"],
+            )
+        dpg.add_text(
+            (
+                f"{t('model_fingerprint.write_validation_basis_label')}: "
+                f"{t('model_fingerprint.write_validation_basis_value')}"
+            ),
+            tag="diagnostics_model_fingerprint_basis",
+            wrap=_TRUST_SELF_CHECK_WRAP,
+            color=shell.COLORS["muted"],
+        )
+    dpg.add_spacer(height=4)
 
 
 def _consume_trust_front_door_focus(shell) -> None:

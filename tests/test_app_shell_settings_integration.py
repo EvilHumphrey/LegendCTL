@@ -532,7 +532,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
                 _format_apply_failure_row(ApplyFailure("binding_A", "boom", False)),
             ]
 
-            self.assertIn("轮询速率", rows[0])
+            self.assertIn("轮询率", rows[0])
             self.assertIn("暂时性", rows[0])
             self.assertIn("后置侧键 M1", rows[1])
             self.assertIn("按键映射 A", rows[2])
@@ -1268,6 +1268,8 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         settings_service = MagicMock()
         shell = _make_shell(settings_service)
         shell.settings.auto_read_on_connect = False
+        shell._defer_ui_armed = True
+        shell.rebuild_current_screen = MagicMock()
         shell._last_tick = 10.0
         states = ["no_device", "connected"]
 
@@ -1299,6 +1301,15 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
             "Controller reconnected; refreshing Wrapper Settings."
         )
         self.assertEqual(shell._last_connection_state, "connected")
+
+        # Fix D: reconnect defers a Home rebuild (symmetric with the disconnect
+        # branch), not just hydration flags. It is deferred during the tick, then
+        # drains to the real rebuild + right-rail refresh.
+        shell.rebuild_current_screen.assert_not_called()
+        with patch("zd_app.ui.app_shell.right_rail.refresh") as rail_refresh:
+            shell._drain_deferred_ui_calls()
+        shell.rebuild_current_screen.assert_called_once_with()
+        rail_refresh.assert_called_once_with(shell)
 
     def test_tick_steady_connected_no_rehydrate(self) -> None:
         shell = _make_shell(MagicMock())

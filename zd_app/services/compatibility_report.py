@@ -15,6 +15,7 @@ from zd_app.models import DeviceState
 from zd_app.services._log_entry import LogEntry, render_log_entry
 from zd_app.services.diagnostics_service import _redact_instance_id
 from zd_app.services.markdown_safety import escape_markdown
+from zd_app.services.model_fingerprint import ModelFingerprint, fingerprint_display_rows
 from zd_app.services.path_scrub import scrub_paths
 
 
@@ -71,6 +72,7 @@ class CompatibilityReport:
     firmware: str
     active_xinput_slot: str
     live_verify_availability: str
+    model_fingerprint: ModelFingerprint | None
     checklist: tuple[CompatibilityChecklistItem, ...]
     diagnostic_bundle_reference: str
     recent_events: tuple[str, ...]
@@ -100,14 +102,26 @@ class CompatibilityReport:
             f"- {_md(t('compat_report.xinput_slot_label'))}: {_md(self.active_xinput_slot)}",
             f"- {_md(t('compat_report.live_verify_label'))}: {_md(self.live_verify_availability)}",
             "",
-            f"## {_md(t('compat_report.section.checklist'))}",
-            (
-                f"| {_md(t('compat_report.table.area'))} | "
-                f"{_md(t('compat_report.table.state'))} | "
-                f"{_md(t('compat_report.table.evidence'))} |"
-            ),
-            "| --- | --- | --- |",
         ]
+        if self.model_fingerprint is not None:
+            lines.extend(
+                (
+                    f"## {_md(t('model_fingerprint.title'))}",
+                    *_model_fingerprint_markdown_lines(self.model_fingerprint),
+                    "",
+                )
+            )
+        lines.extend(
+            (
+                f"## {_md(t('compat_report.section.checklist'))}",
+                (
+                    f"| {_md(t('compat_report.table.area'))} | "
+                    f"{_md(t('compat_report.table.state'))} | "
+                    f"{_md(t('compat_report.table.evidence'))} |"
+                ),
+                "| --- | --- | --- |",
+            )
+        )
         for item in self.checklist:
             lines.append(
                 f"| {_md(item.area)} | {_md(_state_label(item.state))} | {_md(item.evidence)} |"
@@ -142,6 +156,7 @@ class CompatibilityReport:
                     f"{self.product_name}; {self.device_model_id}; "
                     f"{t('compat_report.variant_label')}: {self.variant}; "
                     f"{t('compat_report.firmware_label')}: {self.firmware}"
+                    f"{self._fingerprint_issue_text()}"
                 ),
             ),
             _issue_section("overall", self.overall_result),
@@ -190,6 +205,18 @@ class CompatibilityReport:
             )
         return "\n".join(lines)
 
+    def _fingerprint_issue_text(self) -> str:
+        if self.model_fingerprint is None:
+            return ""
+        lines = ["", "", t("model_fingerprint.title")]
+        for label, value in _model_fingerprint_rows(self.model_fingerprint):
+            lines.append(f"- {label}: {value}")
+        lines.append(
+            f"- {t('model_fingerprint.write_validation_basis_label')}: "
+            f"{t('model_fingerprint.write_validation_basis_value')}"
+        )
+        return "\n".join(lines)
+
 
 def build_compatibility_report(
     *,
@@ -232,6 +259,7 @@ def build_compatibility_report(
         firmware=_firmware_value(firmware, state),
         active_xinput_slot=xinput_slot,
         live_verify_availability=live_verify,
+        model_fingerprint=getattr(state, "model_fingerprint", None),
         checklist=items,
         diagnostic_bundle_reference=_bundle_reference(diagnostic_bundle_path),
         recent_events=_recent_event_lines(recent_events),
@@ -460,6 +488,29 @@ def _md(value: object) -> str:
 def _md_block(value: object) -> str:
     text = "" if value is None else str(value)
     return "\n".join(_md(line) for line in text.splitlines())
+
+
+def _model_fingerprint_rows(
+    fingerprint: ModelFingerprint,
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (t(label_key), _clean(value, t("model_fingerprint.value.not_collected")))
+        for label_key, value in fingerprint_display_rows(fingerprint)
+    )
+
+
+def _model_fingerprint_markdown_lines(
+    fingerprint: ModelFingerprint,
+) -> tuple[str, ...]:
+    rows = [
+        f"- {_md(label)}: {_md(value)}"
+        for label, value in _model_fingerprint_rows(fingerprint)
+    ]
+    rows.append(
+        f"- {_md(t('model_fingerprint.write_validation_basis_label'))}: "
+        f"{_md(t('model_fingerprint.write_validation_basis_value'))}"
+    )
+    return tuple(rows)
 
 
 __all__ = [

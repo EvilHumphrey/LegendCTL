@@ -10,6 +10,7 @@ import dearpygui.dearpygui as dpg
 from tests.r2_shell_test_helpers import make_shell
 from zd_app import i18n
 from zd_app.models import AppSettings
+from zd_app.services.model_fingerprint import InterfaceInventory, ModelFingerprint
 from zd_app.ui import right_rail, trust_front_door
 from zd_app.ui import typography
 from zd_app.ui.screens import diagnostics
@@ -535,6 +536,81 @@ class DiagnosticsTabStructureTests(unittest.TestCase):
                 "app-footprint check, not a whole-PC or game-compatibility clearance",
                 dpg.get_value(extra_tag),
             )
+        finally:
+            dpg.destroy_context()
+
+    def test_trust_self_check_mounts_model_fingerprint_block_when_collected(self) -> None:
+        shell = self._shell(developer_panels_visible=False)
+        shell.device_service.state.model_fingerprint = ModelFingerprint(
+            vid=0x413D,
+            pid=0x2104,
+            version_number=0x0124,
+            product_string="ZD Ultimate Legend",
+            manufacturer_string="ZD",
+            usage_page=0xFF00,
+            usage=0x0001,
+            input_report_len=64,
+            output_report_len=65,
+            feature_report_len=17,
+            button_caps_count=10,
+            value_caps_count=6,
+            interface_inventory=InterfaceInventory(count=3, mi_indices=(0, 1, 2)),
+        )
+        dpg.create_context()
+        try:
+            _build_in_fresh_context(shell)
+
+            self.assertTrue(
+                dpg.does_item_exist(diagnostics.TRUST_SELF_CHECK_MODEL_FINGERPRINT_TAG)
+            )
+            self.assertIn(
+                "Fingerprint digest",
+                dpg.get_value("diagnostics_model_fingerprint_row_0"),
+            )
+            self.assertEqual(
+                dpg.get_value("diagnostics_model_fingerprint_basis"),
+                "Write validation basis: ZD Ultimate Legend (wired USB)",
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_trust_self_check_model_fingerprint_block_tracks_late_arrival(self) -> None:
+        # G3: the fingerprint is collected asynchronously (~2.5s after connect),
+        # so the Diagnostics trust card is first built with model_fingerprint=None
+        # (block absent). A later rebuild that sees it must mount the block, and a
+        # rebuild after it clears must drop it (symmetric).
+        shell = self._shell(developer_panels_visible=False)
+        fingerprint = ModelFingerprint(
+            vid=0x413D,
+            pid=0x2104,
+            interface_inventory=InterfaceInventory(count=1, mi_indices=(2,)),
+        )
+        tag = diagnostics.TRUST_SELF_CHECK_MODEL_FINGERPRINT_TAG
+
+        # Built before the fingerprint arrives: block absent.
+        shell.device_service.state.model_fingerprint = None
+        dpg.create_context()
+        try:
+            _build_in_fresh_context(shell)
+            self.assertFalse(dpg.does_item_exist(tag))
+        finally:
+            dpg.destroy_context()
+
+        # Fingerprint arrives; the rebuild mounts the block.
+        shell.device_service.state.model_fingerprint = fingerprint
+        dpg.create_context()
+        try:
+            _build_in_fresh_context(shell)
+            self.assertTrue(dpg.does_item_exist(tag))
+        finally:
+            dpg.destroy_context()
+
+        # Symmetric: the fingerprint clears; the rebuild drops the block.
+        shell.device_service.state.model_fingerprint = None
+        dpg.create_context()
+        try:
+            _build_in_fresh_context(shell)
+            self.assertFalse(dpg.does_item_exist(tag))
         finally:
             dpg.destroy_context()
 

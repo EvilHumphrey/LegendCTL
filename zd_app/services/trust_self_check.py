@@ -13,6 +13,7 @@ from typing import Iterable
 from zd_app import version as app_version
 from zd_app.i18n import t
 from zd_app.services.markdown_safety import escape_markdown
+from zd_app.services.model_fingerprint import ModelFingerprint, fingerprint_display_rows
 from zd_app.services.path_scrub import scrub_paths
 from zd_app.storage.settings_store import _default_user_data_dir
 
@@ -66,6 +67,7 @@ class TrustSelfCheckResult:
     browser_handoffs: tuple[BrowserHandoff, ...]
     footprint_findings: tuple[FootprintFinding, ...]
     rows: tuple[TrustSelfCheckRow, ...]
+    model_fingerprint: ModelFingerprint | None = None
 
     def to_markdown(self) -> str:
         """Render the copy-pasteable, Markdown-safe self-check artifact."""
@@ -87,6 +89,14 @@ class TrustSelfCheckResult:
         for row in self.rows:
             lines.append(
                 f"| {_md(row.claim)} | {_md(row.evidence)} | {_md(row.boundary)} |"
+            )
+        if self.model_fingerprint is not None:
+            lines.extend(("", f"## {_md(t('model_fingerprint.title'))}"))
+            for label, value in _model_fingerprint_rows(self.model_fingerprint):
+                lines.append(f"- {_md(label)}: {_md(value)}")
+            lines.append(
+                f"- {_md(t('model_fingerprint.write_validation_basis_label'))}: "
+                f"{_md(t('model_fingerprint.write_validation_basis_value'))}"
             )
         return "\n".join(lines).rstrip() + "\n"
 
@@ -113,6 +123,14 @@ class TrustSelfCheckResult:
                     "",
                 )
             )
+        if self.model_fingerprint is not None:
+            lines.extend(("", t("model_fingerprint.title")))
+            for label, value in _model_fingerprint_rows(self.model_fingerprint):
+                lines.append(f"{label}: {value}")
+            lines.append(
+                f"{t('model_fingerprint.write_validation_basis_label')}: "
+                f"{t('model_fingerprint.write_validation_basis_value')}"
+            )
         return "\n".join(lines).rstrip() + "\n"
 
 
@@ -123,6 +141,7 @@ def build_trust_self_check(
     user_data_dir: str | Path | None = None,
     frozen: bool | None = None,
     now: datetime | None = None,
+    model_fingerprint: ModelFingerprint | None = None,
 ) -> TrustSelfCheckResult:
     """Assemble the in-session trust evidence without network or device I/O."""
 
@@ -208,6 +227,7 @@ def build_trust_self_check(
         browser_handoffs=handoffs,
         footprint_findings=footprint_findings,
         rows=rows,
+        model_fingerprint=model_fingerprint,
     )
 
 
@@ -484,6 +504,15 @@ def _rel(path: Path, root: Path) -> str:
 
 def _md(value: object) -> str:
     return escape_markdown(value)
+
+
+def _model_fingerprint_rows(
+    fingerprint: ModelFingerprint,
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (t(label_key), _clean_observed_value(value))
+        for label_key, value in fingerprint_display_rows(fingerprint)
+    )
 
 
 __all__ = [

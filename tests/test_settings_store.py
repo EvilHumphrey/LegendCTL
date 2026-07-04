@@ -124,6 +124,32 @@ class SettingsStoreRoundTripTests(unittest.TestCase):
 
             self.assertTrue(store.load().first_run_acknowledged)
 
+    def test_setup_drawer_dismissed_accessor_defaults_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            store = self._store(Path(tmp_str))
+            self.assertFalse(store.get_setup_drawer_dismissed())
+            self.assertFalse(getattr(store.load(), "setup_drawer_dismissed"))
+
+    def test_setup_drawer_dismissed_accessor_round_trips_and_survives_save(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            tmp = Path(tmp_str)
+            store = self._store(tmp)
+
+            store.set_setup_drawer_dismissed(True)
+
+            disk = json.loads((tmp / "settings.json").read_text(encoding="utf-8"))
+            self.assertTrue(disk["setup_drawer_dismissed"])
+            self.assertTrue(store.get_setup_drawer_dismissed())
+            self.assertTrue(getattr(store.load(), "setup_drawer_dismissed"))
+
+            store.save(AppSettings(language="zh-CN"))
+            disk = json.loads((tmp / "settings.json").read_text(encoding="utf-8"))
+            self.assertTrue(disk["setup_drawer_dismissed"])
+
+            store.set_setup_drawer_dismissed(False)
+            disk = json.loads((tmp / "settings.json").read_text(encoding="utf-8"))
+            self.assertFalse(disk["setup_drawer_dismissed"])
+
 
 class SettingsStoreCorruptionTests(unittest.TestCase):
     """A2/A3: a corrupt/tampered settings.json degrades to defaults instead of

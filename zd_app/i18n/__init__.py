@@ -22,6 +22,86 @@ _reverse_en: dict[str, str] = {}
 # contributor passes that raw English literal. Populated at en-load purely as a
 # guard surface; it never changes resolution.
 _ambiguous_en: dict[str, tuple[str, ...]] = {}
+# Reviewed context-different duplicates (2026-07-03 ambiguity audit). Each English
+# literal maps to the EXACT set of keys reviewed for it. The guard suppresses the
+# warning only while the live key-set is a SUBSET of the reviewed set: a NEW
+# sibling key added later under an allowlisted literal (e.g. a fresh "Back"/"Home"
+# key carrying a different zh translation) is not in the reviewed set, so it
+# re-arms the warning instead of shipping silently un-warned (a literal-only
+# allowlist would have suppressed it). These literals are intentionally not
+# unified; raw DPG use must be keyed before it reaches translate_literal().
+_REVIEWED_AMBIGUOUS: dict[str, frozenset[str]] = {
+    "Back": frozenset(
+        {
+            "controller.back_paddles.target.BACK",
+            "diagnostics.live_verify.workspace.back_view",
+        }
+    ),
+    "Battery": frozenset(
+        {
+            "device.summary.field.battery",
+            "shell.battery",
+            "home.connection.battery",
+        }
+    ),
+    "Controller": frozenset(
+        {
+            "nav.controller",
+            "controller.title",
+            "compat_report.section.controller",
+        }
+    ),
+    "Home": frozenset(
+        {
+            "ui.home_70f8bb9a",
+            "nav.home",
+            "restore_field.lighting_zone.home",
+            "diagnostics.live_verify.face_diagram.home",
+        }
+    ),
+    "Instant": frozenset(
+        {
+            "ui.instant_e5dd7083",
+            "controller.sticks.preset.instant",
+            "controller.motion.mode.instant",
+        }
+    ),
+    "Layout": frozenset(
+        {
+            "safe_import.categories.layout",
+            "restore_points.detail.field_category.layout",
+            "device_vs_profile.section.layout",
+        }
+    ),
+    "Left": frozenset(
+        {
+            "apply.side.left",
+            "health_report.table.col.left",
+            "restore_field.deadzones.left",
+            "modules.side.left",
+        }
+    ),
+    "Off": frozenset(
+        {
+            "restore_field.lighting.off",
+            "restore_field.lighting_mode.off",
+        }
+    ),
+    "Right": frozenset(
+        {
+            "apply.side.right",
+            "health_report.table.col.right",
+            "restore_field.deadzones.right",
+            "modules.side.right",
+        }
+    ),
+    "Short": frozenset(
+        {
+            "ui.short_0fe7d82f",
+            "restore_field.trigger_mode.short",
+        }
+    ),
+}
 
 
 def _locale_dir() -> Path:
@@ -94,6 +174,13 @@ def _rebuild_reverse_en() -> None:
     siblings = _other_locale_map_for_ambiguity()
     for value, keys in value_to_keys.items():
         if len(keys) <= 1:
+            continue
+        reviewed_keys = _REVIEWED_AMBIGUOUS.get(value)
+        if reviewed_keys is not None and set(keys) <= reviewed_keys:
+            # Exactly the reviewed context-different keys — intentional, not a
+            # trap. A NEW sibling key (set(keys) not a subset of the reviewed
+            # set) falls through so the distinct-translation check below can
+            # re-arm the warning.
             continue
         distinct = {siblings[k] for k in keys if k in siblings}
         if len(distinct) > 1:

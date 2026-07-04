@@ -41,6 +41,10 @@ class IsolatedHomeReferenceHeightTest(unittest.TestCase):
                 dpg.render_dearpygui_frame()
 
             _seed_services(shell, Path(tmpdir.name))
+            # The setup drawer is an intentionally extra first-run card. This
+            # legacy viewport-budget gate protects the post-dismiss steady-state
+            # Home dashboard from regressing back to a permanent scrollbar.
+            shell.settings.setup_drawer_dismissed = True
             shell.switch_screen("home")
             for _ in range(60):
                 dpg.render_dearpygui_frame()

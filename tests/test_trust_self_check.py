@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from zd_app import i18n
+from zd_app.services.model_fingerprint import InterfaceInventory, ModelFingerprint
 from zd_app.services import trust_self_check
 
 
@@ -208,8 +209,8 @@ Copyable evidence for this run. Observed for THIS process THIS session - not a s
 | --- | --- | --- |
 | No network: this build imports no networking modules. | Static scan of zd_app found 0 imports of socket/http/urllib/requests/ssl. No webbrowser.open handoff was found in zd_app. | Observed for THIS process THIS session - not a system-wide audit. |
 | No drivers / virtual devices: this shipped app footprint contains no driver or virtual-device package artifacts. | Static scan of zd_app found 0 driver/virtual-device artifacts across 1 package file\(s\). | Observed for THIS process THIS session - not a system-wide audit. This is an app-footprint check, not a whole-PC or game-compatibility clearance. |
-| No background service / autostart: this app does not install a resident component; closing the window stops this process. | This session is running as source run \(not frozen\); process id 4242; executable path \(scrubbed\): %USERPROFILE%\LegendCTL\python.exe. | Observed for THIS process THIS session - not a system-wide audit. |
-| Local data location + scrub posture: app data stays local and displayed paths are scrubbed to placeholders. | Default data directory \(scrubbed\): %APPDATA%\ZDUltimateLegend. Copy/export text uses path scrubbing and Markdown escaping before it is shareable. | Observed for THIS process THIS session - not a system-wide audit. |
+| No background service / autostart: this app does not install a resident component; closing the window stops this process. | This session is running as source run \(not frozen\); process id 4242; executable path \(scrubbed\): %USERPROFILE%\\LegendCTL\\python.exe. | Observed for THIS process THIS session - not a system-wide audit. |
+| Local data location + scrub posture: app data stays local and displayed paths are scrubbed to placeholders. | Default data directory \(scrubbed\): %APPDATA%\\ZDUltimateLegend. Copy/export text uses path scrubbing and Markdown escaping before it is shareable. | Observed for THIS process THIS session - not a system-wide audit. |
 | Build identity: report what this process can observe. | Version 2.3.1; build commit abc123; build date 2026-07-01; run mode source run \(not frozen\). | Observed for THIS process THIS session - not a system-wide audit. |
 """
         self.assertEqual(result.to_markdown(), expected)
@@ -278,6 +279,38 @@ Build identity: report what this process can observe.
   Observed for THIS process THIS session - not a system-wide audit.
 """
         self.assertEqual(result.to_text(), expected)
+
+    def test_model_fingerprint_block_renders_fields_without_serial(self) -> None:
+        fingerprint = ModelFingerprint(
+            vid=0x413D,
+            pid=0x2104,
+            version_number=0x0124,
+            product_string="ZD Ultimate Legend",
+            manufacturer_string="ZD",
+            usage_page=0xFF00,
+            usage=0x0001,
+            input_report_len=64,
+            output_report_len=65,
+            feature_report_len=17,
+            button_caps_count=10,
+            value_caps_count=6,
+            interface_inventory=InterfaceInventory(count=3, mi_indices=(0, 1, 2)),
+        )
+
+        result = trust_self_check.build_trust_self_check(
+            package_root=Path("zd_app"),
+            model_fingerprint=fingerprint,
+            now=_NOW,
+        )
+        text = result.to_text()
+        markdown = result.to_markdown()
+
+        self.assertIn("Model fingerprint", text)
+        self.assertIn(fingerprint.short_digest or "", text)
+        self.assertIn("VID: 0x413D", text)
+        self.assertIn("MI_00, MI_01, MI_02", text)
+        self.assertIn("Write validation basis: ZD Ultimate Legend (wired USB)", text)
+        self.assertNotIn("serial", (text + markdown).lower())
 
 
 class TrustSelfCheckI18nTests(unittest.TestCase):

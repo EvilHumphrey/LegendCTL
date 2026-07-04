@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 
-_MARKDOWN_ESCAPE_CHARS = ("|", "[", "]", "(", ")", "`")
+# Backslash MUST be first: escaping it after the others would double the
+# backslashes we add for |, [, ], etc. Angle brackets are escaped so a device
+# descriptor string such as an iProduct of "<img src=x>" cannot pass raw HTML/
+# Markdown structure into the share-safe compat-report / trust-self-check exports.
+_MARKDOWN_ESCAPE_CHARS = ("\\", "|", "[", "]", "(", ")", "`", "<", ">")
 
 
 def escape_markdown(value: object) -> str:

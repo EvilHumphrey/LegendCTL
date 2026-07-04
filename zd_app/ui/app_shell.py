@@ -1057,6 +1057,11 @@ class AppShell:
         # iteration.
         self._last_back_paddle_bindings_lock = threading.Lock()
         self.last_snapshot_ts: float | None = None
+        # stable_identifier the cached snapshot was read from. Lets the Home
+        # setup drawer scope "settings read this session" to the connected unit,
+        # so a mid-session controller swap can't inherit the prior read
+        # (see home._settings_read_this_session).
+        self.last_snapshot_identity: str | None = None
         self.last_snapshot_status = ""
         self._apply_status_text: str | None = None
         self._apply_status_clear_after: float | None = None
@@ -1233,6 +1238,10 @@ class AppShell:
         # v1 to "capture once per identity per app session" — reconnects of
         # the same controller within the session do NOT re-fire.
         self._first_connect_captured: set[str] = set()
+        self.setup_drawer_restore_point_created = False
+        # stable_identifier the drawer restore point was created for — same
+        # unit-swap honesty scope as last_snapshot_identity.
+        self.setup_drawer_restore_point_identity: str | None = None
         # HID-job executor seam (worker-thread phase 1). None (default) runs
         # jobs synchronously inline — byte-for-byte the pre-seam behavior the
         # existing suite exercises. main_zd.py passes threaded_hid_executor so
@@ -1951,6 +1960,11 @@ class AppShell:
         self._set_if_exists("footer_delete_tooltip_text", t("footer.delete.tooltip"))
         if not _apply_status_active(self):
             self._set_if_exists("footer_status_text", last_apply_result)
+        # Re-sync the Home setup drawer's read / back-up steps in place. The
+        # drawer renders step states once at build time, but the startup
+        # auto-read and drawer-created restore points both land after that
+        # build; this flips the ✓ live. No-op off Home / when dismissed.
+        home.refresh_setup_drawer(self)
         right_rail.refresh(self)
 
     def _set_if_exists(self, tag: str, value) -> None:
@@ -3029,11 +3043,17 @@ class AppShell:
             return None
         identity = self._current_device_identity()
         try:
-            return service.capture(
+            rp = service.capture(
                 trigger,
                 title=title,
                 device_identity=identity,
             )
+            if rp is not None:
+                self.setup_drawer_restore_point_created = True
+                self.setup_drawer_restore_point_identity = (
+                    self.device_service.state.stable_identifier
+                )
+            return rp
         except Exception:
             logger.exception(
                 "Restore-point capture failed for trigger %r — apply path continues",
@@ -4228,6 +4248,12 @@ class AppShell:
                 if merged != (snapshot.back_paddle_bindings or {}):
                     snapshot = replace(snapshot, back_paddle_bindings=merged)
             self.last_controller_snapshot = snapshot
+        # Stamp the unit this snapshot was read from so the setup drawer can tell
+        # a same-session read of THIS controller from a stale read of a swapped
+        # one. Clearing the snapshot clears the stamp.
+        self.last_snapshot_identity = (
+            self.device_service.state.stable_identifier if snapshot is not None else None
+        )
         return snapshot
 
     def _update_lighting_widgets_for_zone(self, zone: LightingZone) -> None:
@@ -4419,6 +4445,11 @@ class AppShell:
                     self.device_service.log_event(
                         "Controller reconnected; refreshing Wrapper Settings."
                     )
+                # Rebuild Home (and the right rail) on reconnect, symmetric with
+                # the disconnect branch below. The hydration flags above only
+                # re-read settings; without this the Home presence card / setup
+                # drawer never rebuilds until the next manual navigation.
+                self._request_presence_rebuild()
             elif (
                 self._last_connection_state == "connected"
                 and current_connection_state == "no_device"

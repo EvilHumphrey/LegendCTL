@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.5.0 — 2026-07-03
+
+Feature release: a read-only model fingerprint (VID/PID, usage page, report shape, interface
+inventory, SHA-256 digest — serial excluded, local-only, shared only via the manual
+Compatibility Report) now shows in the Trust Self-Check and feeds a community model corpus;
+Home gains a "First steps" guided card (live step completion, auto-collapse when done,
+dismissal persists) scoped honestly to the connected device; share-safe exports additionally
+escape angle brackets and backslashes; a native-speaker Chinese localization pass (35
+unifications + new-surface polish); assorted hardening from an eight-lane pre-release review.
+No new write paths; fingerprint and First-steps flows hardware-smoked before the cut. First
+CI-built release with attested provenance.
+
 ## v2.4.1 — 2026-07-03
 
 Fix release: locale-independent device recognition (a reviewer's screenshot exposed our

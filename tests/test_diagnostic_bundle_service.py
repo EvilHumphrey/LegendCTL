@@ -669,10 +669,14 @@ class ReportMarkdownEscapingTests(unittest.TestCase):
         ):
             self.assertNotIn(heading, report_md)
 
-        self.assertIn(f"{APP_DATA_PLACEHOLDER}/device/product.json", report_md)
-        self.assertIn(f"{APP_DATA_PLACEHOLDER}/controllers/pad.json", report_md)
-        self.assertIn(f"{APP_DATA_PLACEHOLDER}/overall.json", report_md)
-        self.assertIn(f"{APP_DATA_PLACEHOLDER}/note.txt", report_md)
+        # Fix C: the report-body field values are Markdown-escaped, so the
+        # placeholder's angle brackets now render as \< \> (the JSON members
+        # below stay path-scrubbed but NOT Markdown-escaped).
+        escaped_placeholder = APP_DATA_PLACEHOLDER.replace("<", r"\<").replace(">", r"\>")
+        self.assertIn(f"{escaped_placeholder}/device/product.json", report_md)
+        self.assertIn(f"{escaped_placeholder}/controllers/pad.json", report_md)
+        self.assertIn(f"{escaped_placeholder}/overall.json", report_md)
+        self.assertIn(f"{escaped_placeholder}/note.txt", report_md)
         # JSON members stay path-scrubbed, not Markdown-escaped.
         preview = wear_summary["recent_service_notes"][0]["preview"]
         self.assertIn("[note]", preview)

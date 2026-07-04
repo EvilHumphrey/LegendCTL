@@ -10,6 +10,7 @@ from pathlib import Path
 
 from zd_app import i18n
 from zd_app.models import DeviceState
+from zd_app.services.model_fingerprint import InterfaceInventory, ModelFingerprint
 from zd_app.services import trust_self_check
 from zd_app.services.compatibility_report import (
     ISSUE_TEMPLATE_FIELD_IDS,
@@ -61,7 +62,9 @@ class CompatibilityReportRendererTests(unittest.TestCase):
         combined = report.to_markdown() + report.to_issue_body()
         self.assertNotIn("Avery Stone", combined)
         self.assertNotIn("ABC123DEF456", combined)
-        self.assertIn(r"HID\VID_413D&PID_2104", combined)
+        # Fix C: the scrubbed model-ID prefix is now backslash-escaped in the
+        # share-safe export (renders as HID\VID...; raw markdown carries \\).
+        self.assertIn(r"HID\\VID_413D&PID_2104", combined)
         self.assertIn(r"Variant\|X", combined)
         self.assertIn(r"v1.24 \`\[demo\]\`", combined)
         self.assertIn("bundle.zip", combined)
@@ -85,7 +88,7 @@ class CompatibilityReportRendererTests(unittest.TestCase):
             "LegendCTL version",
             "Build commit",
             "Windows 11 test build",
-            r"USB\VID_413D&PID_2104",
+            r"USB\\VID_413D&PID_2104",
             "read OK",
             "write OK",
             "sent-not-verified",
@@ -128,9 +131,42 @@ class CompatibilityReportRendererTests(unittest.TestCase):
         )
         combined = report.to_markdown() + report.to_issue_body()
 
-        self.assertIn(r"HID\VID_9999&PID_0001", combined)
+        self.assertIn(r"HID\\VID_9999&PID_0001", combined)
         self.assertIn("v9.99-beta", combined)
         self.assertNotIn("SERIALTAIL", combined)
+
+    def test_model_fingerprint_section_is_sanitized_and_excludes_serial(self) -> None:
+        state = DeviceState(
+            product_name="ZD Ultimate Legend",
+            stable_identifier=r"HID\VID_413D&PID_2104&MI_02\UNIT-SERIAL-123",
+            connection_state="connected",
+            xinput_slot=0,
+        )
+        state.model_fingerprint = ModelFingerprint(
+            vid=0x413D,
+            pid=0x2104,
+            version_number=0x0124,
+            product_string="ZD | [Legend](x)`",
+            manufacturer_string="ZD Maker",
+            usage_page=0xFF00,
+            usage=0x0001,
+            input_report_len=64,
+            output_report_len=65,
+            feature_report_len=17,
+            button_caps_count=10,
+            value_caps_count=6,
+            interface_inventory=InterfaceInventory(count=3, mi_indices=(0, 1, 2)),
+        )
+
+        report = build_compatibility_report(device_state=state, now=_NOW)
+        combined = report.to_markdown() + report.to_issue_body()
+
+        self.assertIn("Model fingerprint", combined)
+        self.assertIn(r"ZD \| \[Legend\]\(x\)\`", combined)
+        self.assertIn("Write validation basis: ZD Ultimate Legend", combined)
+        self.assertIn("MI_00, MI_01, MI_02", combined)
+        self.assertNotIn("UNIT-SERIAL-123", combined)
+        self.assertNotIn("serial number", combined.lower())
 
     def test_no_controller_does_not_claim_live_verify_available(self) -> None:
         report = build_compatibility_report(device_state=DeviceState(), now=_NOW)

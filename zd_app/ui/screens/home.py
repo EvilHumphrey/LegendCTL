@@ -89,6 +89,9 @@ def build(shell, parent: str) -> None:
             lambda: _actions_card(shell),
             tag="home_next_step_row",
         )
+        if _should_show_setup_drawer(shell):
+            _home_gap()
+            _setup_drawer_card(shell)
         _home_gap()
         _state_explainer(shell)
 
@@ -387,6 +390,340 @@ def _actions_card(shell) -> None:
                     width=190,
                     callback=lambda: shell.switch_screen("controller"),
                 )
+
+
+def _setup_drawer_card(shell) -> None:
+    state = shell.device_service.state
+    complete = _setup_drawer_complete(shell)
+    with card(fit=True, tag="home_setup_drawer_card"):
+        # Two pre-built regions, exactly one shown: the full step list while
+        # any completable step is pending, or a compact single row once both
+        # are done (with the drawer visible, Home overflows the reference
+        # viewport by ~376px, so a finished checklist is dead weight —
+        # operator-chosen auto-collapse). Both regions exist from build time so
+        # refresh_setup_drawer can swap them live via show/hide when the last
+        # step completes while Home is showing — the same in-place philosophy
+        # as the step flips: never a rebuild_current_screen from a refresh
+        # path (the DPG modal-teardown law).
+        with dpg.group(tag="home_setup_drawer_full", show=not complete):
+            with section(t("home.setup_drawer.title")):
+                _setup_drawer_step(
+                    shell,
+                    "home_setup_drawer_detected",
+                    True,
+                    t("home.setup_drawer.detected_label"),
+                    state.product_name,
+                )
+                _setup_drawer_read_step(shell)
+                _setup_drawer_backup_step(shell)
+                _setup_drawer_explore_step(shell)
+                dpg.add_spacer(height=6)
+                dpg.add_button(
+                    label=t("home.setup_drawer.dismiss"),
+                    tag="home_setup_drawer_dismiss",
+                    callback=lambda: _dismiss_setup_drawer(shell),
+                )
+        with dpg.group(tag="home_setup_drawer_compact", show=complete):
+            # No step rows / helpers / Explore buttons here — Health Check and
+            # Live Verify already live in the Next-step card, so nothing is
+            # lost. The dismiss button reuses the same i18n key + callback path
+            # as the full variant; it only needs a distinct tag because DPG
+            # tags are unique.
+            with dpg.group(horizontal=True):
+                dpg.add_text(
+                    "✓",
+                    color=shell.COLORS["good"],
+                    tag="home_setup_drawer_compact_marker",
+                )
+                dpg.add_text(
+                    t("home.setup_drawer.complete"),
+                    tag="home_setup_drawer_compact_label",
+                )
+                dpg.add_button(
+                    label=t("home.setup_drawer.dismiss"),
+                    tag="home_setup_drawer_compact_dismiss",
+                    callback=lambda: _dismiss_setup_drawer(shell),
+                )
+
+
+def _setup_drawer_complete(shell) -> bool:
+    """True when every completable drawer step is done.
+
+    Step 1 "Detected" is inherently satisfied whenever the drawer is visible
+    (visibility requires a connected, recognized controller), so completeness
+    reduces to step 2 (settings read this session) and step 3 (restore point
+    created this session).
+    """
+
+    return _settings_read_this_session(shell) and _setup_drawer_restore_point_done(shell)
+
+
+def _setup_drawer_step(
+    shell,
+    tag_prefix: str,
+    done: bool,
+    label: str,
+    helper: str | None = None,
+) -> None:
+    marker = "✓" if done else "-"
+    marker_color = shell.COLORS["good"] if done else shell.COLORS["muted"]
+    with dpg.group(horizontal=True, tag=f"{tag_prefix}_row"):
+        dpg.add_text(marker, color=marker_color, tag=f"{tag_prefix}_marker")
+        dpg.add_text(label, tag=f"{tag_prefix}_label")
+    if helper:
+        dpg.add_text(
+            helper,
+            color=shell.COLORS["muted"],
+            wrap=1000,
+            tag=f"{tag_prefix}_helper",
+        )
+    dpg.add_spacer(height=4)
+
+
+def _setup_drawer_read_step(shell) -> None:
+    if _settings_read_this_session(shell):
+        _setup_drawer_step(
+            shell,
+            "home_setup_drawer_read",
+            True,
+            t("home.setup_drawer.settings_read_label"),
+        )
+        return
+    _setup_drawer_step(
+        shell,
+        "home_setup_drawer_read",
+        False,
+        t("home.setup_drawer.settings_read_label"),
+        t("home.setup_drawer.settings_read_helper"),
+    )
+    dpg.add_button(
+        label=t("home.setup_drawer.read_now"),
+        tag="home_setup_drawer_read_now",
+        width=150,
+        height=32,
+        callback=lambda: shell.refresh_from_controller(),
+    )
+    dpg.add_spacer(height=4, tag="home_setup_drawer_read_after_button_spacer")
+
+
+def _setup_drawer_backup_step(shell) -> None:
+    if _setup_drawer_restore_point_done(shell):
+        _setup_drawer_step(
+            shell,
+            "home_setup_drawer_backup",
+            True,
+            t("home.setup_drawer.restore_point_created"),
+        )
+        return
+    _setup_drawer_step(
+        shell,
+        "home_setup_drawer_backup",
+        False,
+        t("home.setup_drawer.back_up_label"),
+        t("home.setup_drawer.back_up_helper"),
+    )
+    dpg.add_button(
+        label=t("home.setup_drawer.create_restore_point"),
+        tag="home_setup_drawer_create_restore_point",
+        width=180,
+        height=32,
+        callback=lambda: _create_setup_drawer_restore_point(shell),
+    )
+    dpg.add_spacer(height=4, tag="home_setup_drawer_backup_after_button_spacer")
+
+
+def refresh_setup_drawer(shell) -> None:
+    """Re-sync the setup drawer's read / back-up steps (and collapse) in place.
+
+    The drawer renders each step's state ONCE at Home build time. Two events
+    land AFTER that build and would otherwise leave a step stuck on its pending
+    dash: the startup auto-read completes on the threaded HID executor ~3s after
+    Home builds (step 2), and a restore point created via the drawer button
+    happens while Home is already showing (step 3). ``AppShell.refresh_shell``
+    calls this on every tick and at read-completion, so the ✓ appears live.
+    Once every completable step is done the drawer auto-collapses to its
+    pre-built compact "First steps complete" row (see ``_setup_drawer_card``).
+
+    In-place tag updates only — never a ``rebuild_current_screen`` call. A full
+    rebuild from the read-done path could collide with the DearPyGui
+    modal-teardown law (an "Apply device settings?" modal may be up when a read
+    completes); configuring existing tags is immune to that hazard.
+
+    No-op when the drawer card tag is absent (a different screen is showing, the
+    controller is disconnected so the drawer never built, or the operator
+    dismissed it). Every dpg call is existence-guarded per the surrounding code.
+    """
+
+    if not dpg.does_item_exist("home_setup_drawer_card"):
+        return
+    if _settings_read_this_session(shell):
+        _mark_setup_drawer_step_done(
+            shell,
+            "home_setup_drawer_read",
+            t("home.setup_drawer.settings_read_label"),
+            button_tag="home_setup_drawer_read_now",
+            spacer_tag="home_setup_drawer_read_after_button_spacer",
+        )
+    if _setup_drawer_restore_point_done(shell):
+        _mark_setup_drawer_step_done(
+            shell,
+            "home_setup_drawer_backup",
+            t("home.setup_drawer.restore_point_created"),
+            button_tag="home_setup_drawer_create_restore_point",
+            spacer_tag="home_setup_drawer_backup_after_button_spacer",
+        )
+    if _setup_drawer_complete(shell):
+        _collapse_setup_drawer()
+
+
+def _collapse_setup_drawer() -> None:
+    """Swap the drawer's full step list for the compact complete row in place.
+
+    Both regions were pre-built inside the card (one shown), so the collapse is
+    a pure show/hide toggle — no rebuild, no new items. Idempotent: repeat
+    calls re-hide/re-show the same regions harmlessly, and the existence guards
+    keep this a no-op on any build that predates the two-region structure.
+    """
+
+    if dpg.does_item_exist("home_setup_drawer_full"):
+        dpg.hide_item("home_setup_drawer_full")
+    if dpg.does_item_exist("home_setup_drawer_compact"):
+        dpg.show_item("home_setup_drawer_compact")
+
+
+def _mark_setup_drawer_step_done(
+    shell,
+    tag_prefix: str,
+    done_label: str,
+    *,
+    button_tag: str,
+    spacer_tag: str,
+) -> None:
+    """Flip a pending drawer step to its checked state without rebuilding.
+
+    Turns the marker green ✓, swaps the label to its done copy, and hides the
+    pending-only helper text, action button, and trailing spacer. Idempotent:
+    once a step is already done (or was built done, so its button/helper never
+    existed) the existence guards make repeat calls harmless no-ops.
+    """
+
+    marker_tag = f"{tag_prefix}_marker"
+    if dpg.does_item_exist(marker_tag):
+        dpg.set_value(marker_tag, "✓")
+        dpg.configure_item(marker_tag, color=shell.COLORS["good"])
+    label_tag = f"{tag_prefix}_label"
+    if dpg.does_item_exist(label_tag):
+        dpg.set_value(label_tag, done_label)
+    for tag in (f"{tag_prefix}_helper", button_tag, spacer_tag):
+        if dpg.does_item_exist(tag):
+            dpg.hide_item(tag)
+
+
+def _setup_drawer_explore_step(shell) -> None:
+    dpg.add_text(t("home.setup_drawer.explore_label"), tag="home_setup_drawer_explore_label")
+    with dpg.group(horizontal=True, tag="home_setup_drawer_explore_buttons"):
+        dpg.add_button(
+            label=t("home.setup_drawer.health_check"),
+            tag="home_setup_drawer_health_check",
+            width=150,
+            height=32,
+            callback=lambda: shell.switch_screen("health_report"),
+        )
+        dpg.add_button(
+            label=t("home.setup_drawer.live_verify"),
+            tag="home_setup_drawer_live_verify",
+            width=150,
+            height=32,
+            callback=lambda: shell.switch_screen("live_verify"),
+        )
+
+
+def _should_show_setup_drawer(shell) -> bool:
+    state = shell.device_service.state
+    return (
+        state.connection_state == "connected"
+        and state.device_class == "zd_ultimate_legend"
+        and not _setup_drawer_dismissed(shell)
+    )
+
+
+def _drawer_current_identity(shell) -> str | None:
+    """stable_identifier of the controller the drawer is describing, or None.
+
+    The drawer only renders with a recognized controller connected, so this is
+    normally a real identifier; the guard keeps the completion predicates honest
+    if it is ever evaluated without one.
+    """
+    service = getattr(shell, "device_service", None)
+    state = getattr(service, "state", None)
+    identity = getattr(state, "stable_identifier", None)
+    if not identity or identity == "unknown":
+        return None
+    return identity
+
+
+def _drawer_flag_matches_current(shell, recorded: object) -> bool:
+    """True when a session flag stamped ``recorded`` belongs to the unit
+    connected now, so swapping physical controllers mid-session cannot let the
+    new unit inherit the previous one's completed steps."""
+    current = _drawer_current_identity(shell)
+    return current is not None and recorded == current
+
+
+def _setup_drawer_restore_point_done(shell) -> bool:
+    return bool(
+        getattr(shell, "setup_drawer_restore_point_created", False)
+    ) and _drawer_flag_matches_current(
+        shell, getattr(shell, "setup_drawer_restore_point_identity", None)
+    )
+
+
+def _settings_read_this_session(shell) -> bool:
+    if (
+        getattr(shell, "last_controller_snapshot", None) is None
+        or getattr(shell, "last_snapshot_ts", None) is None
+    ):
+        return False
+    # Scope to the connected unit: a snapshot read from a DIFFERENT physical
+    # controller (swapped mid-session) must not count as this one's settings read.
+    return _drawer_flag_matches_current(
+        shell, getattr(shell, "last_snapshot_identity", None)
+    )
+
+
+def _setup_drawer_dismissed(shell) -> bool:
+    settings = getattr(shell, "settings", None)
+    if hasattr(settings, "setup_drawer_dismissed"):
+        return bool(getattr(settings, "setup_drawer_dismissed"))
+    store = getattr(shell, "settings_store", None)
+    getter = getattr(store, "get_setup_drawer_dismissed", None)
+    if not callable(getter):
+        return False
+    try:
+        return getter() is True
+    except Exception:
+        logger.exception("Setup drawer dismissed-state read failed")
+        return False
+
+
+def _dismiss_setup_drawer(shell) -> None:
+    if hasattr(shell, "settings"):
+        setattr(shell.settings, "setup_drawer_dismissed", True)
+    store = getattr(shell, "settings_store", None)
+    setter = getattr(store, "set_setup_drawer_dismissed", None)
+    if callable(setter):
+        setter(True)
+    else:
+        store.save(shell.settings)
+    shell.rebuild_current_screen()
+
+
+def _create_setup_drawer_restore_point(shell) -> None:
+    rp = shell.manual_save_restore_point()
+    if rp is not None:
+        shell.setup_drawer_restore_point_created = True
+        shell.setup_drawer_restore_point_identity = _drawer_current_identity(shell)
+    shell.rebuild_current_screen()
 
 
 def _draw_skeleton(width: int = 200, height: int = 18) -> None:

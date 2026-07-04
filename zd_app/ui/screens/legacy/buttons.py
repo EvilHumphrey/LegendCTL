@@ -4,7 +4,19 @@ from __future__ import annotations
 
 import dearpygui.dearpygui as dpg
 
+from zd_app.i18n import t
 from zd_app.ui.components import Column, table
+
+
+_AMBIGUOUS_BUTTON_LABEL_KEYS = {
+    "Back": "controller.back_paddles.target.BACK",
+    "Home": "diagnostics.live_verify.face_diagram.home",
+}
+
+
+def _button_label(value: str) -> str:
+    key = _AMBIGUOUS_BUTTON_LABEL_KEYS.get(value)
+    return t(key) if key else value
 
 
 def build(shell, parent: str) -> None:
@@ -35,11 +47,11 @@ def build(shell, parent: str) -> None:
                         dirty = shell.profile_service.is_button_dirty(mapping.physical_input_id)
                         with dpg.table_row():
                             dpg.add_selectable(
-                                label=mapping.physical_label,
+                                label=_button_label(mapping.physical_label),
                                 default_value=mapping.physical_input_id == selected_id,
                                 callback=lambda *args, input_id=mapping.physical_input_id: shell.select_button_mapping(input_id),
                             )
-                            dpg.add_text(mapping.action, tag=f"buttons_action_{mapping.physical_input_id}")
+                            dpg.add_text(_button_label(mapping.action), tag=f"buttons_action_{mapping.physical_input_id}")
                             dpg.add_text(
                                 "Dirty" if dirty else "Clean",
                                 tag=f"buttons_dirty_{mapping.physical_input_id}",
@@ -51,13 +63,13 @@ def build(shell, parent: str) -> None:
                 dpg.add_text("Selected Control", color=shell.COLORS["muted"])
                 with dpg.group(horizontal=True):
                     dpg.add_text("Physical:")
-                    dpg.add_text(selected_mapping.physical_label)
+                    dpg.add_text(_button_label(selected_mapping.physical_label))
                 with dpg.group(horizontal=True):
                     dpg.add_text("Current:")
-                    dpg.add_text(selected_mapping.action, tag="buttons_editor_current")
+                    dpg.add_text(_button_label(selected_mapping.action), tag="buttons_editor_current")
                 with dpg.group(horizontal=True):
                     dpg.add_text("Default:")
-                    dpg.add_text(selected_mapping.default_action)
+                    dpg.add_text(_button_label(selected_mapping.default_action))
                 with dpg.group(horizontal=True):
                     dpg.add_text("Status:")
                     dpg.add_text("Dirty" if selected_dirty else "Clean", color=shell.COLORS["warn"] if selected_dirty else shell.COLORS["muted"])

@@ -14,6 +14,7 @@ from typing import Any
 from zd_app.services.xinput import describe_battery_level, get_connected_controllers
 from zd_app.i18n import t
 from zd_app.models import DeviceClass, DeviceState, utc_now_iso
+from zd_app.services.model_fingerprint import collect_model_fingerprint
 from zd_app.services.official_app_summary_service import OfficialAppSummary, OfficialAppSummaryService
 
 
@@ -270,6 +271,23 @@ def _enumerate_present_device_entries() -> list[dict[str, str]]:
     return combined
 
 
+def _entries_have_setupdi_shape(entries: list[dict[str, str]]) -> bool:
+    return any(
+        entry.get("instance_id")
+        and "description" in entry
+        and "status" in entry
+        for entry in entries
+    )
+
+
+def _entry_instance_ids(entries: list[dict[str, str]]) -> list[str]:
+    return [
+        entry["instance_id"]
+        for entry in entries
+        if isinstance(entry.get("instance_id"), str)
+    ]
+
+
 class DeviceService:
     UNKNOWN_SUMMARY_SOURCE_KEY = "device.summary.source.unknown_fallback"
     SUMMARY_SOURCE_KEY_FOR = {
@@ -335,6 +353,10 @@ class DeviceService:
         self._presence_cache_lock = threading.Lock()
         self._presence_primer_thread: threading.Thread | None = None
         self._presence_primer_stop = threading.Event()
+        self._model_fingerprint_lock = threading.Lock()
+        self._model_fingerprint_thread: threading.Thread | None = None
+        self._model_fingerprint_request_key: tuple[str, tuple[str, ...]] | None = None
+        self._last_logged_model_fingerprint: tuple[str, str] | None = None
         self.official_app_summary_service = OfficialAppSummaryService()
 
     def refresh_state(
@@ -425,6 +447,10 @@ class DeviceService:
         self.state.xinput_slot = slot
         if connection_state == "no_device" and was_connected:
             self.state.data_freshness = "stale"
+        if connection_state == "connected" and device_class == "zd_ultimate_legend":
+            self._schedule_model_fingerprint_collection(stable_identifier, pnp_entries)
+        else:
+            self._clear_model_fingerprint()
         self.last_read_duration_ms = round((time.perf_counter() - started) * 1000.0, 2)
         return self.state
 
@@ -505,6 +531,98 @@ class DeviceService:
             crash_reporter.record_log_entry(key, fmt_args=fmt_args or None)
         except Exception:  # noqa: BLE001 - never let logging side effects crash device flow
             logger.debug("crash_reporter.record_log_entry failed", exc_info=True)
+
+    def _clear_model_fingerprint(self) -> None:
+        with self._model_fingerprint_lock:
+            self._model_fingerprint_request_key = None
+            self._last_logged_model_fingerprint = None
+            if hasattr(self.state, "model_fingerprint"):
+                self.state.model_fingerprint = None
+
+    def _schedule_model_fingerprint_collection(
+        self,
+        stable_identifier: str,
+        pnp_entries: list[dict[str, str]],
+    ) -> None:
+        if not _entries_have_setupdi_shape(pnp_entries):
+            return
+        request_key = (
+            stable_identifier,
+            tuple(sorted(_entry_instance_ids(pnp_entries))),
+        )
+        with self._model_fingerprint_lock:
+            thread = self._model_fingerprint_thread
+            current = getattr(self.state, "model_fingerprint", None)
+            # Only short-circuit when we already hold a COMPLETE fingerprint
+            # (vid populated). An inventory-only result (first-connect HID-
+            # interface lag, or F2's ambiguous-path abstain) is non-None but
+            # incomplete; it must re-collect on the next ~2.5s refresh rather
+            # than cache "not collected" for the whole session.
+            if (
+                self._model_fingerprint_request_key == request_key
+                and (
+                    getattr(current, "vid", None) is not None
+                    or (thread is not None and thread.is_alive())
+                )
+            ):
+                return
+            self._model_fingerprint_request_key = request_key
+            self.state.model_fingerprint = None
+            entries = [entry.copy() for entry in pnp_entries]
+            thread = threading.Thread(
+                target=self._collect_model_fingerprint_worker,
+                args=(stable_identifier, request_key, entries),
+                name="zd-model-fingerprint",
+                daemon=True,
+            )
+            self._model_fingerprint_thread = thread
+        thread.start()
+
+    def _collect_model_fingerprint_worker(
+        self,
+        stable_identifier: str,
+        request_key: tuple[str, tuple[str, ...]],
+        pnp_entries: list[dict[str, str]],
+    ) -> None:
+        try:
+            fingerprint = collect_model_fingerprint(pnp_entries=pnp_entries)
+        except Exception:  # noqa: BLE001 - never let fingerprinting affect connection state
+            logger.debug("Model fingerprint worker failed", exc_info=True)
+            return
+        with self._model_fingerprint_lock:
+            if (
+                self.state.stable_identifier != stable_identifier
+                or self.state.device_class != "zd_ultimate_legend"
+                or self._model_fingerprint_request_key != request_key
+            ):
+                return
+            self.state.model_fingerprint = fingerprint
+        self._log_model_fingerprint(stable_identifier, fingerprint)
+
+    def _log_model_fingerprint(self, stable_identifier: str, fingerprint: object) -> None:
+        digest = getattr(fingerprint, "short_digest", None)
+        if not digest:
+            return
+        product_string = scrub_paths(
+            getattr(fingerprint, "product_string", None)
+            or t("model_fingerprint.value.not_collected")
+        )
+        log_key = (stable_identifier, str(digest))
+        with self._model_fingerprint_lock:
+            if self._last_logged_model_fingerprint == log_key:
+                return
+            self._last_logged_model_fingerprint = log_key
+        entry = LogEntry(
+            timestamp="",
+            key="log.model_fingerprint.collected",
+            fmt_args={"digest": digest, "product_string": product_string},
+        )
+        logger.info(render_log_message(entry))
+        self.log_i18n_event(
+            "log.model_fingerprint.collected",
+            digest=digest,
+            product_string=product_string,
+        )
 
     def recent_events(self, limit: int = 8) -> list[str]:
         return [scrub_paths(render_log_entry(entry)) for entry in list(self.event_log)[:limit]]

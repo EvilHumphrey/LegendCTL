@@ -16,6 +16,8 @@ from zd_app.version import __app_id__
 
 logger = logging.getLogger(__name__)
 
+SETUP_DRAWER_DISMISSED_KEY = "setup_drawer_dismissed"
+
 
 def _default_user_data_dir() -> Path:
     """Return the default writable data directory for this run mode."""
@@ -55,7 +57,12 @@ def initialize_user_data_dir() -> Path:
 def _settings_with_default_paths() -> AppSettings:
     settings = AppSettings()
     settings.diagnostics_bundle_dir = str(_default_user_data_dir() / "diagnostics")
+    setattr(settings, SETUP_DRAWER_DISMISSED_KEY, False)
     return settings
+
+
+def _coerce_setup_drawer_dismissed(value) -> bool:
+    return bool(value)
 
 
 class SettingsStore:
@@ -89,6 +96,13 @@ class SettingsStore:
         # defaults contract rather than aborting every relaunch.
         try:
             settings = AppSettings.from_dict(payload)
+            setattr(
+                settings,
+                SETUP_DRAWER_DISMISSED_KEY,
+                _coerce_setup_drawer_dismissed(
+                    payload.get(SETUP_DRAWER_DISMISSED_KEY, False)
+                ),
+            )
             diagnostics_dir = payload.get("diagnostics_bundle_dir")
             if diagnostics_dir is None or Path(diagnostics_dir) == Path("zd_data") / "diagnostics":
                 settings.diagnostics_bundle_dir = str(_default_user_data_dir() / "diagnostics")
@@ -106,7 +120,15 @@ class SettingsStore:
         # invariant, mirroring RestorePointStore/LastAppliedStore/
         # WrapperProfileStore): a crash mid-write leaves either the previous
         # settings.json or a ``.tmp`` straggler, never a half-written final.
-        payload = json.dumps(settings.to_dict(), indent=2)
+        data = settings.to_dict()
+        data[SETUP_DRAWER_DISMISSED_KEY] = _coerce_setup_drawer_dismissed(
+            getattr(
+                settings,
+                SETUP_DRAWER_DISMISSED_KEY,
+                self.get_setup_drawer_dismissed(),
+            )
+        )
+        payload = json.dumps(data, indent=2)
         temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
         with open(temp_path, "w", encoding="utf-8") as handle:
             handle.write(payload)
@@ -118,3 +140,25 @@ class SettingsStore:
                 # (e.g. Windows network shares). The replace below still runs.
                 logger.debug("fsync unavailable for %s", temp_path, exc_info=True)
         temp_path.replace(self.path)
+
+    def get_setup_drawer_dismissed(self) -> bool:
+        if not self.path.exists():
+            return False
+        try:
+            payload = read_guarded_json(self.path)
+        except (OSError, ValueError, RecursionError, json.JSONDecodeError):
+            return False
+        if not isinstance(payload, dict):
+            return False
+        return _coerce_setup_drawer_dismissed(
+            payload.get(SETUP_DRAWER_DISMISSED_KEY, False)
+        )
+
+    def set_setup_drawer_dismissed(self, dismissed: bool) -> None:
+        settings = self.load()
+        setattr(
+            settings,
+            SETUP_DRAWER_DISMISSED_KEY,
+            _coerce_setup_drawer_dismissed(dismissed),
+        )
+        self.save(settings)

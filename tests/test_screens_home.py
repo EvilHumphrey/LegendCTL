@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 import subprocess
@@ -16,6 +17,11 @@ from zd_app.models import DeviceState
 from zd_app.ui import trust_front_door
 from zd_app.ui.fonts import bind_default_font, register_fonts
 from zd_app.ui.screens import home
+
+
+# A concrete ZD Ultimate Legend instance path used as the connected unit for
+# the setup-drawer identity-scope tests (unit-swap honesty, fix B 2026-07-03).
+_UNIT_A = r"USB\VID_413D&PID_2104&MI_02\UNIT_A"
 
 
 def _all_text_values() -> list[str]:
@@ -467,6 +473,443 @@ class HomeLowerDashboardTests(unittest.TestCase):
             f"Return code: {result.returncode}\n"
             f"Command: {sys.executable} -m unittest {test_id}\n\n"
             f"Child output:\n{output}"
+        )
+
+
+class HomeSetupDrawerTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        set_locale("en")
+
+    def _shell(
+        self,
+        *,
+        connection_state: str = "connected",
+        device_class: str = "zd_ultimate_legend",
+        dismissed: bool = False,
+    ):
+        shell = make_shell(settings_service=MagicMock())
+        shell.device_service.state.connection_state = connection_state
+        shell.device_service.state.device_class = device_class
+        shell.device_service.state.product_name = "ZD Ultimate Legend"
+        shell.device_service.state.stable_identifier = _UNIT_A
+        shell.device_service.recent_events.return_value = []
+        shell.settings.setup_drawer_dismissed = dismissed
+        # The setup drawer scopes its completed-step flags to the connected unit
+        # (unit-swap honesty). Pre-stamp both flag identities to the current unit
+        # so a test that sets last_snapshot_ts / setup_drawer_restore_point_created
+        # exercises the normal same-unit case; the swap case is its own test.
+        shell.last_snapshot_identity = _UNIT_A
+        shell.setup_drawer_restore_point_identity = _UNIT_A
+        return shell
+
+    def _build(self, shell) -> None:
+        with dpg.window():
+            with dpg.child_window(tag="content_region"):
+                pass
+        home.build(shell, "content_region")
+
+    def test_setup_drawer_visibility_requires_connected_recognized_and_not_dismissed(self) -> None:
+        cases = (
+            ("connected recognized", "connected", "zd_ultimate_legend", False, True),
+            ("disconnected", "no_device", "zd_ultimate_legend", False, False),
+            ("generic xinput", "connected", "generic_xinput", False, False),
+            ("dismissed", "connected", "zd_ultimate_legend", True, False),
+        )
+        for name, connection_state, device_class, dismissed, expected in cases:
+            with self.subTest(name=name):
+                shell = self._shell(
+                    connection_state=connection_state,
+                    device_class=device_class,
+                    dismissed=dismissed,
+                )
+                dpg.create_context()
+                try:
+                    self._build(shell)
+                    self.assertEqual(
+                        dpg.does_item_exist("home_setup_drawer_card"),
+                        expected,
+                    )
+                finally:
+                    dpg.destroy_context()
+
+    def test_setup_drawer_read_step_branches_and_read_now_uses_existing_read_action(self) -> None:
+        shell = self._shell()
+        shell.refresh_from_controller = MagicMock()
+
+        dpg.create_context()
+        try:
+            self._build(shell)
+            self.assertTrue(dpg.does_item_exist("home_setup_drawer_read_now"))
+            self.assertEqual(dpg.get_value("home_setup_drawer_read_marker"), "-")
+            self.assertIn(
+                t("home.setup_drawer.settings_read_helper"),
+                _all_text_values(),
+            )
+            callback = dpg.get_item_callback("home_setup_drawer_read_now")
+            callback()
+        finally:
+            dpg.destroy_context()
+
+        shell.refresh_from_controller.assert_called_once_with()
+
+        shell = self._shell()
+        shell.last_controller_snapshot = empty_snapshot()
+        shell.last_snapshot_ts = 1.0
+        dpg.create_context()
+        try:
+            self._build(shell)
+            self.assertFalse(dpg.does_item_exist("home_setup_drawer_read_now"))
+            self.assertEqual(dpg.get_value("home_setup_drawer_read_marker"), "✓")
+            self.assertIn(
+                t("home.setup_drawer.settings_read_label"),
+                _all_text_values(),
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_setup_drawer_restore_step_tracks_session_success_and_wires_explore_links(self) -> None:
+        shell = self._shell()
+        shell.manual_save_restore_point = MagicMock(return_value=SimpleNamespace(id="rp1"))
+        shell.rebuild_current_screen = MagicMock()
+        shell.switch_screen = MagicMock()
+
+        dpg.create_context()
+        try:
+            self._build(shell)
+            self.assertTrue(dpg.does_item_exist("home_setup_drawer_create_restore_point"))
+            callback = dpg.get_item_callback("home_setup_drawer_create_restore_point")
+            callback()
+            dpg.get_item_callback("home_setup_drawer_health_check")()
+            dpg.get_item_callback("home_setup_drawer_live_verify")()
+        finally:
+            dpg.destroy_context()
+
+        shell.manual_save_restore_point.assert_called_once_with()
+        self.assertTrue(shell.setup_drawer_restore_point_created)
+        shell.rebuild_current_screen.assert_called_once_with()
+        self.assertEqual(
+            [call.args[0] for call in shell.switch_screen.call_args_list],
+            ["health_report", "live_verify"],
+        )
+
+        shell = self._shell()
+        shell.setup_drawer_restore_point_created = True
+        dpg.create_context()
+        try:
+            self._build(shell)
+            self.assertFalse(
+                dpg.does_item_exist("home_setup_drawer_create_restore_point")
+            )
+            self.assertEqual(dpg.get_value("home_setup_drawer_backup_marker"), "✓")
+            self.assertIn(
+                t("home.setup_drawer.restore_point_created"),
+                _all_text_values(),
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_setup_drawer_completion_does_not_carry_across_a_unit_swap(self) -> None:
+        # Fix B: swapping two physical ZD units mid-session must not let the new
+        # unit inherit the previous one's completed drawer steps. The predicates
+        # are pure functions of the shell, so exercise them directly (no DPG).
+        shell = self._shell()
+        unit_a = shell.device_service.state.stable_identifier
+        shell.last_controller_snapshot = empty_snapshot()
+        shell.last_snapshot_ts = 1.0
+        shell.setup_drawer_restore_point_created = True
+        self.assertTrue(home._settings_read_this_session(shell))
+        self.assertTrue(home._setup_drawer_restore_point_done(shell))
+        self.assertTrue(home._setup_drawer_complete(shell))
+
+        # Swap to unit B: unit A's snapshot + flags still hold their unit-A stamps.
+        unit_b = r"USB\VID_413D&PID_2104&MI_02\UNIT_B"
+        self.assertNotEqual(unit_a, unit_b)
+        shell.device_service.state.stable_identifier = unit_b
+        self.assertFalse(home._settings_read_this_session(shell))
+        self.assertFalse(home._setup_drawer_restore_point_done(shell))
+        self.assertFalse(home._setup_drawer_complete(shell))
+
+        # Unit B earns the steps: a fresh read + restore point stamp B's identity.
+        shell.last_snapshot_identity = unit_b
+        shell.setup_drawer_restore_point_identity = unit_b
+        self.assertTrue(home._settings_read_this_session(shell))
+        self.assertTrue(home._setup_drawer_restore_point_done(shell))
+        self.assertTrue(home._setup_drawer_complete(shell))
+
+    def _is_shown(self, tag: str) -> bool:
+        return bool(dpg.get_item_configuration(tag)["show"])
+
+    def test_setup_drawer_read_step_flips_live_when_read_completes_after_build(self) -> None:
+        # Reproduce the REAL order: Home builds FIRST with no snapshot (drawer
+        # shows the pending dash + Read-now button), THEN the delayed startup
+        # auto-read lands and the refresh hook must flip step 2 to ✓ live.
+        shell = self._shell()
+
+        dpg.create_context()
+        try:
+            self._build(shell)
+            self.assertEqual(dpg.get_value("home_setup_drawer_read_marker"), "-")
+            self.assertTrue(self._is_shown("home_setup_drawer_read_now"))
+            self.assertTrue(self._is_shown("home_setup_drawer_read_helper"))
+
+            shell.last_controller_snapshot = empty_snapshot()
+            shell.last_snapshot_ts = 1.0
+            home.refresh_setup_drawer(shell)
+
+            self.assertEqual(dpg.get_value("home_setup_drawer_read_marker"), "✓")
+            self.assertFalse(self._is_shown("home_setup_drawer_read_now"))
+            self.assertFalse(self._is_shown("home_setup_drawer_read_helper"))
+            self.assertEqual(
+                dpg.get_value("home_setup_drawer_read_label"),
+                t("home.setup_drawer.settings_read_label"),
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_setup_drawer_read_step_flips_live_through_refresh_shell(self) -> None:
+        # Same ordering, but driven through the real AppShell.refresh_shell hook
+        # (the completion path _refresh_read_on_done calls) rather than the
+        # helper directly — proves the wiring, not just the function.
+        shell = self._shell()
+
+        dpg.create_context()
+        try:
+            self._build(shell)
+            self.assertEqual(dpg.get_value("home_setup_drawer_read_marker"), "-")
+
+            shell.last_controller_snapshot = empty_snapshot()
+            shell.last_snapshot_ts = 1.0
+            shell.refresh_shell()
+
+            self.assertEqual(dpg.get_value("home_setup_drawer_read_marker"), "✓")
+            self.assertFalse(self._is_shown("home_setup_drawer_read_now"))
+        finally:
+            dpg.destroy_context()
+
+    def test_setup_drawer_backup_step_flips_live_when_restore_point_created_after_build(self) -> None:
+        # Build FIRST with no restore point (pending dash + Create button), THEN
+        # a drawer-created restore point sets the flag and the refresh hook must
+        # flip step 3 live (the case the operator smoke never exercised because
+        # first-connect auto-capture happened to run before Home built).
+        shell = self._shell()
+
+        dpg.create_context()
+        try:
+            self._build(shell)
+            self.assertEqual(dpg.get_value("home_setup_drawer_backup_marker"), "-")
+            self.assertTrue(self._is_shown("home_setup_drawer_create_restore_point"))
+
+            shell.setup_drawer_restore_point_created = True
+            home.refresh_setup_drawer(shell)
+
+            self.assertEqual(dpg.get_value("home_setup_drawer_backup_marker"), "✓")
+            self.assertFalse(self._is_shown("home_setup_drawer_create_restore_point"))
+            self.assertEqual(
+                dpg.get_value("home_setup_drawer_backup_label"),
+                t("home.setup_drawer.restore_point_created"),
+            )
+        finally:
+            dpg.destroy_context()
+
+    def test_refresh_setup_drawer_is_noop_when_drawer_absent(self) -> None:
+        # Dismissed / different screen: the drawer card never built. The hook
+        # must be a silent no-op — not raise — even with read + restore-point
+        # state set, and it must not conjure the drawer card.
+        shell = self._shell(dismissed=True)
+        shell.last_controller_snapshot = empty_snapshot()
+        shell.last_snapshot_ts = 1.0
+        shell.setup_drawer_restore_point_created = True
+
+        dpg.create_context()
+        try:
+            self._build(shell)
+            self.assertFalse(dpg.does_item_exist("home_setup_drawer_card"))
+            home.refresh_setup_drawer(shell)  # must not raise
+            self.assertFalse(dpg.does_item_exist("home_setup_drawer_card"))
+        finally:
+            dpg.destroy_context()
+
+    def _all_done_shell(self):
+        shell = self._shell()
+        shell.last_controller_snapshot = empty_snapshot()
+        shell.last_snapshot_ts = 1.0
+        shell.setup_drawer_restore_point_created = True
+        return shell
+
+    def test_setup_drawer_builds_compact_variant_when_all_steps_done(self) -> None:
+        # The common fresh-build path: connect auto-read + first-connect
+        # auto-backup both landed before Home built -> the drawer renders its
+        # compact single-row variant directly, with the full step list hidden.
+        shell = self._all_done_shell()
+
+        dpg.create_context()
+        try:
+            self._build(shell)
+            self.assertTrue(dpg.does_item_exist("home_setup_drawer_card"))
+            self.assertFalse(self._is_shown("home_setup_drawer_full"))
+            self.assertTrue(self._is_shown("home_setup_drawer_compact"))
+            self.assertEqual(
+                dpg.get_value("home_setup_drawer_compact_marker"), "✓"
+            )
+            self.assertEqual(
+                dpg.get_value("home_setup_drawer_compact_label"),
+                t("home.setup_drawer.complete"),
+            )
+            self.assertTrue(dpg.does_item_exist("home_setup_drawer_compact_dismiss"))
+        finally:
+            dpg.destroy_context()
+
+    def test_setup_drawer_collapses_live_when_last_step_completes(self) -> None:
+        # Build pending, complete the steps one at a time through the refresh
+        # hook. After the FIRST completion the drawer must stay full (partial
+        # progress is not "complete"); after the LAST it must swap to the
+        # compact row in place — both orderings (read-last and backup-last).
+        orderings = (
+            ("backup last", ("read", "backup")),
+            ("read last", ("backup", "read")),
+        )
+        for name, order in orderings:
+            with self.subTest(name=name):
+                shell = self._shell()
+                dpg.create_context()
+                try:
+                    self._build(shell)
+                    self.assertTrue(self._is_shown("home_setup_drawer_full"))
+                    self.assertFalse(self._is_shown("home_setup_drawer_compact"))
+
+                    first, last = order
+                    if first == "read":
+                        shell.last_controller_snapshot = empty_snapshot()
+                        shell.last_snapshot_ts = 1.0
+                    else:
+                        shell.setup_drawer_restore_point_created = True
+                    home.refresh_setup_drawer(shell)
+                    self.assertTrue(self._is_shown("home_setup_drawer_full"))
+                    self.assertFalse(self._is_shown("home_setup_drawer_compact"))
+
+                    if last == "read":
+                        shell.last_controller_snapshot = empty_snapshot()
+                        shell.last_snapshot_ts = 1.0
+                    else:
+                        shell.setup_drawer_restore_point_created = True
+                    home.refresh_setup_drawer(shell)
+                    self.assertFalse(self._is_shown("home_setup_drawer_full"))
+                    self.assertTrue(self._is_shown("home_setup_drawer_compact"))
+                    self.assertEqual(
+                        dpg.get_value("home_setup_drawer_compact_label"),
+                        t("home.setup_drawer.complete"),
+                    )
+                finally:
+                    dpg.destroy_context()
+
+    def test_setup_drawer_collapses_live_through_refresh_shell(self) -> None:
+        # The real wiring: the last pending step (the startup auto-read)
+        # completes and AppShell.refresh_shell — already called from the
+        # read-done path — performs the collapse.
+        shell = self._shell()
+        shell.setup_drawer_restore_point_created = True
+
+        dpg.create_context()
+        try:
+            self._build(shell)
+            self.assertTrue(self._is_shown("home_setup_drawer_full"))
+
+            shell.last_controller_snapshot = empty_snapshot()
+            shell.last_snapshot_ts = 1.0
+            shell.refresh_shell()
+
+            self.assertFalse(self._is_shown("home_setup_drawer_full"))
+            self.assertTrue(self._is_shown("home_setup_drawer_compact"))
+        finally:
+            dpg.destroy_context()
+
+    def test_setup_drawer_compact_dismiss_persists_through_settings_store(self) -> None:
+        # The compact row's dismiss must ride the exact same persistence path
+        # as the full variant's button.
+        shell = self._all_done_shell()
+        shell.rebuild_current_screen = MagicMock()
+
+        dpg.create_context()
+        try:
+            self._build(shell)
+            callback = dpg.get_item_callback("home_setup_drawer_compact_dismiss")
+            callback()
+        finally:
+            dpg.destroy_context()
+
+        self.assertTrue(shell.settings.setup_drawer_dismissed)
+        shell.settings_store.set_setup_drawer_dismissed.assert_called_once_with(True)
+        shell.rebuild_current_screen.assert_called_once_with()
+
+    def test_setup_drawer_session_flag_flips_on_existing_restore_create_action(self) -> None:
+        shell = self._shell()
+
+        self.assertFalse(shell.setup_drawer_restore_point_created)
+        rp = shell.manual_save_restore_point()
+
+        self.assertIsNotNone(rp)
+        self.assertTrue(shell.setup_drawer_restore_point_created)
+
+    def test_setup_drawer_dismiss_persists_through_settings_store_accessor(self) -> None:
+        shell = self._shell()
+        shell.rebuild_current_screen = MagicMock()
+
+        dpg.create_context()
+        try:
+            self._build(shell)
+            callback = dpg.get_item_callback("home_setup_drawer_dismiss")
+            callback()
+        finally:
+            dpg.destroy_context()
+
+        self.assertTrue(shell.settings.setup_drawer_dismissed)
+        shell.settings_store.set_setup_drawer_dismissed.assert_called_once_with(True)
+        shell.rebuild_current_screen.assert_called_once_with()
+
+
+class HomeSetupDrawerLocaleTests(unittest.TestCase):
+    def _load_locale(self, name: str) -> dict[str, str]:
+        return json.loads(
+            Path("zd_app/i18n/locales", f"{name}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+    def test_setup_drawer_locale_keys_have_parity_and_exact_en_copy(self) -> None:
+        en = self._load_locale("en")
+        zh = self._load_locale("zh-CN")
+        expected_en = {
+            "home.setup_drawer.title": "First steps with this controller",
+            "home.setup_drawer.detected_label": "Detected",
+            "home.setup_drawer.settings_read_label": "Settings read from controller",
+            "home.setup_drawer.settings_read_helper": "Read the current on-device settings first — nothing is changed by reading.",
+            "home.setup_drawer.read_now": "Read now",
+            "home.setup_drawer.back_up_label": "Back up before changing anything",
+            "home.setup_drawer.back_up_helper": "A restore point saves the controller's current settings so any later change can be undone.",
+            "home.setup_drawer.create_restore_point": "Create restore point",
+            "home.setup_drawer.restore_point_created": "Restore point created",
+            "home.setup_drawer.complete": "First steps complete",
+            "home.setup_drawer.explore_label": "Explore",
+            "home.setup_drawer.health_check": "Health Check",
+            "home.setup_drawer.live_verify": "Live Verify",
+            "home.setup_drawer.dismiss": "Don't show these steps again",
+        }
+        self.assertEqual({key: en[key] for key in expected_en}, expected_en)
+        en_keys = {key for key in en if key.startswith("home.setup_drawer.")}
+        zh_keys = {key for key in zh if key.startswith("home.setup_drawer.")}
+        self.assertEqual(en_keys, zh_keys)
+        for key in expected_en:
+            self.assertTrue(zh[key].strip(), f"empty zh-CN value for {key}")
+
+    def test_setup_drawer_complete_zh_copy_is_exact(self) -> None:
+        # Researcher-authored zh-CN copy for the compact "First steps complete"
+        # row, byte-verified via escapes (never re-typed as literal CJK).
+        # First word revised \u65b0\u624b -> \u5165\u95e8 in the 2026-07-03
+        # naturalness pass; this assertion tracks the locale file exactly.
+        zh = self._load_locale("zh-CN")
+        self.assertEqual(
+            zh["home.setup_drawer.complete"],
+            "\u5165\u95e8\u6b65\u9aa4\u5df2\u5b8c\u6210",
         )
 
 
