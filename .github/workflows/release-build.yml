@@ -276,7 +276,7 @@ jobs:
           Get-Content dist\SHA256SUMS.txt
 
       - name: Upload dist as a workflow artifact (all runs, incl. rehearsals)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: legendctl-dist-${{ github.run_number }}
           path: |
