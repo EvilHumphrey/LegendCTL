@@ -94,10 +94,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           # Exact pin (see the CPython supply-chain note in the header). Keep
           # in sync with the floor asserted below.
@@ -276,7 +276,7 @@ jobs:
           Get-Content dist\SHA256SUMS.txt
 
       - name: Upload dist as a workflow artifact (all runs, incl. rehearsals)
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: legendctl-dist-${{ github.run_number }}
           path: |
@@ -300,10 +300,10 @@ jobs:
     steps:
       - name: Checkout
         # Needed for RELEASE_NOTES_<tag>.md and gh --verify-tag.
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Download the built dist from the build job
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: legendctl-dist-${{ github.run_number }}
           path: dist
@@ -335,7 +335,7 @@ jobs:
 
       - name: Attest build provenance for the release binaries
         id: attest_release
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
         with:
           # subject-path (not subject-checksums): the checksums parser
           # mis-handled our LF-only shasum binary-format file in the first
