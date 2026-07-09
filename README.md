@@ -307,8 +307,11 @@ logs attached or they will be closed.
 
 ## Build from source
 
-Requires **64-bit Python 3.12** (the version this build is developed and tested
-against). The pinned `dearpygui==2.3.1` ships prebuilt wheels only for specific
+Requires **64-bit Python 3.12** (the version the project is developed and
+tested against day-to-day; official release binaries since v2.5.0 are built by
+CI on Python 3.13, with the full suite run on both — see
+[docs/code-signing-policy.md](docs/code-signing-policy.md)). The pinned
+`dearpygui==2.3.1` ships prebuilt wheels only for specific
 Python versions and architectures, so other interpreters may need to compile it
 from source.
 

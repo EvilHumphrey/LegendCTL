@@ -97,7 +97,9 @@ injected fakes for tests). Version constants: `zd_app/version.py`.
 ~2,879 unittest tests (v2.5.0). Services are tested headlessly; screens are tested
 against a patched DearPyGui that records widget calls (no real rendering — which is why
 real-DPG behaviors like the modal law are additionally pinned by the manual bench tool
-in `tools/`). Suite conventions: system Python 3.12 with `dearpygui` installed; exit
+in `tools/`). Suite conventions: system Python 3.12 with `dearpygui` installed (the
+release CI additionally runs the full suite on Python 3.13 — the runtime the release
+binaries ship with — before building); exit
 code 139 on teardown is a known DPG segfault artifact, not a failure. Drift/parity/
 forbidden-phrase gates run as ordinary tests so they fail the build on violation.
 
@@ -105,8 +107,10 @@ forbidden-phrase gates run as ordinary tests so they fail the build on violation
 
 `tools\build_release.ps1` → PyInstaller portable folder + ZIP + (when Inno Setup 6 is
 present) an installer EXE, plus `SHA256SUMS.txt`; `tools\install_local.ps1` mirrors the
-freshest build to `local-install\` and refreshes Desktop/Start-Menu shortcuts. No code
-signing; distribution is manual with published hashes. No auto-update, no telemetry —
+freshest build to `local-install\` and refreshes Desktop/Start-Menu shortcuts. Official
+release assets (v2.5.0+) are CI-built on Python 3.13 from the release tag and carry
+build-provenance attestations (`gh attestation verify`); there is no AuthentiCode code
+signing yet, and every release publishes hashes. No auto-update, no telemetry —
 matching the constraint architecture.
 
 ## External tooling

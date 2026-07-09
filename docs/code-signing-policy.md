@@ -7,6 +7,12 @@ open-source software.
 
 ## Summary
 
+- Since **v2.5.0**, official release assets are **built by GitHub Actions CI**
+  from the release tag and ship with **build-provenance attestations** you can
+  verify today with `gh attestation verify` (see
+  [install-windows-and-smartscreen.md](install-windows-and-smartscreen.md)).
+  Attestation proves which commit and workflow built the exact bytes; it is
+  **not** AuthentiCode code-signing.
 - Release executables and installers are (will be) **code-signed via the
   SignPath Foundation**, using a certificate issued to this project.
 - We sign **only our own binaries, built from this repository's source.** No
@@ -17,13 +23,19 @@ open-source software.
 
 1. **Source of truth.** All code lives in this public repository. Releases are
    cut from a specific tagged commit on the default branch.
-2. **Build from source.** The release is produced by the project's own build
-   script:
-   ```powershell
-   .\tools\build_release.ps1
-   ```
-   This packages the app with PyInstaller into `dist/…/ZD Ultimate Legend.exe`
-   plus a distributable ZIP (and an installer `.exe` when Inno Setup is present).
+2. **Build from source.** There are two build lanes:
+   - **Official release assets (v2.5.0 and later)** are built by GitHub Actions
+     CI (`.github/workflows/release-build.yml`) when the release tag is pushed:
+     the workflow runs the full unit suite and a dependency CVE audit first,
+     then packages the app with PyInstaller (plus the Inno Setup installer) and
+     generates a **build-provenance attestation** for each distributed binary.
+   - **Source builds** (and releases before v2.5.0) use the project's own local
+     build script:
+     ```powershell
+     .\tools\build_release.ps1
+     ```
+     This packages the app with PyInstaller into `dist/…/ZD Ultimate Legend.exe`
+     plus a distributable ZIP (and an installer `.exe` when Inno Setup is present).
 3. **Verify the build.** The release smoke test (`.\tools\smoke_release.ps1`)
    and the unit suite are run before a build is considered releasable.
 4. **Publish hashes.** Each release publishes `SHA256SUMS.txt` for every
@@ -83,6 +95,16 @@ Once signing is live, you can confirm a downloaded build is the signed release:
    Get-FileHash ".\ZDUltimateLegend-v<version>-windows.zip" -Algorithm SHA256
    ```
 
-Until signing is in place, releases are **unsigned**; see the README's
-"Distribution safety" section for what to expect from SmartScreen and antivirus
-in the meantime.
+Until signing is in place, releases are **unsigned** — but from v2.5.0 they are
+not unverifiable: each release's binaries carry CI build-provenance
+attestations you can check with the GitHub CLI:
+
+```powershell
+gh attestation verify .\ZDUltimateLegend-v<version>-Setup.exe --repo EvilHumphrey/LegendCTL
+gh attestation verify .\ZDUltimateLegend-v<version>-windows.zip --repo EvilHumphrey/LegendCTL
+```
+
+See [install-windows-and-smartscreen.md](install-windows-and-smartscreen.md)
+for the full verification guide (including offline verification), and the
+README's "Distribution safety" section for what to expect from SmartScreen and
+antivirus in the meantime.
