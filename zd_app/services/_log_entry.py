@@ -1,9 +1,10 @@
 """Shared structured log-entry type + render helpers.
 
 Used by both ``DeviceService`` (Recent Activity log) and ``DiagnosticsService``
-(diagnostics event log). Both stores carry mixed ``str | LogEntry`` for
-backward compatibility with legacy raw-string entries; ``render_log_entry``
-and ``render_log_message`` accept either form.
+(diagnostics event log). Both stores carry mixed ``str | LogEntry`` values for
+backward compatibility with legacy raw-string entries. ``ComposedLogEntry``
+keeps a base entry plus localized note keys lazy as well; ``render_log_entry``
+and ``render_log_message`` accept every form.
 
 The ``_key``-suffix convention:
 
@@ -36,17 +37,41 @@ class LogEntry:
     fmt_args: dict[str, Any] = field(default_factory=dict)
 
 
-def render_log_entry(entry: str | LogEntry) -> str:
+@dataclass(frozen=True)
+class ComposedLogEntry:
+    """One lazy base message plus zero or more localized note keys.
+
+    ``timestamp`` is carried independently so a legacy raw-string base can
+    still become one timestamped Recent Activity event. A structured base
+    normally already owns the same timestamp.
+    """
+
+    base: str | LogEntry
+    note_keys: tuple[str, ...] = ()
+    timestamp: str = ""
+
+
+def render_log_entry(entry: str | LogEntry | ComposedLogEntry) -> str:
     """Render ``entry`` as ``timestamp + space + localized message``."""
     if isinstance(entry, str):
         return entry
+    if isinstance(entry, ComposedLogEntry):
+        timestamp = entry.timestamp
+        if not timestamp and isinstance(entry.base, LogEntry):
+            timestamp = entry.base.timestamp
+        message = render_log_message(entry)
+        return f"{timestamp}  {message}" if timestamp else message
     return f"{entry.timestamp}  {render_log_message(entry)}"
 
 
-def render_log_message(entry: str | LogEntry) -> str:
+def render_log_message(entry: str | LogEntry | ComposedLogEntry) -> str:
     """Render the localized message body without the timestamp prefix."""
     if isinstance(entry, str):
         return entry
+    if isinstance(entry, ComposedLogEntry):
+        parts = [render_log_message(entry.base)]
+        parts.extend(t(key) for key in entry.note_keys)
+        return "\n".join(part for part in parts if part)
     return t(entry.key, **_render_log_fmt_args(entry.fmt_args))
 
 

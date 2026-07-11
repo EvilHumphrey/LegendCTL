@@ -15,6 +15,12 @@ from zd_app.services.device_service import DeviceService
 from zd_app.services.diagnostics_service import DiagnosticsService
 from zd_app.services.model_fingerprint import InterfaceInventory, ModelFingerprint
 from zd_app.services.official_app_summary_service import OfficialAppSummary, OfficialAppSummaryService
+from zd_app.services.trust_matrix import (
+    INFERRED,
+    VERIFIED,
+    TrustMatrixSignals,
+    build_trust_matrix,
+)
 
 
 PUBLIC_DEVICE_ENTRY = {
@@ -540,6 +546,66 @@ class DeviceServiceRefreshStateTests(unittest.TestCase):
         self.assertEqual(state.data_freshness, "stale")
         self.assertEqual(state.summary_sources["firmware"], "official_app_ui")
         self.assertEqual(state.summary_sources["active_profile"], "protocol")
+
+    def test_summary_freshness_clears_on_disconnect_until_a_new_live_source_arrives(self) -> None:
+        # Audit26 HO-F3: retained summary values survive reconnect, but their
+        # current-connection qualifier cannot. A fresh scrape/read restores it.
+        service = DeviceService(clock=lambda: 0.0)
+        self._refresh_with_zd_entry(service)
+        service._apply_official_app_summary(
+            OfficialAppSummary(firmware_version="1.24", active_onboard_profile=2)
+        )
+        self.assertTrue(service.summary_field_refreshed_this_connection("firmware"))
+        self.assertTrue(
+            service.summary_field_refreshed_this_connection("active_profile")
+        )
+
+        self._refresh_with_no_device(service)
+        self.assertFalse(service.summary_field_refreshed_this_connection("firmware"))
+        self.assertFalse(
+            service.summary_field_refreshed_this_connection("active_profile")
+        )
+
+        self._refresh_with_zd_entry(service)  # same unit, no fresh source yet
+        self.assertFalse(service.summary_field_refreshed_this_connection("firmware"))
+        self.assertFalse(
+            service.summary_field_refreshed_this_connection("active_profile")
+        )
+
+        service._apply_official_app_summary(
+            OfficialAppSummary(firmware_version="1.25", active_onboard_profile=3)
+        )
+        self.assertTrue(service.summary_field_refreshed_this_connection("firmware"))
+        self.assertTrue(
+            service.summary_field_refreshed_this_connection("active_profile")
+        )
+
+    def test_identity_change_clears_summary_freshness(self) -> None:
+        service = DeviceService(clock=lambda: 0.0)
+        self._refresh_with_zd_entry(service, "USB\\VID_413D&PID_2104\\OLD")
+        service._apply_official_app_summary(
+            OfficialAppSummary(firmware_version="1.24", active_onboard_profile=2)
+        )
+
+        self._refresh_with_zd_entry(service, "USB\\VID_413D&PID_2104\\NEW")
+
+        self.assertFalse(service.summary_field_refreshed_this_connection("firmware"))
+        self.assertFalse(
+            service.summary_field_refreshed_this_connection("active_profile")
+        )
+
+    def test_official_summary_while_disconnected_does_not_claim_connection_freshness(self) -> None:
+        service = DeviceService(clock=lambda: 0.0)
+        service.state.connection_state = "no_device"
+
+        service._apply_official_app_summary(
+            OfficialAppSummary(firmware_version="1.24", active_onboard_profile=2)
+        )
+
+        self.assertFalse(service.summary_field_refreshed_this_connection("firmware"))
+        self.assertFalse(
+            service.summary_field_refreshed_this_connection("active_profile")
+        )
 
     def test_slot_drop_while_same_identity_connected_does_not_log_detected(self) -> None:
         service = DeviceService(clock=lambda: 0.0)
@@ -1180,6 +1246,130 @@ class DeviceServiceSummaryPrecedenceTests(unittest.TestCase):
         enumerate_mock.assert_called_once()
 
 
+class _RaisingSummaryService(OfficialAppSummaryService):
+    """A summary service whose scrape blows up — models a subprocess/UIA
+    failure. ``read_official_summary_into_state`` must swallow it whole."""
+
+    def __init__(self) -> None:
+        super().__init__(timeout_seconds=0.1)
+        self.calls = 0
+
+    def read_summary(self, force_refresh: bool = False):
+        self.calls += 1
+        raise RuntimeError("probe boom")
+
+
+class DeviceServiceOfficialSummaryReadTests(unittest.TestCase):
+    """The best-effort official-app enrichment folded into the main Read
+    (``read_official_summary_into_state``). Fakes ENFORCE the read_summary
+    contract (parse the payload / return None / raise) — never echo."""
+
+    def setUp(self) -> None:
+        self.service = DeviceService(clock=lambda: 0.0)
+
+    @staticmethod
+    def _summary_payload() -> dict:
+        return {
+            "window_title": "Controller Settings",
+            "names": [
+                "Battery: 100%",
+                "Version: 1.18",
+                "Config: 2",
+                "Sleep: Never Sleep",
+            ],
+        }
+
+    def test_populates_firmware_and_profile_from_official_app(self) -> None:
+        self.service.official_app_summary_service = FakeSummaryProbeService(
+            [self._summary_payload()], clock=lambda: 0.0
+        )
+
+        result = self.service.read_official_summary_into_state()
+
+        self.assertTrue(result.applied)
+        self.assertFalse(result.retained_protocol_active_profile)
+        self.assertEqual(self.service.state.firmware_version, "1.18")
+        self.assertEqual(
+            self.service.state.summary_sources["firmware"], "official_app_ui"
+        )
+        self.assertEqual(self.service.state.active_onboard_profile, 2)
+        self.assertEqual(
+            self.service.state.summary_sources["active_profile"], "official_app_ui"
+        )
+        # A populating read logs the official-summary event (mirrors
+        # read_device_state's connected branch).
+        self.assertIn(
+            "Official App UI summary", self.service.recent_events(1)[0]
+        )
+
+    def test_no_window_leaves_firmware_and_profile_unknown_without_error(self) -> None:
+        # ``None`` payload == "Controller Settings" window not found: the scrape
+        # returns None and the read must succeed with firmware/profile Unknown.
+        self.service.official_app_summary_service = FakeSummaryProbeService(
+            [None], clock=lambda: 0.0
+        )
+
+        result = self.service.read_official_summary_into_state()
+
+        self.assertFalse(result.applied)
+        self.assertFalse(result.retained_protocol_active_profile)
+        self.assertEqual(self.service.state.firmware_version, "Unknown")
+        self.assertEqual(self.service.state.summary_sources["firmware"], "unknown")
+        self.assertEqual(
+            self.service.state.summary_sources["active_profile"], "unknown"
+        )
+        # No official-summary log line was emitted (nothing was applied).
+        self.assertEqual(len(self.service.recent_events(5)), 0)
+
+    def test_scrape_exception_degrades_silently_and_state_untouched(self) -> None:
+        raising = _RaisingSummaryService()
+        self.service.official_app_summary_service = raising
+
+        # Must NOT raise, and state stays at defaults.
+        result = self.service.read_official_summary_into_state()
+
+        self.assertEqual(raising.calls, 1)
+        self.assertFalse(result.applied)
+        self.assertFalse(result.retained_protocol_active_profile)
+        self.assertEqual(self.service.state.firmware_version, "Unknown")
+        self.assertEqual(self.service.state.summary_sources["firmware"], "unknown")
+        self.assertEqual(
+            self.service.state.summary_sources["active_profile"], "unknown"
+        )
+
+    def test_protocol_owned_active_profile_is_retained(self) -> None:
+        # A verified protocol switch owns the active profile; a lagging official
+        # scrape reporting a different config must NOT overwrite it, but firmware
+        # (which has no protocol owner) still populates.
+        self.service.record_protocol_active_profile(3)
+        self.service.official_app_summary_service = FakeSummaryProbeService(
+            [
+                {
+                    "window_title": "Controller Settings",
+                    "names": ["Version: 1.18", "Config: 1"],
+                }
+            ],
+            clock=lambda: 0.0,
+        )
+
+        result = self.service.read_official_summary_into_state()
+
+        self.assertTrue(result.applied)
+        self.assertTrue(result.retained_protocol_active_profile)
+        self.assertEqual(self.service.state.active_onboard_profile, 3)
+        self.assertEqual(
+            self.service.state.summary_sources["active_profile"], "protocol"
+        )
+        self.assertEqual(self.service.state.firmware_version, "1.18")
+        self.assertEqual(
+            self.service.state.summary_sources["firmware"], "official_app_ui"
+        )
+        self.assertIn(
+            "Protocol-owned active config was retained",
+            self.service.recent_events(1)[0],
+        )
+
+
 class DeviceValueLocalizationTests(unittest.TestCase):
     """Coverage for the firmware/battery value-string formatters.
     Canonical values stay Latin in DeviceState; the
@@ -1388,6 +1578,135 @@ class DeviceServiceSetupApiRealDllBindingTests(unittest.TestCase):
         ):
             with self.subTest(export=name):
                 self.assertTrue(callable(getattr(setupapi, name)))
+
+
+class DeviceServiceProtocolProfileVerificationTests(unittest.TestCase):
+    """End-to-end guard for the sticky-``protocol`` active-profile honesty defect.
+
+    The active-profile ``summary_sources`` value is sticky across a disconnect
+    (cleared only on an identity change), so the source alone could re-green a
+    STALE retained slot to "Verified from device" on a same-unit reconnect —
+    the cardinal sin (a retained value shown as a live device read). The
+    ``active_profile_protocol_verified_this_connection`` flag is the fix: it is
+    set by a genuine protocol switch and cleared the moment the controller
+    disconnects, and the trust-matrix verified branch requires it.
+    """
+
+    ID_A = "USB\\VID_413D&PID_2104\\ABC123"
+    ID_B = "USB\\VID_413D&PID_2104\\ZZZ999"
+
+    def _refresh_zd(self, service: DeviceService, instance_id: str = ID_A):
+        with patch.object(
+            service, "_find_zd_entries", return_value=[{"instance_id": instance_id}]
+        ), patch(
+            "zd_app.services.device_service.get_connected_controllers",
+            return_value=[],
+        ), patch(
+            "zd_app.services.device_service.describe_battery_level",
+            return_value="Wired",
+        ):
+            return service.refresh_state()
+
+    def _refresh_none(self, service: DeviceService):
+        with patch.object(service, "_find_zd_entries", return_value=[]), patch(
+            "zd_app.services.device_service.get_connected_controllers",
+            return_value=[],
+        ):
+            return service.refresh_state()
+
+    def _profile_row(self, state):
+        # Mirror screens.diagnostics._trust_matrix_signals for the profile-
+        # relevant fields, so this asserts the ACTUAL rendered provenance.
+        sources = state.summary_sources
+        firmware = str(getattr(state, "firmware_version", "") or "").strip()
+        signals = TrustMatrixSignals(
+            connection_state=state.connection_state,
+            data_freshness=state.data_freshness,
+            firmware_known=bool(firmware and firmware != "Unknown"),
+            active_profile_known=sources.get("active_profile", "unknown") != "unknown",
+            firmware_source=sources.get("firmware", "unknown"),
+            profile_source=sources.get("active_profile", "unknown"),
+            active_profile_protocol_verified_this_connection=(
+                state.active_profile_protocol_verified_this_connection
+            ),
+            settings_read_current=False,
+            has_retained_settings=False,
+            settings_skipped_fields=0,
+            fingerprint_present=False,
+            fingerprint_complete=False,
+            fingerprint_short_digest=None,
+        )
+        return build_trust_matrix(signals)[2]  # PROFILE row
+
+    def test_protocol_switch_then_disconnect_reconnect_does_not_regreen(self) -> None:
+        service = DeviceService(clock=lambda: 0.0)
+
+        # 1) Connected + a genuine in-app protocol profile switch (0xd0 0x0f
+        #    readback). Row -> "Verified from device".
+        self._refresh_zd(service)
+        service.record_protocol_active_profile(2)
+        self.assertTrue(service.state.active_profile_protocol_verified_this_connection)
+        self.assertEqual(service.state.summary_sources["active_profile"], "protocol")
+        self.assertEqual(self._profile_row(service.state).provenance, VERIFIED)
+
+        # 2) Unplug. Disconnect ends the readback's validity: flag clears, but the
+        #    retained slot + protocol source are intentionally kept visible.
+        self._refresh_none(service)
+        self.assertFalse(service.state.active_profile_protocol_verified_this_connection)
+        self.assertEqual(service.state.summary_sources["active_profile"], "protocol")
+        self.assertEqual(service.state.active_onboard_profile, 2)  # value retained
+        row = self._profile_row(service.state)
+        self.assertEqual(row.provenance, INFERRED)
+        self.assertNotEqual(row.provenance, VERIFIED)
+
+        # 3) User changes the onboard profile on the controller while unplugged
+        #    (START+D-Pad) — invisible to us — then replugs the SAME unit. The
+        #    reconnect re-reads only Wrapper Settings, NO fresh protocol read.
+        #    The row MUST stay inferred/retained, never re-green while showing a
+        #    possibly-stale slot.
+        self._refresh_zd(service)  # same ID_A
+        self.assertEqual(service.state.connection_state, "connected")
+        self.assertFalse(service.state.active_profile_protocol_verified_this_connection)
+        self.assertEqual(service.state.summary_sources["active_profile"], "protocol")
+        reconnect_row = self._profile_row(service.state)
+        self.assertEqual(reconnect_row.provenance, INFERRED)
+        self.assertNotEqual(reconnect_row.provenance, VERIFIED)
+
+    def test_official_app_scrape_can_correct_stale_protocol_after_disconnect(self) -> None:
+        # Secondary defect: the protocol retention guard in
+        # _apply_official_app_summary must NOT refuse a correcting scrape after a
+        # disconnect (flag cleared), or the row stays green-stale.
+        service = DeviceService(clock=lambda: 0.0)
+        self._refresh_zd(service)
+        service.record_protocol_active_profile(2)
+        self._refresh_none(service)  # disconnect clears the flag
+
+        # A later official-app scrape reports a different (corrected) slot.
+        summary = OfficialAppSummary(active_onboard_profile=3)
+        retained = service._apply_official_app_summary(summary)
+        self.assertFalse(retained)  # NOT refused as protocol-retained
+        self.assertEqual(service.state.summary_sources["active_profile"], "official_app_ui")
+        self.assertEqual(service.state.active_onboard_profile, 3)
+
+    def test_still_connected_protocol_verification_stays_verified(self) -> None:
+        # No false-negative regression: while still connected, a genuine protocol
+        # verification keeps the "Verified from device" chip across steady refreshes.
+        service = DeviceService(clock=lambda: 0.0)
+        self._refresh_zd(service)
+        service.record_protocol_active_profile(2)
+        self._refresh_zd(service)  # steady connected tick, same unit
+        self.assertTrue(service.state.active_profile_protocol_verified_this_connection)
+        self.assertEqual(self._profile_row(service.state).provenance, VERIFIED)
+
+    def test_identity_change_clears_protocol_verification(self) -> None:
+        # The pre-existing identity-change clear path must still zero the flag and
+        # source (a different physical unit's slot is never the retained one's).
+        service = DeviceService(clock=lambda: 0.0)
+        self._refresh_zd(service, self.ID_A)
+        service.record_protocol_active_profile(2)
+        self._refresh_zd(service, self.ID_B)  # different unit, connected->connected
+        self.assertFalse(service.state.active_profile_protocol_verified_this_connection)
+        self.assertEqual(service.state.summary_sources["active_profile"], "unknown")
 
 
 if __name__ == "__main__":

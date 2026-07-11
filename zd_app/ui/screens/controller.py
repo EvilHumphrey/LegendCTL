@@ -6,6 +6,7 @@ import dearpygui.dearpygui as dpg
 
 from zd_app.i18n import get_locale, t
 from zd_app.ui import right_rail, safe_import_badges
+from zd_app.ui.choice_labels import display_items, to_display
 from zd_app.ui.fonts import font_for
 from zd_app.ui.themes import SPACE_MD, SPACE_LG, SPACE_XL
 from zd_app.ui.components import Column, action_button, table, table_empty_state
@@ -390,8 +391,8 @@ def _render_vibration_tab(shell) -> None:
     ):
         dpg.add_slider_int(label=t(label_key), default_value=15, min_value=0, max_value=100, width=320, tag=tag)
     dpg.add_combo(
-        items=VIBRATION_MODE_ITEMS,
-        default_value="Native Trigger Vibration",
+        items=display_items("vibration_mode"),
+        default_value=to_display("vibration_mode", "Native Trigger Vibration"),
         label=t("controller.vibration.mode"),
         width=320,
         tag="vibration_mode_combo",
@@ -420,7 +421,13 @@ def _render_trigger_side(shell, side: str) -> None:
     dpg.add_text(t(f"{label_prefix}.title"), color=shell.COLORS["muted"])
     dpg.add_slider_int(label=t(f"{label_prefix}.min"), default_value=0, min_value=0, max_value=100, width=320, tag=f"{tag_prefix}_min_slider")
     dpg.add_slider_int(label=t(f"{label_prefix}.max"), default_value=100, min_value=0, max_value=100, width=320, tag=f"{tag_prefix}_max_slider")
-    dpg.add_combo(items=TRIGGER_MODE_ITEMS, default_value="Short", label=t(f"{label_prefix}.mode"), width=320, tag=f"{tag_prefix}_mode_combo")
+    dpg.add_combo(
+        items=display_items("trigger_mode"),
+        default_value=to_display("trigger_mode", "Short"),
+        label=t(f"{label_prefix}.mode"),
+        width=320,
+        tag=f"{tag_prefix}_mode_combo",
+    )
     if side == "left":
         callback = shell.apply_left_trigger_settings
         apply_key = "controller.triggers.left.apply"
@@ -1212,15 +1219,21 @@ def _render_lighting_tab(shell) -> None:
     section_title(t("controller.lighting.title"))
     dpg.add_text(t("controller.lighting.helper"), color=shell.COLORS["muted"], wrap=620)
     dpg.add_combo(
-        items=LIGHTING_ZONE_ITEMS,
-        default_value="Home",
+        items=display_items("lighting_zone"),
+        default_value=to_display("lighting_zone", "Home"),
         label=t("controller.lighting.zone"),
         width=320,
         tag="lighting_zone_combo",
         callback=lambda _s, value: shell.on_lighting_zone_changed(value),
     )
     dpg.add_checkbox(label=t("controller.lighting.on"), default_value=True, tag="lighting_on_checkbox")
-    dpg.add_combo(items=LIGHTING_MODE_ITEMS, default_value="Always On", label=t("controller.lighting.mode"), width=320, tag="lighting_mode_combo")
+    dpg.add_combo(
+        items=display_items("lighting_mode"),
+        default_value=to_display("lighting_mode", "Always On"),
+        label=t("controller.lighting.mode"),
+        width=320,
+        tag="lighting_mode_combo",
+    )
     dpg.add_slider_int(label=t("controller.lighting.brightness"), default_value=100, min_value=0, max_value=255, width=320, tag="lighting_brightness_slider")
     dpg.add_slider_int(label=t("controller.lighting.red"), default_value=255, min_value=0, max_value=255, width=320, tag="lighting_r_slider")
     dpg.add_slider_int(label=t("controller.lighting.green"), default_value=255, min_value=0, max_value=255, width=320, tag="lighting_g_slider")

@@ -9,7 +9,10 @@ from unittest.mock import MagicMock, patch
 from tests.r2_shell_test_helpers import empty_snapshot
 from zd_app import i18n
 from zd_app.models import AppSettings, DeviceState, WrapperProfile
+from zd_app.services._log_entry import ComposedLogEntry, render_log_message
+from zd_app.services.compatibility_report import build_compatibility_report
 from zd_app.services.device_service import DeviceService, LogEntry
+from zd_app.services.settings_apply_coordinator import ApplyResult
 from zd_app.services.settings_service import (
     AxisInversion,
     BackPaddleBinding,
@@ -65,6 +68,7 @@ from zd_app.ui.app_shell import (
     SENSITIVITY_PRESETS_8POINT,
     _GEOMETRY_LOG_SETTLE_FRAMES,
     _format_apply_failure_row,
+    _last_apply_result_text,
     _windowed_viewport_kwargs,
 )
 
@@ -104,6 +108,11 @@ def _make_shell(settings_service=None, wrapper_profile_store=None) -> AppShell:
     if wrapper_profile_store is None:
         wrapper_profile_store = MagicMock()
         wrapper_profile_store.list_profiles.return_value = []
+    restore_point_service = MagicMock()
+    restore_point_service.capture.return_value = SimpleNamespace(
+        id="rp_integration_test",
+        title="Integration test restore point",
+    )
     shell = AppShell(
         device_service=device_service,
         profile_service=profile_service,
@@ -112,6 +121,7 @@ def _make_shell(settings_service=None, wrapper_profile_store=None) -> AppShell:
         preflight_service=MagicMock(),
         settings_service=settings_service,
         wrapper_profile_store=wrapper_profile_store,
+        restore_point_service=restore_point_service,
     )
     shell.refresh_shell = lambda: None
     shell.rebuild_current_screen = lambda: None
@@ -456,6 +466,79 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
             "OK: Applied profile 'Apex' (29 writes).",
         )
 
+    def test_apply_selected_wrapper_profile_discloses_8point_downgrade_on_success(self) -> None:
+        settings_service = MagicMock()
+        _ok_profile_write_results(settings_service)
+        settings_service.supports_8point_sensitivity.return_value = False
+        curve_8point = tuple(SensitivityAnchor(i * 10, i * 10) for i in range(8))
+        snapshot = _full_snapshot(
+            sensitivity_left_8point=curve_8point,
+            sensitivity_right_8point=curve_8point,
+        )
+        store = MagicMock()
+        store.load.return_value = WrapperProfile(name="Apex", snapshot=snapshot)
+        shell = _make_shell(settings_service, store)
+        shell.refresh_from_controller = MagicMock()
+        shell._show_apply_failure_modal = MagicMock()
+
+        with patch("zd_app.ui.app_shell.dpg.get_value", return_value="Apex"):
+            shell.apply_selected_wrapper_profile()
+
+        success, message = shell.device_service.record_apply_result.call_args.args
+        self.assertTrue(success)
+        self.assertIsInstance(message, ComposedLogEntry)
+        self.assertEqual(
+            message.note_keys,
+            ("apply.result.sens_8point_downgraded",),
+        )
+        self.assertEqual(
+            render_log_message(message),
+            "OK: Applied profile 'Apex' (29 writes).\n"
+            "Sensitivity: the 8-point curve could not be confirmed on this controller - "
+            "applied the standard 3-point curve instead.",
+        )
+        self.assertEqual(
+            shell._last_apply_result.sensitivity_downgrades,
+            ("sens_left", "sens_right"),
+        )
+        shell.device_service.log_i18n_event.assert_not_called()
+        shell._show_apply_failure_modal.assert_not_called()
+
+    def test_apply_selected_wrapper_profile_discloses_8point_downgrade_on_partial(self) -> None:
+        settings_service = MagicMock()
+        _ok_profile_write_results(settings_service)
+        settings_service.supports_8point_sensitivity.return_value = False
+        settings_service.set_vibration.return_value = SimpleNamespace(
+            outcome=SetVibrationOutcome.WRITE_FAILED,
+            error_code=995,
+        )
+        curve_8point = tuple(SensitivityAnchor(i * 10, i * 10) for i in range(8))
+        snapshot = _full_snapshot(
+            sensitivity_left_8point=curve_8point,
+            sensitivity_right_8point=curve_8point,
+        )
+        store = MagicMock()
+        store.load.return_value = WrapperProfile(name="Apex", snapshot=snapshot)
+        shell = _make_shell(settings_service, store)
+        shell.refresh_from_controller = MagicMock()
+        shell._show_apply_failure_modal = MagicMock()
+
+        with patch("zd_app.ui.app_shell.dpg.get_value", return_value="Apex"):
+            shell.apply_selected_wrapper_profile()
+
+        success, message = shell.device_service.record_apply_result.call_args.args
+        self.assertFalse(success)
+        self.assertIsInstance(message, ComposedLogEntry)
+        rendered = render_log_message(message)
+        self.assertIn("Partial: Applied profile 'Apex'", rendered)
+        self.assertIn(
+            "Sensitivity: the 8-point curve could not be confirmed on this controller - "
+            "applied the standard 3-point curve instead.",
+            rendered,
+        )
+        shell.device_service.log_i18n_event.assert_not_called()
+        shell._show_apply_failure_modal.assert_called_once_with(shell._last_apply_result)
+
     def test_apply_selected_wrapper_profile_counts_back_paddles(self) -> None:
         settings_service = MagicMock()
         _ok_profile_write_results(settings_service)
@@ -720,6 +803,61 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         self.assertEqual(settings_service.set_vibration.call_count, 2)
         self.assertEqual(settings_service.set_all_deadzones.call_count, 2)
         self.assertEqual(settings_service.set_polling_rate.call_count, before_polling_calls)
+
+    def test_retry_preserves_downgrade_and_no_restore_point_disclosures(self) -> None:
+        settings_service = MagicMock()
+        _ok_profile_write_results(settings_service)
+        settings_service.supports_8point_sensitivity.return_value = False
+        settings_service.set_vibration.return_value = SimpleNamespace(
+            outcome=SetVibrationOutcome.WRITE_FAILED,
+            error_code=995,
+        )
+        curve_8point = tuple(SensitivityAnchor(i * 10, i * 10) for i in range(8))
+        snapshot = _full_snapshot(
+            sensitivity_left_8point=curve_8point,
+            sensitivity_right_8point=curve_8point,
+        )
+        shell = _make_shell(settings_service)
+        shell.refresh_from_controller = MagicMock()
+
+        with patch("zd_app.ui.app_shell.time.sleep"):
+            shell._apply_wrapper_profile_snapshot(
+                "Apex",
+                snapshot,
+                no_restore_point=True,
+            )
+
+        settings_service.set_vibration.return_value = SimpleNamespace(
+            outcome=SetVibrationOutcome.OK,
+            error_code=None,
+        )
+        with patch("zd_app.ui.app_shell.time.sleep"):
+            retry_result = shell._retry_failed_settings()
+
+        self.assertIsNotNone(retry_result)
+        assert retry_result is not None
+        self.assertEqual(retry_result.failed, [])
+        self.assertEqual(
+            retry_result.sensitivity_downgrades,
+            ("sens_left", "sens_right"),
+        )
+        self.assertTrue(retry_result.no_restore_point)
+        self.assertIs(shell._last_apply_result, retry_result)
+        success, message = shell.device_service.record_apply_result.call_args.args
+        self.assertTrue(success)
+        self.assertIsInstance(message, ComposedLogEntry)
+        rendered = render_log_message(message)
+        self.assertIn("Retried 1 failed settings; all applied.", rendered)
+        self.assertIn("Sensitivity: the 8-point curve could not be confirmed", rendered)
+        self.assertIn("Note: no restore point was created before this apply.", rendered)
+
+        report = build_compatibility_report(
+            device_state=DeviceState(data_freshness="write_failed"),
+            last_apply_result=message,
+        )
+        exported = report.to_issue_body()
+        self.assertIn("Sensitivity: the 8-point curve could not be confirmed", exported)
+        self.assertIn("Note: no restore point was created before this apply.", exported)
 
     def test_apply_selected_wrapper_profile_continues_on_exception(self) -> None:
         settings_service = MagicMock()
@@ -1224,6 +1362,25 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         self.assertEqual(shell.settings.language, "zh-CN")
         shell._locale_router.set_locale.assert_called_once_with("zh-CN")
 
+    def test_update_language_unshipped_locale_falls_back_to_default(self) -> None:
+        shell = _make_shell(MagicMock())
+        shell._locale_router.set_locale = MagicMock()
+
+        shell.update_language("ko")
+
+        self.assertEqual(shell.settings.language, "en")
+        shell._locale_router.set_locale.assert_called_once_with("en")
+
+    def test_update_language_accepts_a_future_supported_locale(self) -> None:
+        shell = _make_shell(MagicMock())
+        shell._locale_router.set_locale = MagicMock()
+
+        with patch("zd_app.ui.app_shell.SUPPORTED_LOCALES", ("en", "zh-CN", "ko")):
+            shell.update_language("ko")
+
+        self.assertEqual(shell.settings.language, "ko")
+        shell._locale_router.set_locale.assert_called_once_with("ko")
+
     def test_update_setting_log_humanizes_developer_panels_visible_in_en(self) -> None:
         i18n.set_locale("en")
         shell = _make_shell(MagicMock())
@@ -1605,6 +1762,106 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         finally:
             i18n.set_locale("en")
 
+    def test_composed_disclosures_rerender_once_after_locale_switch(self) -> None:
+        try:
+            shell = _make_shell(MagicMock())
+            shell.device_service = DeviceService(clock=lambda: 0.0)
+            i18n.set_locale("zh-CN")
+            base = LogEntry(
+                timestamp="12:00:00",
+                key="apply.profile.partial",
+                fmt_args={"name": "Apex", "m": 0, "n": 1, "k": 1},
+            )
+            message = shell._with_sensitivity_downgrade_notice(
+                base,
+                ApplyResult(sensitivity_downgrades=("sens_left",)),
+            )
+            shell._record_settings_apply_result(
+                False,
+                message,
+                no_restore_point=True,
+            )
+
+            self.assertEqual(len(shell.device_service.event_log), 1)
+            zh_activity = shell.device_service.recent_events(1)[0]
+            self.assertIn("注意", zh_activity)
+
+            i18n.set_locale("en")
+            footer = _last_apply_result_text(shell.device_service)
+            activity = shell.device_service.recent_events(1)[0]
+            report = build_compatibility_report(
+                device_state=shell.device_service.state,
+                last_apply_result=shell.device_service.last_apply_result,
+                recent_events=shell.device_service.recent_events(8),
+            )
+            exported = report.to_issue_body()
+
+            for rendered in (footer, activity, exported):
+                self.assertIn("Sensitivity: the 8-point curve could not be confirmed", rendered)
+                self.assertIn("Note: no restore point was created before this apply.", rendered)
+                self.assertNotIn("注意", rendered)
+            self.assertEqual(
+                activity.count("Sensitivity: the 8-point curve could not be confirmed"),
+                1,
+            )
+            self.assertEqual(
+                activity.count("Note: no restore point was created before this apply."),
+                1,
+            )
+        finally:
+            i18n.set_locale("en")
+
+    def test_composed_disclosure_active_footer_rerenders_after_locale_switch(self) -> None:
+        try:
+            shell = _make_shell(MagicMock())
+            shell.device_service = DeviceService(clock=lambda: 0.0)
+            shell._dpg_context_ready = True
+            i18n.set_locale("zh-CN")
+            base = LogEntry(
+                timestamp="12:00:00",
+                key="apply.profile.partial",
+                fmt_args={"name": "Apex", "m": 0, "n": 1, "k": 1},
+            )
+            message = shell._with_sensitivity_downgrade_notice(
+                base,
+                ApplyResult(sensitivity_downgrades=("sens_left",)),
+            )
+            rendered = {}
+
+            with patch(
+                "zd_app.ui.app_shell.dpg.does_item_exist", return_value=True
+            ), patch(
+                "zd_app.ui.app_shell.dpg.set_value",
+                side_effect=lambda tag, value: rendered.__setitem__(tag, value),
+            ):
+                shell._record_settings_apply_result(
+                    False,
+                    message,
+                    no_restore_point=True,
+                )
+
+            self.assertIn("注意", rendered["footer_status_text"])
+            i18n.set_locale("en")
+            with patch(
+                "zd_app.ui.app_shell.dpg.does_item_exist", return_value=True
+            ), patch(
+                "zd_app.ui.app_shell.dpg.set_value",
+                side_effect=lambda tag, value: rendered.__setitem__(tag, value),
+            ):
+                shell._render_active_apply_status()
+
+            self.assertIn(
+                "Sensitivity: the 8-point curve could not be confirmed",
+                rendered["footer_status_text"],
+            )
+            self.assertIn(
+                "Note: no restore point was created before this apply.",
+                rendered["footer_status_text"],
+            )
+            self.assertNotIn("注意", rendered["footer_status_text"])
+        finally:
+            i18n.set_locale("en")
+
     def test_record_apply_result_backward_compat_with_raw_string(self) -> None:
         try:
             shell = _make_shell(MagicMock())
@@ -1711,6 +1968,33 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
 
                 called_settings = settings_service.set_vibration.call_args.args[0]
                 self.assertEqual(called_settings.mode, expected_mode)
+
+    def test_apply_vibration_settings_maps_zh_display_label_to_canonical_mode(self) -> None:
+        settings_service = MagicMock()
+        settings_service.set_vibration.return_value = SimpleNamespace(
+            outcome=SetVibrationOutcome.OK,
+            error_code=None,
+        )
+        shell = _make_shell(settings_service)
+        values = {
+            "vibration_lg_slider": 15,
+            "vibration_rg_slider": 15,
+            "vibration_lm_slider": 15,
+            "vibration_rm_slider": 15,
+            "vibration_mode_combo": "立体共振",
+        }
+
+        i18n.set_locale("zh-CN")
+        try:
+            with patch("zd_app.ui.app_shell.dpg.get_value", side_effect=values.__getitem__):
+                shell.apply_vibration_settings()
+        finally:
+            i18n.set_locale("en")
+
+        self.assertEqual(
+            settings_service.set_vibration.call_args.args[0].mode,
+            TriggerVibrationMode.STEREO_RESONANCE,
+        )
 
     def test_apply_vibration_settings_unknown_mode_logs_and_returns_early(self) -> None:
         settings_service = MagicMock()
@@ -2793,6 +3077,34 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
             "OK: Lighting zone 'Home' applied.",
         )
 
+    def test_apply_lighting_maps_zh_display_labels_to_canonical_values(self) -> None:
+        settings_service = MagicMock()
+        settings_service.set_zone_lighting.return_value = SimpleNamespace(
+            outcome=SetLightingOutcome.OK,
+            error_code=None,
+        )
+        shell = _make_shell(settings_service)
+        values = {
+            "lighting_zone_combo": "Home 区域",
+            "lighting_mode_combo": "常亮",
+            "lighting_on_checkbox": True,
+            "lighting_brightness_slider": 80,
+            "lighting_r_slider": 255,
+            "lighting_g_slider": 0,
+            "lighting_b_slider": 128,
+        }
+
+        i18n.set_locale("zh-CN")
+        try:
+            with patch("zd_app.ui.app_shell.dpg.get_value", side_effect=values.__getitem__):
+                shell.apply_lighting()
+        finally:
+            i18n.set_locale("en")
+
+        zone, settings_obj = settings_service.set_zone_lighting.call_args.args
+        self.assertEqual(zone, LightingZone.HOME)
+        self.assertEqual(settings_obj.mode, LightingMode.ALWAYS_ON)
+
     def test_apply_lighting_unknown_zone_no_write(self) -> None:
         settings_service = MagicMock()
         shell = _make_shell(settings_service)
@@ -3122,10 +3434,9 @@ class PollingRate8000FirmwareHonestyTests(unittest.TestCase):
     def _hydrated_shell(settings_service):
         shell = _make_shell(settings_service)
         shell._polling_rate_hydrated = True  # past the stale-combo write guard
-        # Disable the before-write Restore-Point capture so the only
-        # get_polling_rate() caller is the read-back under test (the RP hook does
-        # its own pre-write device read). Mirrors SliderWriteThrottleTests.
-        shell.restore_point_service = None
+        # The injected no-I/O capture keeps this test focused on the polling
+        # read-back; its only SettingsService get_polling_rate() caller is the
+        # 8000 Hz confirmation below.
         return shell
 
     def test_8000_confirmed_commit_records_success(self) -> None:
@@ -3578,9 +3889,8 @@ class SliderWriteThrottleTests(unittest.TestCase):
         shell = _make_shell(settings_service)
         shell._step_size_hydrated = True
         shell._polling_rate_hydrated = True
-        # Disable the RP hook by default so the throttle tests don't trip
-        # on RP capture; per-test overrides bring it back when needed.
-        shell.restore_point_service = None
+        # The injected no-I/O capture keeps the throttle tests focused on the
+        # write cadence while preserving the pre-write checkpoint contract.
         return shell, settings_service
 
     def test_slider_throttle_first_tick_writes_immediately(self) -> None:
@@ -3675,12 +3985,97 @@ class SliderWriteThrottleTests(unittest.TestCase):
             self.assertEqual(throttle.peek_pending(), ["step_size"])
             # Non-consuming: a second peek still sees it and the value survives.
             self.assertEqual(throttle.peek_pending(), ["step_size"])
-            self.assertEqual(throttle._pending.get("step_size"), 141)
+            pending = throttle._pending.get("step_size")
+            self.assertIsNotNone(pending)
+            self.assertEqual(pending.value, 141)
+            self.assertFalse(pending.no_restore_point)
+            self.assertEqual(pending.stable_identifier, "unknown")
             # The window elapses and the flush still fires the queued value.
             clock[0] += 0.200
             flushed = throttle.flush_pending(now=clock[0])
-        self.assertEqual(flushed, [("step_size", 141)])
+        self.assertEqual(len(flushed), 1)
+        self.assertEqual(flushed[0][0], "step_size")
+        self.assertEqual(flushed[0][1].value, 141)
+        self.assertFalse(flushed[0][1].no_restore_point)
+        self.assertEqual(flushed[0][1].stable_identifier, "unknown")
         self.assertEqual(throttle.peek_pending(), [])  # consumed by the flush
+
+    def test_throttle_preserves_disclosure_after_a_long_hid_job(self) -> None:
+        # Audit26 ST-F2: the trailing write was admitted through the disclosed
+        # gate. Even after its seven-second consent window expires while an HID
+        # job holds the throttle, the recorded result must retain that qualifier.
+        shell, _settings_service = self._make_shell_with_settings()
+        shell.device_service.state.connection_state = "connected"
+        shell.device_service.state.stable_identifier = "zd-unit-a"
+        shell._do_write_step_size = MagicMock()
+        shell._manual_write_is_disclosed = MagicMock(return_value=False)
+        throttle = shell._slider_throttle
+        self.assertTrue(
+            throttle.should_write_now(
+                "step_size",
+                140,
+                now=100.0,
+                no_restore_point=False,
+                stable_identifier="zd-unit-a",
+            )
+        )
+        self.assertFalse(
+            throttle.should_write_now(
+                "step_size",
+                141,
+                now=100.02,
+                no_restore_point=True,
+                stable_identifier="zd-unit-a",
+            )
+        )
+
+        shell._hid_job_in_flight = True
+        with patch("zd_app.ui.app_shell.time.monotonic", return_value=108.0):
+            shell._flush_slider_throttle()
+        shell._do_write_step_size.assert_not_called()
+
+        shell._hid_job_in_flight = False
+        with patch("zd_app.ui.app_shell.time.monotonic", return_value=108.0):
+            shell._flush_slider_throttle()
+
+        shell._do_write_step_size.assert_called_once_with(
+            141, no_restore_point=True
+        )
+        shell._manual_write_is_disclosed.assert_not_called()
+
+    def test_throttle_drops_pending_write_after_controller_identity_change(self) -> None:
+        # Audit26 ST-F2: a drag belonging to A must never land on B.
+        shell, _settings_service = self._make_shell_with_settings()
+        shell.device_service.state.connection_state = "connected"
+        shell.device_service.state.stable_identifier = "zd-unit-a"
+        shell._do_write_step_size = MagicMock()
+        throttle = shell._slider_throttle
+        throttle.should_write_now(
+            "step_size",
+            140,
+            now=100.0,
+            no_restore_point=False,
+            stable_identifier="zd-unit-a",
+        )
+        throttle.should_write_now(
+            "step_size",
+            141,
+            now=100.02,
+            no_restore_point=False,
+            stable_identifier="zd-unit-a",
+        )
+        shell.device_service.state.stable_identifier = "zd-unit-b"
+
+        with self.assertLogs("zd_app.ui.app_shell", level="DEBUG") as logs, patch(
+            "zd_app.ui.app_shell.time.monotonic", return_value=101.0
+        ):
+            shell._flush_slider_throttle()
+
+        shell._do_write_step_size.assert_not_called()
+        self.assertEqual(throttle.peek_pending(), [])
+        self.assertTrue(
+            any("Dropping slider trailing write" in message for message in logs.output)
+        )
 
     def test_slider_throttle_hydration_guard_still_works(self) -> None:
         # If the hydration write-guard is False, the callback returns

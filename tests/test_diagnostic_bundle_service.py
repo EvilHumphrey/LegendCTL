@@ -446,7 +446,41 @@ class PathSanitizationTests(unittest.TestCase):
         )
         self.assertNotIn("Jane", md)
         self.assertNotIn(r"C:\Users", md)
-        self.assertIn("Firmware: v1.18", md)
+        self.assertIn("Firmware: v1.18 (Not verified)", md)
+
+    def test_render_hardware_labels_known_firmware_sources(self) -> None:
+        for source, label in (
+            ("official_app_ui", "Official App UI"),
+            ("protocol", "Controller Protocol"),
+            ("xinput", "XInput"),
+        ):
+            with self.subTest(source=source):
+                md = self.service.generate_markdown(
+                    device_identity={
+                        "firmware_version": "1.24",
+                        "firmware_source": source,
+                    }
+                )
+
+                self.assertIn(f"Firmware: 1.24 ({label})", md)
+
+    def test_render_hardware_labels_missing_firmware_source_as_not_verified(self) -> None:
+        md = self.service.generate_markdown(
+            device_identity={"firmware_version": "1.24"}
+        )
+
+        self.assertIn("Firmware: 1.24 (Not verified)", md)
+
+    def test_render_hardware_leaves_unknown_firmware_bare(self) -> None:
+        md = self.service.generate_markdown(
+            device_identity={
+                "firmware_version": "Unknown",
+                "firmware_source": "protocol",
+            }
+        )
+
+        self.assertIn("Firmware: Unknown", md)
+        self.assertNotIn("Firmware: Unknown (", md)
 
 
 class MarkdownDoesNotLeakAbsolutePathsTests(unittest.TestCase):

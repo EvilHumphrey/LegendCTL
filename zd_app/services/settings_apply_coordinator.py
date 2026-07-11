@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 from zd_app.i18n import t
@@ -102,6 +102,46 @@ class ApplyResult:
     succeeded: int = 0
     retry_recoveries: int = 0
     failed: list[ApplyFailure] = field(default_factory=list)
+    sensitivity_downgrades: tuple[str, ...] = ()
+    no_restore_point: bool = False
+
+
+def snapshot_as_sent(
+    snapshot: ControllerSnapshot,
+    apply_result: ApplyResult,
+) -> ControllerSnapshot:
+    """Return the snapshot that the coordinator actually sent.
+
+    An unconfirmed cat-0x86 capability writes the existing 3-point host curve
+    and records the matching ``sens_*`` downgrade label. The original 8-point
+    rider is intent, not sent bytes, so callers that persist or verify an
+    applied snapshot must clear only those riders.
+    """
+
+    rider_by_label = {
+        "sens_left": "sensitivity_left_8point",
+        "sens_right": "sensitivity_right_8point",
+    }
+    updates = {
+        rider_name: None
+        for label, rider_name in rider_by_label.items()
+        if label in getattr(apply_result, "sensitivity_downgrades", ())
+        and getattr(snapshot, rider_name) is not None
+    }
+    return replace(snapshot, **updates) if updates else snapshot
+
+
+def _merge_sensitivity_downgrades(*groups: object) -> tuple[str, ...]:
+    """Union supported downgrade labels in deterministic first-seen order."""
+
+    merged: list[str] = []
+    for group in groups:
+        if not isinstance(group, (tuple, list)):
+            continue
+        for label in group:
+            if isinstance(label, str) and label not in merged:
+                merged.append(label)
+    return tuple(merged)
 
 
 class SettingsApplyCoordinator:
@@ -277,6 +317,8 @@ class SettingsApplyCoordinator:
                 ),
             )
         elif snapshot.sensitivity_left is not None:
+            if not use_8point and left_8point is not None:
+                result.sensitivity_downgrades += ("sens_left",)
             trailer_write(
                 "sens_left",
                 lambda: settings_service.set_left_stick_sensitivity_curve(
@@ -292,6 +334,8 @@ class SettingsApplyCoordinator:
                 ),
             )
         elif snapshot.sensitivity_right is not None:
+            if not use_8point and right_8point is not None:
+                result.sensitivity_downgrades += ("sens_right",)
             trailer_write(
                 "sens_right",
                 lambda: settings_service.set_right_stick_sensitivity_curve(
@@ -372,9 +416,19 @@ class SettingsApplyCoordinator:
     def retry_failures(
         self,
         failures: list[ApplyFailure],
+        *,
+        originating_result: ApplyResult | None = None,
     ) -> ApplyResult:
         retry_failures = list(failures)
-        retry_result = ApplyResult(total_attempted=len(retry_failures))
+        retry_result = ApplyResult(
+            total_attempted=len(retry_failures),
+            sensitivity_downgrades=_merge_sensitivity_downgrades(
+                getattr(originating_result, "sensitivity_downgrades", ())
+            ),
+            no_restore_point=bool(
+                getattr(originating_result, "no_restore_point", False)
+            ),
+        )
         if not retry_failures:
             return retry_result
 
@@ -395,6 +449,15 @@ class SettingsApplyCoordinator:
                     )
                 )
                 continue
+
+            retry_result.sensitivity_downgrades = _merge_sensitivity_downgrades(
+                retry_result.sensitivity_downgrades,
+                getattr(result, "sensitivity_downgrades", ()),
+            )
+            retry_result.no_restore_point = (
+                retry_result.no_restore_point
+                or bool(getattr(result, "no_restore_point", False))
+            )
 
             outcome = getattr(result, "outcome", None)
             if outcome_is_success(outcome):

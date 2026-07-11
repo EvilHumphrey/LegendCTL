@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -292,6 +293,53 @@ class WearLedgerRotationTests(unittest.TestCase):
         self.assertGreaterEqual(len(rotated), 2)
         names = [p.stem for p in rotated]
         self.assertTrue(any("_1" in n or "_2" in n for n in names), names)
+
+    def test_concurrent_appends_preserve_every_line_across_rotation(self) -> None:
+        service = WearLedgerService(
+            base_dir=self.base,
+            utc_now=lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
+            rotation_bytes=768,
+        )
+        workers = 2
+        events_per_worker = 24
+        start = threading.Barrier(workers)
+        results = []
+
+        def _append_events(worker: int) -> None:
+            start.wait()
+            for index in range(events_per_worker):
+                result = service.append(
+                    SESSION_START,
+                    summary=f"worker-{worker}-event-{index}-" + "x" * 140,
+                )
+                results.append(result)
+
+        threads = [threading.Thread(target=_append_events, args=(worker,)) for worker in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "concurrent append worker deadlocked")
+
+        self.assertTrue(all(result is not None for result in results))
+
+        event_files = [self.base / ACTIVE_FILENAME] + sorted(
+            self.base.glob(f"{ROTATED_PREFIX}*{ROTATED_SUFFIX}")
+        )
+        lines = [
+            line
+            for path in event_files
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+        self.assertEqual(len(lines), workers * events_per_worker)
+        for line in lines:
+            self.assertIsInstance(json.loads(line), dict)
+
+        rotated = event_files[1:]
+        self.assertGreater(len(rotated), 0, "the test must rotate while workers append")
+        self.assertLess(len(rotated), workers * events_per_worker)
+        self.assertTrue(all(path.read_text(encoding="utf-8").strip() for path in rotated))
 
 
 class WearLedgerResilienceTests(unittest.TestCase):

@@ -140,6 +140,7 @@ class HomeScreenTests(unittest.TestCase):
         shell.device_service.state.summary_sources["active_profile"] = "protocol"
         shell.device_service.state.connection_state = "connected"
         shell.device_service.state.last_read_time = "now"
+        shell.device_service.summary_source_label_for.return_value = "Controller Protocol"
         shell.last_controller_snapshot = empty_snapshot()
 
         dpg.create_context()
@@ -149,7 +150,10 @@ class HomeScreenTests(unittest.TestCase):
                     pass
             home.build(shell, "content_region")
 
-            self.assertEqual(dpg.get_value("home_profile_active"), "Profile 3")
+            self.assertEqual(
+                dpg.get_value("home_profile_active"),
+                "Profile 3 - Controller Protocol",
+            )
             self.assertTrue(
                 any(
                     "doesn't expose a custom profile name" in value
@@ -225,13 +229,15 @@ class HomeScreenTests(unittest.TestCase):
             dpg.destroy_context()
 
     def test_home_connection_card_renders_firmware_and_battery_as_metrics(self) -> None:
-        # The compact device/profile status card still routes firmware and
-        # battery through metric() and shows the cached service values verbatim.
+        # The compact device/profile status card routes firmware and battery
+        # through metric(), and retained firmware includes its source.
         shell = make_shell(settings_service=MagicMock())
         shell.device_service.state.connection_state = "connected"
         shell.device_service.state.last_read_time = "2026-05-31T00:00:00"
+        shell.device_service.state.firmware_version = "1.24"
         shell.device_service.format_firmware_version.return_value = "1.24"
         shell.device_service.format_battery_level.return_value = "87%"
+        shell.device_service.summary_source_label_for.return_value = "Official App UI"
         shell.device_service.recent_events.return_value = []
 
         dpg.create_context()
@@ -241,11 +247,28 @@ class HomeScreenTests(unittest.TestCase):
                     pass
             home.build(shell, "content_region")
             values = _all_text_values()
-            self.assertIn("1.24", values)
+            self.assertIn("1.24 - Official App UI", values)
             self.assertIn("87%", values)
             # The metric label is rendered as its own (muted) text item, kept
             # separate from the value so each can carry its own color/tag.
             self.assertIn(t("home.connection.firmware"), values)
+        finally:
+            dpg.destroy_context()
+
+    def test_home_status_keeps_unknown_firmware_bare(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        shell.device_service.state.connection_state = "connected"
+        shell.device_service.format_firmware_version.return_value = "Unknown"
+        shell.device_service.summary_source_label_for.return_value = "Official App UI"
+
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            home.build(shell, "content_region")
+
+            self.assertEqual(dpg.get_value("home_status_firmware"), "Unknown")
         finally:
             dpg.destroy_context()
 
@@ -269,6 +292,7 @@ class HomeScreenTests(unittest.TestCase):
         shell.device_service.state.summary_sources["active_profile"] = "protocol"
         shell.device_service.format_firmware_version.return_value = "1.24"
         shell.device_service.format_battery_level.return_value = "Unknown"
+        shell.device_service.summary_source_label_for.return_value = "Controller Protocol"
         shell.device_service.recent_events.return_value = []
 
         dpg.create_context()
@@ -280,14 +304,56 @@ class HomeScreenTests(unittest.TestCase):
 
             self.assertEqual(
                 dpg.get_value("home_status_firmware"),
-                "1.24 (last read)",
+                "1.24 (last read) - Controller Protocol",
             )
             self.assertEqual(
                 dpg.get_value("home_profile_active"),
-                "Profile 3 (last read)",
+                "Profile 3 (last read) - Controller Protocol",
             )
         finally:
             dpg.destroy_context()
+
+    def test_home_retained_qualifiers_wait_for_this_connections_fresh_source(self) -> None:
+        # Audit26 HO-F3: after the same unit reconnects, a retained value stays
+        # explicitly "last read" until an actual new source arrives.
+        shell = make_shell(settings_service=MagicMock())
+        state = shell.device_service.state
+        state.firmware_version = "1.24"
+        state.active_onboard_profile = 3
+        state.summary_sources["firmware"] = "official_app_ui"
+        state.summary_sources["active_profile"] = "protocol"
+        shell.device_service.format_firmware_version.return_value = "1.24"
+        shell.device_service.summary_source_label_for.return_value = "Controller Protocol"
+
+        state.connection_state = "no_device"
+        self.assertEqual(
+            home._firmware_status_value(shell),
+            "1.24 (last read) - Controller Protocol",
+        )
+        self.assertEqual(
+            home._active_profile_status_value(shell),
+            "Profile 3 (last read) - Controller Protocol",
+        )
+
+        state.connection_state = "connected"  # same unit, no fresh read
+        shell.device_service.summary_field_refreshed_this_connection.return_value = False
+        self.assertEqual(
+            home._firmware_status_value(shell),
+            "1.24 (last read) - Controller Protocol",
+        )
+        self.assertEqual(
+            home._active_profile_status_value(shell),
+            "Profile 3 (last read) - Controller Protocol",
+        )
+
+        shell.device_service.summary_field_refreshed_this_connection.return_value = True
+        self.assertEqual(
+            home._firmware_status_value(shell), "1.24 - Controller Protocol"
+        )
+        self.assertEqual(
+            home._active_profile_status_value(shell),
+            "Profile 3 - Controller Protocol",
+        )
 
 
 class HomeLowerDashboardTests(unittest.TestCase):
@@ -968,6 +1034,95 @@ class HomeFormatHelperTests(unittest.TestCase):
     def test_format_last_read_unparseable_returned_as_is(self) -> None:
         # A non-ISO string is shown verbatim rather than hidden.
         self.assertEqual(home._format_last_read("just now"), "just now")
+
+
+class HomeTrustFrontDoorRowFitTests(unittest.TestCase):
+    """Rail/wide Home halves the trust card's width, so the four front-door
+    buttons no longer fit one row (the 4th clipped mid-label — visual review
+    2026-07-06, 02_home_maximized.png). Wide state must wrap to 2x2; windowed
+    keeps the single row so the pinned Home height budget is untouched."""
+
+    _LINKS_TAG = "home_trust_front_door_links"
+
+    def tearDown(self) -> None:
+        set_locale("en")
+
+    def _shell(self, *, wide: bool):
+        shell = make_shell(settings_service=MagicMock())
+        shell.device_service.recent_events.return_value = []
+        if wide:
+            # Same idiom as the diagnostics wide-grid test: overriding the
+            # bound getter makes right_rail see a 2560px viewport (>= the
+            # 1600 threshold, content width >= work+gap+rail).
+            shell._viewport_client_width = lambda: 2560
+        return shell
+
+    def _build(self, shell) -> None:
+        with dpg.window():
+            with dpg.child_window(tag="content_region"):
+                pass
+        home.build(shell, "content_region")
+
+    def _button_tags(self) -> list[str]:
+        return [
+            trust_front_door.button_tag("home_trust_front_door", link.target)
+            for link in trust_front_door.TRUST_FRONT_DOOR_LINKS
+        ]
+
+    def test_wide_state_wraps_to_two_rows_of_two_with_none_omitted(self) -> None:
+        shell = self._shell(wide=True)
+        dpg.create_context()
+        try:
+            self._build(shell)
+            # Wrapped structure: a vertical links group holding two horizontal
+            # rows of two buttons each.
+            self.assertTrue(dpg.does_item_exist(self._LINKS_TAG))
+            self.assertFalse(dpg.get_item_configuration(self._LINKS_TAG)["horizontal"])
+            for row_index, expected_links in enumerate(
+                (
+                    trust_front_door.TRUST_FRONT_DOOR_LINKS[:2],
+                    trust_front_door.TRUST_FRONT_DOOR_LINKS[2:],
+                )
+            ):
+                row_tag = f"{self._LINKS_TAG}_row_{row_index}"
+                self.assertTrue(dpg.does_item_exist(row_tag), f"missing {row_tag}")
+                self.assertTrue(dpg.get_item_configuration(row_tag)["horizontal"])
+                children = dpg.get_item_children(row_tag, 1) or []
+                self.assertEqual(
+                    [dpg.get_item_alias(child) for child in children],
+                    [
+                        trust_front_door.button_tag(
+                            "home_trust_front_door", link.target
+                        )
+                        for link in expected_links
+                    ],
+                )
+            # All four buttons render with their labels (nothing omitted).
+            for link, tag in zip(
+                trust_front_door.TRUST_FRONT_DOOR_LINKS, self._button_tags()
+            ):
+                self.assertTrue(dpg.does_item_exist(tag), f"missing {tag}")
+                self.assertEqual(
+                    dpg.get_item_configuration(tag)["label"], t(link.label_key)
+                )
+        finally:
+            dpg.destroy_context()
+
+    def test_windowed_state_keeps_the_single_row(self) -> None:
+        shell = self._shell(wide=False)
+        dpg.create_context()
+        try:
+            self._build(shell)
+            self.assertTrue(dpg.does_item_exist(self._LINKS_TAG))
+            self.assertTrue(dpg.get_item_configuration(self._LINKS_TAG)["horizontal"])
+            self.assertFalse(dpg.does_item_exist(f"{self._LINKS_TAG}_row_0"))
+            children = dpg.get_item_children(self._LINKS_TAG, 1) or []
+            self.assertEqual(
+                [dpg.get_item_alias(child) for child in children],
+                self._button_tags(),
+            )
+        finally:
+            dpg.destroy_context()
 
 
 if __name__ == "__main__":

@@ -375,6 +375,7 @@ class DiagnosticBundleService:
         # for falsy values, so the ``or "Unknown"`` fallback holds.
         product = self._sanitize_markdown(identity.get("product_string")) or "Unknown"
         firmware = self._sanitize_markdown(identity.get("firmware_version")) or "Unknown"
+        firmware_source = self._sanitize_markdown(identity.get("firmware_source"))
         connection = self._sanitize_markdown(identity.get("connection")) or "Unknown"
         slot = identity.get("active_slot")
         slot_label = (
@@ -382,6 +383,13 @@ class DiagnosticBundleService:
             if slot is not None
             else "Unknown"
         )
+        if firmware != "Unknown":
+            firmware_source_label = {
+                "official_app_ui": "Official App UI",
+                "protocol": "Controller Protocol",
+                "xinput": "XInput",
+            }.get(firmware_source, "Not verified")
+            firmware = f"{firmware} ({firmware_source_label})"
         lines = [
             HEADING_HARDWARE,
             f"- Controller product string: {product}",

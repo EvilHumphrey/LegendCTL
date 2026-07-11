@@ -19,6 +19,13 @@ _LOCALE_DIR = Path("zd_app/i18n/locales")
 _NOW = datetime(2026, 6, 30, 12, 0, tzinfo=timezone.utc)
 
 
+def _row(
+    result: trust_self_check.TrustSelfCheckResult,
+    key: str,
+) -> trust_self_check.TrustSelfCheckRow:
+    return next(row for row in result.rows if row.key == key)
+
+
 class TrustSelfCheckEvidenceTests(unittest.TestCase):
     def setUp(self) -> None:
         i18n._loaded.clear()
@@ -47,9 +54,180 @@ class TrustSelfCheckEvidenceTests(unittest.TestCase):
             "About screen browser handoff should be named separately.",
         )
         markdown = result.to_markdown()
-        self.assertIn("Static scan of zd_app found 0 imports", markdown)
+        self.assertIn("Static scan of zd_app + main_zd.py", markdown)
         self.assertIn("webbrowser.open", markdown)
         self.assertIn("not LegendCTL telemetry", markdown)
+
+    def test_unreadable_root_fails_closed_without_clean_claims(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = trust_self_check.build_trust_self_check(
+                package_root=Path(tmp) / "does-not-exist",
+                now=_NOW,
+            )
+
+        self.assertEqual(
+            result.scan_integrity,
+            trust_self_check.ScanIntegrity(
+                readable=False,
+                python_file_count=0,
+                parse_failures=(),
+                entry_module_scanned=False,
+            ),
+        )
+        self.assertEqual(
+            _row(result, "network").claim,
+            "Network scan did not run: no networking claim is made for this run.",
+        )
+        self.assertEqual(
+            _row(result, "drivers").claim,
+            "Driver/virtual-device scan did not run: no footprint claim is made for this run.",
+        )
+        rendered = result.to_text() + result.to_markdown()
+        self.assertIn("the package tree could not be read", rendered)
+        for clean_string in (
+            "No network: this build imports no networking modules.",
+            "No drivers / virtual devices: this shipped app footprint contains no driver or virtual-device package artifacts.",
+            "Static scan of zd_app + main_zd.py",
+            "0 driver/virtual-device artifacts across",
+        ):
+            with self.subTest(clean_string=clean_string):
+                self.assertNotIn(clean_string, rendered)
+
+    def test_empty_readable_root_fails_closed_as_no_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            package_root = Path(tmp) / "zd_app"
+            package_root.mkdir()
+            result = trust_self_check.build_trust_self_check(
+                package_root=package_root,
+                now=_NOW,
+            )
+
+        self.assertEqual(
+            result.scan_integrity,
+            trust_self_check.ScanIntegrity(
+                readable=True,
+                python_file_count=0,
+                parse_failures=(),
+                entry_module_scanned=False,
+            ),
+        )
+        self.assertIn(
+            "no scannable package files were found",
+            _row(result, "network").evidence,
+        )
+        self.assertEqual(
+            _row(result, "network").claim,
+            "Network scan did not run: no networking claim is made for this run.",
+        )
+        self.assertEqual(
+            _row(result, "drivers").claim,
+            "Driver/virtual-device scan did not run: no footprint claim is made for this run.",
+        )
+
+    def test_parse_failures_fail_closed_but_findings_win(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            package_root = Path(tmp) / "zd_app"
+            package_root.mkdir()
+            (package_root / "valid.py").write_text("import socket\n", encoding="utf-8")
+            (package_root / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+            result = trust_self_check.build_trust_self_check(
+                package_root=package_root,
+                now=_NOW,
+            )
+
+        self.assertEqual(result.scan_integrity.readable, True)
+        self.assertEqual(result.scan_integrity.python_file_count, 1)
+        self.assertEqual(result.scan_integrity.parse_failures, ("broken.py",))
+        self.assertEqual(
+            result.network_import_findings,
+            (
+                trust_self_check.StaticImportFinding(
+                    relative_path="valid.py",
+                    line=1,
+                    module="socket",
+                ),
+            ),
+        )
+        self.assertIn("valid.py:1 imports socket", _row(result, "network").evidence)
+        self.assertNotIn("scan did not run", _row(result, "network").claim)
+        self.assertIn(
+            "some package files could not be parsed",
+            _row(result, "drivers").evidence,
+        )
+        self.assertIn("broken.py", _row(result, "drivers").evidence)
+        self.assertEqual(
+            _row(result, "drivers").claim,
+            "Driver/virtual-device scan did not run: no footprint claim is made for this run.",
+        )
+
+    def test_normal_tree_clean_rows_use_parsed_python_count(self) -> None:
+        result = trust_self_check.build_trust_self_check(now=_NOW)
+
+        self.assertTrue(result.scan_integrity.readable)
+        self.assertGreater(result.scan_integrity.python_file_count, 0)
+        self.assertEqual(result.scan_integrity.parse_failures, ())
+        self.assertTrue(result.scan_integrity.entry_module_scanned)
+        self.assertEqual(
+            result.package_file_count,
+            result.scan_integrity.python_file_count,
+        )
+        self.assertIn(
+            f"({result.scan_integrity.python_file_count} Python files)",
+            _row(result, "network").evidence,
+        )
+        self.assertIn(
+            f"across {result.scan_integrity.python_file_count} package file(s)",
+            _row(result, "drivers").evidence,
+        )
+
+    def test_entry_module_is_scanned_when_present_and_optional_when_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            package_root = parent / "zd_app"
+            package_root.mkdir()
+            (package_root / "__init__.py").write_text("", encoding="utf-8")
+            (parent / "main_zd.py").write_text("import socket\n", encoding="utf-8")
+
+            included = trust_self_check.build_trust_self_check(
+                package_root=package_root,
+                now=_NOW,
+            )
+
+        self.assertIn(
+            trust_self_check.StaticImportFinding(
+                relative_path="main_zd.py",
+                line=1,
+                module="socket",
+            ),
+            included.network_import_findings,
+        )
+        self.assertEqual(included.scan_integrity.python_file_count, 2)
+        self.assertTrue(included.scan_integrity.entry_module_scanned)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            package_root = Path(tmp) / "zd_app"
+            package_root.mkdir()
+            (package_root / "__init__.py").write_text("", encoding="utf-8")
+            absent = trust_self_check.build_trust_self_check(
+                package_root=package_root,
+                now=_NOW,
+            )
+
+        self.assertTrue(absent.scan_integrity.readable)
+        self.assertEqual(absent.scan_integrity.python_file_count, 1)
+        self.assertEqual(absent.scan_integrity.parse_failures, ())
+        self.assertFalse(absent.scan_integrity.entry_module_scanned)
+        self.assertEqual(
+            _row(absent, "network").evidence,
+            "Static scan of zd_app (1 Python files) found 0 imports of "
+            "socket/http/urllib/requests/ssl. The entry module was not present "
+            "as a source file in this build and was not scanned. No webbrowser.open "
+            "handoff was found in zd_app.",
+        )
+        self.assertNotIn(
+            "main_zd.py",
+            _row(absent, "network").evidence,
+        )
 
     def test_path_output_uses_env_placeholders_without_raw_home_path(self) -> None:
         env = {
@@ -166,6 +344,7 @@ class TrustSelfCheckEvidenceTests(unittest.TestCase):
             package_root = Path(tmp) / "zd_app"
             package_root.mkdir()
             (package_root / "__init__.py").write_text("", encoding="utf-8")
+            (Path(tmp) / "main_zd.py").write_text("", encoding="utf-8")
             env = {
                 "APPDATA": r"C:\Users\Avery Stone\AppData\Roaming",
                 "USERPROFILE": r"C:\Users\Avery Stone",
@@ -195,6 +374,7 @@ class TrustSelfCheckEvidenceTests(unittest.TestCase):
                     now=_NOW,
                 )
 
+        self.assertTrue(result.scan_integrity.entry_module_scanned)
         expected = r"""# Trust Self-Check
 
 Copyable evidence for this run. Observed for THIS process THIS session - not a system-wide audit.
@@ -207,9 +387,9 @@ Copyable evidence for this run. Observed for THIS process THIS session - not a s
 
 | Claim | Evidence | Boundary |
 | --- | --- | --- |
-| No network: this build imports no networking modules. | Static scan of zd_app found 0 imports of socket/http/urllib/requests/ssl. No webbrowser.open handoff was found in zd_app. | Observed for THIS process THIS session - not a system-wide audit. |
-| No drivers / virtual devices: this shipped app footprint contains no driver or virtual-device package artifacts. | Static scan of zd_app found 0 driver/virtual-device artifacts across 1 package file\(s\). | Observed for THIS process THIS session - not a system-wide audit. This is an app-footprint check, not a whole-PC or game-compatibility clearance. |
-| No background service / autostart: this app does not install a resident component; closing the window stops this process. | This session is running as source run \(not frozen\); process id 4242; executable path \(scrubbed\): %USERPROFILE%\\LegendCTL\\python.exe. | Observed for THIS process THIS session - not a system-wide audit. |
+| No network: this build imports no networking modules. | Static scan of zd_app + main_zd.py \(2 Python files\) found 0 imports of socket/http/urllib/requests/ssl. No webbrowser.open handoff was found in zd_app. | Observed for THIS process THIS session - not a system-wide audit. |
+| No drivers / virtual devices: this shipped app footprint contains no driver or virtual-device package artifacts. | Static scan of zd_app found 0 driver/virtual-device artifacts across 2 package file\(s\). | Observed for THIS process THIS session - not a system-wide audit. This is an app-footprint check, not a whole-PC or game-compatibility clearance. |
+| No background service / autostart: this app installs no service and registers nothing to start with Windows; closing the window stops this process. | Design property of this build - the app ships no service or autostart installer \(see the import/packaging gates\). This session: source run \(not frozen\); process id 4242; executable path \(scrubbed\): %USERPROFILE%\\LegendCTL\\python.exe. Windows services, scheduled tasks, and Run keys are not inspected. | Observed for THIS process THIS session - not a system-wide audit. |
 | Local data location + scrub posture: app data stays local and displayed paths are scrubbed to placeholders. | Default data directory \(scrubbed\): %APPDATA%\\ZDUltimateLegend. Copy/export text uses path scrubbing and Markdown escaping before it is shareable. | Observed for THIS process THIS session - not a system-wide audit. |
 | Build identity: report what this process can observe. | Version 2.3.1; build commit abc123; build date 2026-07-01; run mode source run \(not frozen\). | Observed for THIS process THIS session - not a system-wide audit. |
 """
@@ -220,6 +400,7 @@ Copyable evidence for this run. Observed for THIS process THIS session - not a s
             package_root = Path(tmp) / "zd_app"
             package_root.mkdir()
             (package_root / "__init__.py").write_text("", encoding="utf-8")
+            (Path(tmp) / "main_zd.py").write_text("", encoding="utf-8")
             env = {
                 "APPDATA": r"C:\Users\Avery Stone\AppData\Roaming",
                 "USERPROFILE": r"C:\Users\Avery Stone",
@@ -249,6 +430,7 @@ Copyable evidence for this run. Observed for THIS process THIS session - not a s
                     now=_NOW,
                 )
 
+        self.assertTrue(result.scan_integrity.entry_module_scanned)
         expected = r"""Trust Self-Check
 Copyable evidence for this run. Observed for THIS process THIS session - not a system-wide audit.
 
@@ -259,15 +441,15 @@ Build date: 2026-07-01
 Run mode: source run (not frozen)
 
 No network: this build imports no networking modules.
-  Static scan of zd_app found 0 imports of socket/http/urllib/requests/ssl. No webbrowser.open handoff was found in zd_app.
+  Static scan of zd_app + main_zd.py (2 Python files) found 0 imports of socket/http/urllib/requests/ssl. No webbrowser.open handoff was found in zd_app.
   Observed for THIS process THIS session - not a system-wide audit.
 
 No drivers / virtual devices: this shipped app footprint contains no driver or virtual-device package artifacts.
-  Static scan of zd_app found 0 driver/virtual-device artifacts across 1 package file(s).
+  Static scan of zd_app found 0 driver/virtual-device artifacts across 2 package file(s).
   Observed for THIS process THIS session - not a system-wide audit. This is an app-footprint check, not a whole-PC or game-compatibility clearance.
 
-No background service / autostart: this app does not install a resident component; closing the window stops this process.
-  This session is running as source run (not frozen); process id 4242; executable path (scrubbed): %USERPROFILE%\LegendCTL\python.exe.
+No background service / autostart: this app installs no service and registers nothing to start with Windows; closing the window stops this process.
+  Design property of this build - the app ships no service or autostart installer (see the import/packaging gates). This session: source run (not frozen); process id 4242; executable path (scrubbed): %USERPROFILE%\LegendCTL\python.exe. Windows services, scheduled tasks, and Run keys are not inspected.
   Observed for THIS process THIS session - not a system-wide audit.
 
 Local data location + scrub posture: app data stays local and displayed paths are scrubbed to placeholders.

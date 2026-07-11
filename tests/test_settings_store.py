@@ -16,6 +16,19 @@ _DEEP_JSON = "[" * 20000 + "]" * 20000
 
 
 class AppSettingsModelTests(unittest.TestCase):
+    def test_from_dict_preserves_future_supported_locale(self) -> None:
+        # The locale stays dark in this lane, but once i18n ships ko it must
+        # survive a settings.json load rather than reverting on restart.
+        payload = AppSettings(language="ko").to_dict()
+
+        with mock.patch("zd_app.models.i18n.SUPPORTED_LOCALES", ("en", "zh-CN", "ko")):
+            settings = AppSettings.from_dict(payload)
+
+        self.assertEqual(settings.language, "ko")
+
+    def test_from_dict_unknown_language_falls_back_to_default(self) -> None:
+        self.assertEqual(AppSettings.from_dict({"language": "not-a-locale"}).language, "en")
+
     def test_developer_panels_visible_default_false(self) -> None:
         settings = AppSettings()
         self.assertFalse(settings.developer_panels_visible)

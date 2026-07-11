@@ -860,6 +860,13 @@ def _build_result(shell, service, state: RestorePointsScreenState) -> None:
             wrap=900,
         )
 
+    if result.sensitivity_downgrades:
+        dpg.add_text(
+            t("apply.result.sens_8point_downgraded"),
+            color=shell.COLORS["warn"],
+            wrap=900,
+        )
+
     if result.fields:
         # Each field contributes one main row, plus an optional indented
         # "expected:/observed:" line on mismatch when both values are known.
@@ -1071,6 +1078,14 @@ def _execute_restore(shell) -> None:
         shell.rebuild_current_screen()
         return
 
+    consent_guard = getattr(shell, "_consent_pending_write_allowed_or_refuse", None)
+    if callable(consent_guard) and not consent_guard():
+        state.view = VIEW_CONFIRM
+        state.status_text = t("first_run.pending_write_blocked")
+        state.status_kind = "warn"
+        shell.rebuild_current_screen()
+        return
+
     rp_id = state.selected_rp_id
 
     def job():
@@ -1240,6 +1255,7 @@ def _on_save_result_to_diagnostics(shell) -> None:
         "mismatched": state.result.mismatched,
         "before_restore_point_id": state.result.before_restore_point_id,
         "completed_at": state.result.completed_at,
+        "sensitivity_downgrades": list(state.result.sensitivity_downgrades),
         "fields": [
             {
                 "field_name": outcome.field_name,

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import dearpygui.dearpygui as dpg
 
-from zd_app.i18n import t
+from zd_app.i18n import DEFAULT_LOCALE, SUPPORTED_LOCALES, t
 from zd_app.storage.settings_store import _default_user_data_dir
 from zd_app.ui.components import card
 from zd_app.ui.fonts import font_for
@@ -84,15 +84,14 @@ def _resolved(path: Path) -> Path:
 
 def build(shell, parent: str) -> None:
     settings = shell.settings
-    language_items = [t("language.en"), t("language.zh-CN")]
+    language_items = [t(f"language.{locale}") for locale in SUPPORTED_LOCALES]
     language_code_by_label = {
-        t("language.en"): "en",
-        t("language.zh-CN"): "zh-CN",
+        t(f"language.{locale}"): locale for locale in SUPPORTED_LOCALES
     }
     language_default = (
         t(f"language.{settings.language}")
-        if settings.language in {"en", "zh-CN"}
-        else t("language.en")
+        if settings.language in SUPPORTED_LOCALES
+        else t(f"language.{DEFAULT_LOCALE}")
     )
     verbosity_labels = [t(LOGGING_VERBOSITY_KEY_FOR[v]) for v in LOGGING_VERBOSITY_VALUES]
     verbosity_value_by_label = {

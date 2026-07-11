@@ -288,9 +288,18 @@ class ModulePassportService:
 
         existing = self.get(side)
         replaced_module_id: Optional[str] = None
+        archive_path: Optional[Path] = None
         if existing is not None:
             replaced_module_id = existing.module_id
-            self._archive_existing(existing)
+            archive_path = self._archive_existing(existing)
+            if archive_path is None:
+                logger.warning(
+                    "ModulePassportService.assign: archive failed; preserving active "
+                    "passport (side=%s, target=%r)",
+                    side,
+                    str(self.path_for(side)),
+                )
+                return None
 
         passport = ModulePassport(
             side=side,
@@ -301,6 +310,19 @@ class ModulePassportService:
             schema_version=SCHEMA_VERSION,
         )
         if not self._persist(passport):
+            if archive_path is not None:
+                # Best-effort compensation, not a transaction: a process crash
+                # after archive publication and before this unlink can still
+                # leave one bounded, cosmetic phantom archive entry.
+                try:
+                    archive_path.unlink()
+                except OSError:
+                    logger.warning(
+                        "ModulePassportService.assign: could not remove uncommitted "
+                        "archive after replacement failure (path=%r)",
+                        str(archive_path),
+                        exc_info=True,
+                    )
             return None
         self._emit_event(
             MODULE_ASSIGNED,
@@ -505,7 +527,9 @@ class ModulePassportService:
                 pass
             return False
 
-    def _archive_existing(self, passport: ModulePassport) -> None:
+    def _archive_existing(self, passport: ModulePassport) -> Optional[Path]:
+        """Atomically archive ``passport`` and return its published path."""
+
         # Defense-in-depth: ``side`` and ``module_id`` both flow into the archive
         # filename. ``module_id`` is sanitised by ``_archive_safe_module_id``;
         # validate ``side`` here too (the load boundary already rejects a bad
@@ -518,7 +542,7 @@ class ModulePassportService:
                 "ModulePassportService: failed to create archive dir %r",
                 str(self.archive_dir),
             )
-            return
+            return None
         stamp = _archive_stamp(self._utc_now)
         safe_id = _archive_safe_module_id(passport.module_id)
         target = self.archive_dir / (
@@ -539,7 +563,8 @@ class ModulePassportService:
                 "ModulePassportService: refusing archive write outside archive dir (target=%r)",
                 str(target),
             )
-            return
+            return None
+        temp_path = target.with_suffix(target.suffix + TEMP_SUFFIX)
         try:
             payload = json.dumps(
                 passport.to_dict(),
@@ -547,13 +572,34 @@ class ModulePassportService:
                 ensure_ascii=False,
                 sort_keys=True,
             )
-            target.write_text(payload, encoding="utf-8")
-        except OSError:
+            # Write, flush, and fsync a same-directory temp file before the
+            # atomic replacement so a failed archive never exposes a partial
+            # history record or permits the active passport to be overwritten.
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                try:
+                    os.fsync(handle.fileno())
+                except OSError:
+                    logger.debug(
+                        "ModulePassportService: fsync unavailable for %s",
+                        temp_path,
+                        exc_info=True,
+                    )
+            os.replace(temp_path, target)
+            return target
+        except (OSError, ValueError, TypeError):
             logger.exception(
                 "ModulePassportService: failed to archive passport (side=%s, target=%r)",
                 passport.side,
                 str(target),
             )
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
+            return None
 
     def _emit_event(
         self,

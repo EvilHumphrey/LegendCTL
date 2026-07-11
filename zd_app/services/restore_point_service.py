@@ -41,6 +41,7 @@ from zd_app.services.restore_field_formatting import format_field_value
 from zd_app.services.settings_apply_coordinator import (
     ApplyResult,
     SettingsApplyCoordinator,
+    snapshot_as_sent,
 )
 from zd_app.services.wear_ledger import WearLedgerService
 from zd_app.services.wear_ledger.models import RP_CAPTURE, RP_DELETE, RP_RESTORE
@@ -128,10 +129,11 @@ _COLLECTION_FIELD_NAMES: frozenset[str] = frozenset(
 #     ``total_supported_count`` stays stable for every device.
 #   * Restore mirrors :class:`SettingsApplyCoordinator`: when the capture
 #     recorded an 8-point curve for a stick whose host sensitivity is
-#     restore-eligible, the rider REPLACES the host in the attempted/verify set
-#     (the coordinator writes 0x86 for that stick, so the 0x86 read-back is what
-#     we compare). The host's 3-point value still travels in the filtered
-#     snapshot as the coordinator's per-stick fallback.
+#     restore-eligible, the rider initially REPLACES the host in the attempted
+#     set. After the coordinator returns, a recorded downgrade converts that
+#     attempted field back to the 3-point host, matching the path actually
+#     written. The host's 3-point value always travels in the filtered snapshot
+#     as the coordinator's per-stick fallback.
 # Capability gating is implicit and safe: a stick only carries a non-None rider
 # value on a device that passed the cat-0x86 probe at capture time, so the rider
 # loop is a no-op on legacy hardware.
@@ -701,10 +703,17 @@ class RestorePointService:
         # 4. Read controller back via fresh reads.
         readback, _, read_errors = self._do_fresh_read()
 
-        # 5. Build per-field outcomes.
+        # 5. Build per-field outcomes. An unconfirmed capability may have
+        # substituted a 3-point host write for an 8-point rider, so compare the
+        # snapshot and field names the coordinator actually sent, not the
+        # captured intent.
+        verified_snapshot = snapshot_as_sent(filtered, apply_result)
+        verified_fields = _attempted_fields_as_sent(
+            attempted_fields, verified_snapshot
+        )
         field_outcomes = _build_field_outcomes(
-            attempted_fields,
-            target_rp.snapshot,
+            verified_fields,
+            verified_snapshot,
             readback,
             apply_result,
             read_errors,
@@ -734,6 +743,7 @@ class RestorePointService:
             fields=tuple(field_outcomes),
             before_restore_point_id=before_id,
             completed_at=completed_at,
+            sensitivity_downgrades=apply_result.sensitivity_downgrades,
         )
 
         # 6. Persist RestoreAttemptRecord onto the restore point.
@@ -995,13 +1005,15 @@ def _filter_snapshot_for_restore(
         attempted.append(name)
 
     # 8-point sensitivity riders (see _SENSITIVITY_8POINT_RIDERS). A rider is
-    # carried + verified only when its 3-point host is already restore-eligible
+    # carried and initially verified only when its 3-point host is restore-eligible
     # (writable, captured, not excluded — i.e. present in ``attempted``) AND the
     # capture actually recorded an 8-point curve for that stick. When it applies,
     # the rider REPLACES the host in ``attempted`` so the verify pass compares
-    # the 0x86 read-back the coordinator wrote; the host's 3-point value already
-    # sits in ``kwargs`` as the coordinator's per-stick fallback. Honoring the
-    # rider name in ``excluded`` lets a caller force the 3-point path for a stick.
+    # the 0x86 read-back the coordinator normally writes; a later recorded
+    # downgrade converts the verification target back to the host. The host's
+    # 3-point value already sits in ``kwargs`` as the coordinator's per-stick
+    # fallback. Honoring the rider name in ``excluded`` lets a caller force the
+    # 3-point path for a stick.
     for rider_name, host_name in _SENSITIVITY_8POINT_RIDERS:
         if rider_name in excluded:
             continue
@@ -1015,6 +1027,20 @@ def _filter_snapshot_for_restore(
 
     filtered = ControllerSnapshot(**kwargs)  # type: ignore[arg-type]
     return filtered, attempted
+
+
+def _attempted_fields_as_sent(
+    attempted_fields: list[str],
+    sent_snapshot: ControllerSnapshot,
+) -> list[str]:
+    """Replace downgraded rider names with their 3-point hosts for verify."""
+
+    hosts_by_rider = {
+        rider_name: host_name
+        for rider_name, host_name in _SENSITIVITY_8POINT_RIDERS
+        if getattr(sent_snapshot, rider_name) is None
+    }
+    return [hosts_by_rider.get(name, name) for name in attempted_fields]
 
 
 def verify_applied_snapshot(

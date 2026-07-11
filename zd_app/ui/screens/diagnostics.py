@@ -14,6 +14,11 @@ from zd_app.services.diagnostics_service import _redact_instance_id
 from zd_app.services.share_card import build_share_card
 from zd_app.services.model_fingerprint import fingerprint_display_rows
 from zd_app.services.path_scrub import scrub_paths
+from zd_app.services.trust_matrix import (
+    TrustMatrixSignals,
+    build_trust_matrix,
+    row_label,
+)
 from zd_app.services.trust_self_check import build_trust_self_check
 from zd_app.ui import right_rail, support_reference, trust_front_door, trust_labels
 from zd_app.ui.screens import about, preferences
@@ -54,9 +59,43 @@ TRUST_SELF_CHECK_STATUS_TAG = "diagnostics_trust_self_check_status"
 TRUST_SELF_CHECK_MODEL_FINGERPRINT_TAG = "diagnostics_trust_self_check_model_fingerprint"
 _TRUST_SELF_CHECK_WRAP = 840
 
+TRUST_MATRIX_CARD_TAG = "diagnostics_trust_matrix_card"
+TRUST_MATRIX_INTRO_TAG = "diagnostics_trust_matrix_intro"
+_TRUST_MATRIX_WRAP = 840
+
+
+def _trust_matrix_label_tag(index: int) -> str:
+    return f"diagnostics_trust_matrix_label_{index}"
+
+
+def _trust_matrix_claim_tag(index: int) -> str:
+    return f"diagnostics_trust_matrix_claim_{index}"
+
+
+def _trust_matrix_why_tag(index: int) -> str:
+    return f"diagnostics_trust_matrix_why_{index}"
+
+
+def _trust_matrix_qualifier_tag(index: int) -> str:
+    return f"diagnostics_trust_matrix_qualifier_{index}"
+
+
 _CONNECTION_DETAILS_CARD_WIDTH = 500
 _CONNECTION_DETAILS_WRAP = 470
 _STATUS_TRUST_STRIP_HEIGHT = 66
+
+# Rail-safe wrap for full-width prose OUTSIDE the Guidance cards (the stale
+# banner, the event log, and the Developer tab's debug/evidence paragraphs).
+# These blocks carried fixed wraps of 1040-1200, tuned for the WINDOWED
+# content region (~1230px at the 1480 reference) — but the rail/wide layout
+# fixes the work column at 1040px (~1000px inner), so the long paragraphs
+# clipped at the right edge (2026-07-06 visual review, 57_diagnostics_
+# developer_maximized.png). 840 is the codebase's established full-width
+# measure (What-To-Trust / Self-Check / matrix / compat / share cards all
+# wrap at 840 and read clean in BOTH layouts per the same review): it fits
+# the rail work column with margin AND the ~875px content region at the 1180
+# minimum window (see the _TRUST_BODY_WRAP rationale above).
+_FULL_WIDTH_PROSE_WRAP = 840
 
 COMPAT_REPORT_CARD_TAG = "diagnostics_compat_report_card"
 COMPAT_REPORT_VARIANT_TAG = "diagnostics_compat_report_variant"
@@ -81,6 +120,46 @@ _TRUST_FRONT_DOOR_FOCUS_TARGETS = {
     # The public target name intentionally points to the actionable evidence
     # card controls, not a same-named internal tag.
     "evidence_card": SHARE_CARD_COPY_TAG,
+    "trust_matrix": TRUST_MATRIX_CARD_TAG,
+}
+
+# Front-door anchoring does NOT hardcode a scroll container: the 2026-07-06
+# hardware re-smoke falsified the "diagnostics_root is the scroll surface"
+# assumption (its y_scroll_max reads ~0 while an INNER container really
+# scrolls — the work column in the rail layout). The anchor instead walks the
+# target's ancestor chain at anchor time and scrolls the NEAREST child_window
+# whose y_scroll_max > 0, which self-corrects across the windowed
+# (card -> tab -> tab_bar -> diagnostics_root -> content_region) and rail
+# (card -> tab -> tab_bar -> diagnostics_work_column -> group ->
+# diagnostics_root -> content_region) chains and any future reshuffle.
+_TRUST_FRONT_DOOR_CHILD_WINDOW_TYPE = "mvAppItemType::mvChildWindow"
+# Hard cap on the ancestor walk so a cyclic/mocked parent chain can't spin.
+_TRUST_FRONT_DOOR_ANCESTOR_WALK_LIMIT = 50
+# Layout may need rendered frames before any ancestor reports a scroll range;
+# the anchor re-queues itself through the shell's deferred-UI seam (one drain
+# pass — one rendered frame — apart) up to this many attempts, then gives up
+# silently after a last-resort proportional scroll. REVISION-6 sizing: the
+# rail/wide autosize chain publishes its scroll range only on the 4th-5th
+# rendered frame after a rebuild (probe-measured at 1920x1040 and 2576x1408),
+# so the old cap of 5 had ZERO headroom — one extra frame of latency on real
+# hardware exhausted the budget and the maximized front-door click landed at
+# the top (2026-07-06 round-2 verify, P3). Probe: cap 4 -> final scroll 0.0
+# (the exact failure), cap 5 -> lands with no margin, cap 30 -> lands. 30
+# attempts is ~0.5s at 60fps — still bounded, still a silent give-up, and
+# every attempt stays existence-guarded so navigating away mid-wait is safe.
+_TRUST_FRONT_DOOR_ANCHOR_MAX_ATTEMPTS = 30
+# Small headroom so the anchored card's border isn't flush with the clip edge.
+_TRUST_FRONT_DOOR_SCROLL_MARGIN = 8.0
+# Rect-free LAST RESORT (final attempt only): approximate scroll position per
+# target, as a fraction of the container's max y-scroll, from each card's
+# position in the Guidance stack (What-To-Trust -> Self-Check -> matrix ->
+# compat -> share -> event log). Scrolling near the card beats landing at the
+# top of the tab (the hardware-smoke bug).
+_TRUST_FRONT_DOOR_FALLBACK_SCROLL_FRACTIONS = {
+    "self_check": 0.10,
+    "trust_matrix": 0.35,
+    "compat_report": 0.60,
+    "evidence_card": 0.80,
 }
 
 # Tab identifiers for the Diagnostics screen (mirrors CONTROLLER_TAB_IDS in
@@ -111,7 +190,7 @@ def build(shell, parent: str) -> None:
         if state.data_freshness == "stale":
             with dpg.child_window(height=92, border=True):
                 dpg.add_text(t("diagnostics.stale_warning.headline"), color=shell.COLORS["warn"])
-                dpg.add_text(t("diagnostics.stale_warning.helper"), wrap=1040, color=shell.COLORS["muted"])
+                dpg.add_text(t("diagnostics.stale_warning.helper"), wrap=_FULL_WIDTH_PROSE_WRAP, color=shell.COLORS["muted"])
             dpg.add_spacer(height=10)
 
         # Tabs keep each view inside the default 1480x920 window instead of one
@@ -305,6 +384,8 @@ def _build_guidance_tab(shell) -> None:
     dpg.add_spacer(height=10)
     _build_trust_self_check_card(shell)
     dpg.add_spacer(height=10)
+    _build_trust_matrix_card(shell)
+    dpg.add_spacer(height=10)
     _build_compatibility_report_card(shell)
     dpg.add_spacer(height=10)
     _build_share_card_card(shell)
@@ -319,7 +400,7 @@ def _build_guidance_tab(shell) -> None:
         dpg.add_text(
             tag="diag_event_log",
             default_value=t("diagnostics.event_log.empty"),
-            wrap=1200,
+            wrap=_FULL_WIDTH_PROSE_WRAP,
         )
 
 
@@ -461,12 +542,203 @@ def _consume_trust_front_door_focus(shell) -> None:
     setattr(shell, trust_front_door.TRUST_FRONT_DOOR_FOCUS_ATTR, None)
 
     tag = _TRUST_FRONT_DOOR_FOCUS_TARGETS.get(str(target))
-    if not tag or not dpg.does_item_exist(tag) or not hasattr(dpg, "focus_item"):
+    if not tag or not dpg.does_item_exist(tag):
+        return
+
+    _queue_trust_front_door_anchor(shell, str(target), tag, attempt=1)
+
+
+def _queue_trust_front_door_anchor(shell, target: str, tag: str, *, attempt: int) -> None:
+    """Queue one anchor attempt through the shell's deferred-UI seam.
+
+    The consume runs in the same pass build() just populated, before a frame
+    has rendered — no ancestor reports a scroll range yet. Routed through
+    ``shell._defer_ui_call`` (the building block of the modal-swap idiom):
+    armed, the attempt runs a drain pass later, after a rendered frame laid
+    the items out; unarmed (tests, headless), it runs inline, preserving the
+    synchronous contract those paths rely on. Failed attempts re-queue
+    themselves (another frame apart when armed) up to
+    ``_TRUST_FRONT_DOOR_ANCHOR_MAX_ATTEMPTS``.
+    """
+
+    def anchor() -> None:
+        _run_trust_front_door_anchor(shell, target, tag, attempt=attempt)
+
+    defer = getattr(shell, "_defer_ui_call", None)
+    if callable(defer):
+        defer(anchor)
+    else:
+        anchor()
+
+
+def _run_trust_front_door_anchor(shell, target: str, tag: str, *, attempt: int) -> None:
+    """One scroll-into-view attempt; re-queues itself until the layout is real.
+
+    The explicit y-scroll is the WHOLE anchoring mechanism for card targets:
+    ``dpg.focus_item`` only scrolls keyboard-focusable CONTROLS (the original
+    landed-at-top bug), and on a child_window it issues its OWN ensure-visible
+    scroll AFTER ours — the REVISION-5 probe measured focus driving the
+    windowed root to 1155 where the correct anchor is 987, the ~130-170px
+    overscroll the hardware verify caught. Focus therefore fires once, only
+    for non-child_window targets (the evidence_card button), on the attempt
+    that scrolled or on the final attempt regardless. Every step is
+    existence-guarded and exception-contained — anchoring must never break
+    navigation, and on give-up it fails SILENTLY (debug log only).
+    """
+
+    if not dpg.does_item_exist(tag):
+        return
+    final = attempt >= _TRUST_FRONT_DOOR_ANCHOR_MAX_ATTEMPTS
+    scrolled = False
+    try:
+        scrolled = _scroll_trust_front_door_target_to_top(target, tag, final_attempt=final)
+    except Exception:  # pragma: no cover - scroll is best-effort UI anchoring.
+        logger.debug("Diagnostics trust-front-door scroll skipped", exc_info=True)
+    if not scrolled and not final:
+        _queue_trust_front_door_anchor(shell, target, tag, attempt=attempt + 1)
+        return
+    _focus_trust_front_door_target(tag)
+
+
+def _focus_trust_front_door_target(tag: str) -> None:
+    """Best-effort keyboard focus — actionable CONTROLS only, never cards."""
+
+    if not dpg.does_item_exist(tag) or not hasattr(dpg, "focus_item"):
         return
     try:
+        if dpg.get_item_type(tag) == _TRUST_FRONT_DOOR_CHILD_WINDOW_TYPE:
+            return
         dpg.focus_item(tag)
     except Exception:  # pragma: no cover - focus is best-effort UI anchoring.
         logger.debug("Diagnostics trust-front-door focus skipped", exc_info=True)
+
+
+def _scroll_trust_front_door_target_to_top(
+    target: str, tag: str, *, final_attempt: bool
+) -> bool:
+    """Scroll the nearest scrollable ancestor so ``tag`` sits at the view top.
+
+    Returns True when a scroll was issued. The container is DISCOVERED, not
+    hardcoded: the 2026-07-06 hardware re-smoke falsified the fixed
+    ``diagnostics_root`` assumption (its y_scroll_max reads ~0 while an inner
+    child_window — the rail layout's work column — really scrolls). On the
+    final attempt only, degraded inputs fall back to a proportional position
+    on the best ancestor found rather than doing nothing.
+    """
+
+    container, nearest_child_window = _find_scrollable_ancestor(tag)
+    if container is None:
+        if not final_attempt or nearest_child_window is None:
+            return False
+        # Last resort: no ancestor advertises a scroll range even on the
+        # final attempt — proportionally position the nearest child_window
+        # (a 0 range makes this a no-op, which is then a genuine "fits").
+        return _proportional_scroll(target, nearest_child_window)
+    max_scroll = float(dpg.get_y_scroll_max(container))
+    offset = _pos_derived_scroll_offset(tag, container)
+    if offset is None:
+        if not final_attempt:
+            return False  # layout not real yet; caller re-queues for a later frame
+        return _proportional_scroll(target, container)
+    dpg.set_y_scroll(
+        container,
+        min(max(0.0, offset - _TRUST_FRONT_DOOR_SCROLL_MARGIN), max_scroll),
+    )
+    return True
+
+
+def _proportional_scroll(target: str, container) -> bool:
+    """Final-attempt fallback: scroll ``container`` to the target's stack fraction."""
+
+    try:
+        max_scroll = float(dpg.get_y_scroll_max(container))
+    except Exception:
+        return False
+    if max_scroll <= 0.0:
+        return False
+    fraction = _TRUST_FRONT_DOOR_FALLBACK_SCROLL_FRACTIONS.get(target, 0.0)
+    if fraction <= 0.0:
+        return False
+    dpg.set_y_scroll(container, min(max_scroll * fraction, max_scroll))
+    return True
+
+
+def _find_scrollable_ancestor(tag: str):
+    """Walk up from ``tag``: (nearest scrollable child_window, nearest child_window).
+
+    The first element is the anchor's scroll surface — the nearest ancestor
+    child_window whose ``get_y_scroll_max() > 0`` — or None when nothing in
+    the chain scrolls yet. The second is the nearest child_window ancestor
+    regardless of scroll range, kept as the final attempt's last-resort
+    container. Bounded, and every DPG query is exception-contained, so a
+    mocked/cyclic parent chain degrades to (None, ...) instead of raising.
+    """
+
+    item = tag
+    nearest_child_window = None
+    for _ in range(_TRUST_FRONT_DOOR_ANCESTOR_WALK_LIMIT):
+        try:
+            parent = dpg.get_item_parent(item)
+        except Exception:
+            return None, nearest_child_window
+        if not parent or parent == item:
+            return None, nearest_child_window
+        try:
+            is_child_window = (
+                dpg.get_item_type(parent) == _TRUST_FRONT_DOOR_CHILD_WINDOW_TYPE
+            )
+        except Exception:
+            is_child_window = False
+        if is_child_window:
+            if nearest_child_window is None:
+                nearest_child_window = parent
+            try:
+                if float(dpg.get_y_scroll_max(parent)) > 0.0:
+                    return parent, nearest_child_window
+            except Exception:
+                pass
+        item = parent
+    return None, nearest_child_window
+
+
+def _pos_derived_scroll_offset(tag: str, container) -> float | None:
+    """Content-space y of ``tag`` inside ``container``, or None if unmeasured.
+
+    Built on ``get_item_pos``, NOT ``get_item_rect_min``: the REVISION-5
+    real-DPG probe showed child_window items expose NO rect_min in their item
+    state (keys: pos / rect_size / scroll_* ...), so any rect-based math
+    silently raised for card targets and never ran. ``get_item_pos`` is the
+    reliable primitive — an item's layout position relative to its CONTAINING
+    WINDOW (child windows count as windows), scroll-independent. The target's
+    content-space offset inside the scrolled surface is therefore its own pos
+    plus the pos of every child_window ancestor strictly between it and
+    ``container`` (each hop re-bases into the next window out). A
+    non-positive total means layout hasn't produced real positions yet (every
+    Guidance card sits well below its window top) — return None so the
+    caller re-queues for a later frame.
+    """
+
+    try:
+        offset = float(dpg.get_item_pos(tag)[1])
+    except Exception:
+        return None
+    item = tag
+    for _ in range(_TRUST_FRONT_DOOR_ANCESTOR_WALK_LIMIT):
+        try:
+            parent = dpg.get_item_parent(item)
+        except Exception:
+            return None
+        if not parent or parent == item:
+            return None  # container never reached; treat as unmeasured
+        if parent == container:
+            return offset if offset > 0.0 else None
+        try:
+            if dpg.get_item_type(parent) == _TRUST_FRONT_DOOR_CHILD_WINDOW_TYPE:
+                offset += float(dpg.get_item_pos(parent)[1])
+        except Exception:
+            return None
+        item = parent
+    return None
 
 
 def _copy_trust_self_check(shell) -> None:
@@ -474,6 +746,186 @@ def _copy_trust_self_check(shell) -> None:
     dpg.set_clipboard_text(result.to_markdown())
     if dpg.does_item_exist(TRUST_SELF_CHECK_STATUS_TAG):
         dpg.set_value(TRUST_SELF_CHECK_STATUS_TAG, t("trust_self_check.copy_success"))
+
+
+def _provenance_color(shell, provenance: str):
+    return {
+        "verified": shell.COLORS["good"],
+        "inferred": shell.COLORS["warn"],
+        "unknown": shell.COLORS["muted"],
+    }.get(provenance, shell.COLORS["muted"])
+
+
+def _trust_matrix_signals(shell) -> TrustMatrixSignals:
+    """Gather the existing state signals the provenance rows derive from.
+
+    Kept in the UI layer (not the pure service) because it reaches into
+    shell/device-state; the derivation itself stays DPG-free in
+    ``services.trust_matrix``. Every read is getattr-guarded so a partially
+    built or mocked shell degrades to the honest ``unknown`` end.
+    """
+
+    device_service = getattr(shell, "device_service", None)
+    state = getattr(device_service, "state", None)
+    connection_state = getattr(state, "connection_state", "no_device")
+    data_freshness = getattr(state, "data_freshness", "never_read")
+
+    firmware = str(getattr(state, "firmware_version", "") or "").strip()
+    firmware_known = bool(firmware and firmware != "Unknown")
+
+    sources = getattr(state, "summary_sources", None) or {}
+    active_profile_known = sources.get("active_profile", "unknown") != "unknown"
+    # Source-aware chips: the firmware/profile rows earn "Verified from device"
+    # only for a genuine device read (source "protocol"). The official ZD app UI
+    # scrape ("official_app_ui") is not a device read, so it gets a distinct
+    # chip. Flow the raw source values through; the derivation decides the chip.
+    firmware_source = sources.get("firmware", "unknown")
+    profile_source = sources.get("active_profile", "unknown")
+    # A "protocol" profile source is sticky across a disconnect, so the matrix
+    # earns "Verified from device" only when the protocol readback is still
+    # valid for THIS connection (getattr-guarded to the honest False end).
+    active_profile_protocol_verified_this_connection = bool(
+        getattr(state, "active_profile_protocol_verified_this_connection", False)
+    )
+
+    snapshot = getattr(shell, "last_controller_snapshot", None)
+    snapshot_ts = getattr(shell, "last_snapshot_ts", None)
+    has_retained_settings = snapshot is not None and snapshot_ts is not None
+    settings_read_current = has_retained_settings and _settings_read_matches_current(shell, state)
+
+    settings_service = getattr(shell, "settings_service", None)
+    raw_skipped = getattr(settings_service, "last_read_skipped_fields", 0)
+    settings_skipped_fields = (
+        int(raw_skipped)
+        if isinstance(raw_skipped, (int, float)) and raw_skipped > 0
+        else 0
+    )
+
+    fingerprint = getattr(state, "model_fingerprint", None)
+    fingerprint_present = fingerprint is not None
+    fingerprint_complete = fingerprint_present and getattr(fingerprint, "vid", None) is not None
+    fingerprint_short_digest = (
+        getattr(fingerprint, "short_digest", None) if fingerprint_present else None
+    )
+
+    return TrustMatrixSignals(
+        connection_state=connection_state,
+        data_freshness=data_freshness,
+        firmware_known=firmware_known,
+        active_profile_known=active_profile_known,
+        firmware_source=firmware_source,
+        profile_source=profile_source,
+        active_profile_protocol_verified_this_connection=active_profile_protocol_verified_this_connection,
+        settings_read_current=settings_read_current,
+        has_retained_settings=has_retained_settings,
+        settings_skipped_fields=settings_skipped_fields,
+        fingerprint_present=fingerprint_present,
+        fingerprint_complete=fingerprint_complete,
+        fingerprint_short_digest=fingerprint_short_digest,
+    )
+
+
+def _settings_read_matches_current(shell, state) -> bool:
+    """True when a retained settings read belongs to the unit connected now.
+
+    Parallels ``home._settings_read_this_session``: a read only counts as
+    "verified from device" while the SAME physical controller is still
+    connected (identity match) — a disconnected unit or a mid-session swap
+    demotes the retained snapshot to ``inferred`` rather than verified.
+    """
+
+    if getattr(state, "connection_state", None) != "connected":
+        return False
+    identity = getattr(state, "stable_identifier", None)
+    if not identity or identity == "unknown":
+        return False
+    return getattr(shell, "last_snapshot_identity", None) == identity
+
+
+def _build_trust_matrix_card(shell) -> None:
+    rows = build_trust_matrix(_trust_matrix_signals(shell))
+    with dpg.child_window(
+        width=-1,
+        border=True,
+        tag=TRUST_MATRIX_CARD_TAG,
+        auto_resize_y=True,
+        autosize_y=False,
+    ):
+        dpg.add_text(t("trust_matrix.title"), color=shell.COLORS["muted"])
+        dpg.add_text(
+            t("trust_matrix.intro"),
+            tag=TRUST_MATRIX_INTRO_TAG,
+            wrap=_TRUST_MATRIX_WRAP,
+            color=shell.COLORS["muted"],
+        )
+        dpg.add_spacer(height=6)
+        for index, row in enumerate(rows):
+            dpg.add_text(
+                row.claim,
+                tag=_trust_matrix_claim_tag(index),
+                wrap=_TRUST_MATRIX_WRAP,
+            )
+            dpg.add_text(
+                row_label(row),
+                tag=_trust_matrix_label_tag(index),
+                wrap=_TRUST_MATRIX_WRAP,
+                color=_provenance_color(shell, row.provenance),
+            )
+            dpg.add_text(
+                row.why,
+                tag=_trust_matrix_why_tag(index),
+                wrap=_TRUST_MATRIX_WRAP,
+                color=shell.COLORS["muted"],
+            )
+            # Pre-built for every row (shown only when a qualifier exists) so the
+            # in-place refresh is a pure value+show/hide update — never an
+            # add_text into a live tree (the modal-teardown hazard).
+            dpg.add_text(
+                row.qualifier or "",
+                tag=_trust_matrix_qualifier_tag(index),
+                wrap=_TRUST_MATRIX_WRAP,
+                color=shell.COLORS["warn"],
+                show=row.qualifier is not None,
+            )
+            dpg.add_spacer(height=4)
+
+
+def refresh_trust_matrix(shell) -> None:
+    """Re-derive the provenance rows and update them in place.
+
+    The matrix renders each row's label ONCE at Diagnostics build time, but the
+    signals move afterward: the startup auto-read completes ~3s after the screen
+    builds (settings/firmware/profile go verified), the fingerprint arrives
+    async, and a disconnect must demote verified rows back to inferred/unknown.
+    ``AppShell.refresh_shell`` calls this every tick so labels track live —
+    exactly like ``home.refresh_setup_drawer``, but bidirectional (labels move
+    BOTH ways here, unlike the drawer's one-directional flags).
+
+    In-place tag updates only — never a ``rebuild_current_screen``. A full
+    rebuild from a refresh path could collide with the DearPyGui modal-teardown
+    law (an apply-confirm modal may be up when a read completes); reconfiguring
+    existing tags is immune. No-op when the card tag is absent (a different
+    screen is showing, or Diagnostics has not built this card).
+    """
+
+    if not dpg.does_item_exist(TRUST_MATRIX_CARD_TAG):
+        return
+    rows = build_trust_matrix(_trust_matrix_signals(shell))
+    for index, row in enumerate(rows):
+        label_tag = _trust_matrix_label_tag(index)
+        if dpg.does_item_exist(label_tag):
+            dpg.set_value(label_tag, row_label(row))
+            dpg.configure_item(label_tag, color=_provenance_color(shell, row.provenance))
+        why_tag = _trust_matrix_why_tag(index)
+        if dpg.does_item_exist(why_tag):
+            dpg.set_value(why_tag, row.why)
+        qualifier_tag = _trust_matrix_qualifier_tag(index)
+        if dpg.does_item_exist(qualifier_tag):
+            dpg.set_value(qualifier_tag, row.qualifier or "")
+            if row.qualifier is not None:
+                dpg.show_item(qualifier_tag)
+            else:
+                dpg.hide_item(qualifier_tag)
 
 
 def _build_compatibility_report_card(shell) -> None:
@@ -737,7 +1189,7 @@ def _build_raw_hid_section(shell) -> None:
         if not isinstance(frames, (list, tuple)):
             frames = []
         text = "\n".join(frames[-100:]) if frames else t("diagnostics.raw_hid.empty")
-        dpg.add_text(tag="diag_raw_hid_log", default_value=text, wrap=1180)
+        dpg.add_text(tag="diag_raw_hid_log", default_value=text, wrap=_FULL_WIDTH_PROSE_WRAP)
 
 
 def health_summary_text(state, last_packet_timestamp: str | None) -> str:

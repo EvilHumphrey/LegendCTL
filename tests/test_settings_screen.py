@@ -13,10 +13,10 @@ from zd_app.ui.screens import preferences as preferences_screen
 
 
 class TestSettingsScreen(unittest.TestCase):
-    def _build_with_patches(self, *, font_id, locale="en"):
+    def _build_with_patches(self, *, font_id, locale="en", settings=None):
         """Run preferences.build under stub patches; return the bind_item_font mock."""
         shell = SimpleNamespace(
-            settings=AppSettings(),
+            settings=settings or AppSettings(),
             COLORS={"accent": (46, 155, 255), "muted": (148, 163, 184), "warn": (245, 158, 11)},
             settings_service=None,
             update_language=MagicMock(),
@@ -37,7 +37,7 @@ class TestSettingsScreen(unittest.TestCase):
             preferences_screen.dpg,
             "add_combo",
             side_effect=["language_combo", "logging_combo"],
-        ), patch.object(preferences_screen.dpg, "bind_item_font") as bind_item_font, patch.object(
+        ) as add_combo, patch.object(preferences_screen.dpg, "bind_item_font") as bind_item_font, patch.object(
             preferences_screen.dpg,
             "add_text",
         ), patch.object(
@@ -61,10 +61,10 @@ class TestSettingsScreen(unittest.TestCase):
             return_value=font_id,
         ) as font_for:
             preferences_screen.build(shell, parent="root")
-        return bind_item_font, font_for
+        return shell, bind_item_font, font_for, add_combo
 
     def test_combos_bind_cjk_font_when_available(self) -> None:
-        bind_item_font, font_for = self._build_with_patches(font_id=4242)
+        _shell, bind_item_font, font_for, _add_combo = self._build_with_patches(font_id=4242)
         font_for.assert_called_once_with("body", "zh-CN")
         # Both combos (language + logging verbosity) get the CJK font
         # binding so Mandarin labels render correctly.
@@ -75,10 +75,36 @@ class TestSettingsScreen(unittest.TestCase):
         self.assertEqual(bind_item_font.call_count, 2)
 
     def test_combos_skip_font_bind_when_unavailable(self) -> None:
-        bind_item_font, _ = self._build_with_patches(font_id=None)
+        _shell, bind_item_font, _font_for, _add_combo = self._build_with_patches(font_id=None)
         # If font_for returns None (e.g. fonts not registered in test
         # context), bind_item_font must be skipped on both combos.
         bind_item_font.assert_not_called()
+
+    def test_language_combo_uses_shipped_locales_and_round_trips_selection(self) -> None:
+        shell, _bind_item_font, _font_for, add_combo = self._build_with_patches(font_id=4242)
+
+        language_combo = add_combo.call_args_list[0].kwargs
+        self.assertEqual(language_combo["items"], ["English", "简体中文"])
+        self.assertEqual(language_combo["default_value"], "English")
+
+        language_combo["callback"]("language_combo", "简体中文")
+
+        shell.update_language.assert_called_once_with("zh-CN")
+
+    def test_language_combo_accepts_a_future_shipped_locale_without_code_changes(self) -> None:
+        with patch.object(preferences_screen, "SUPPORTED_LOCALES", ("en", "zh-CN", "ko")):
+            shell, _bind_item_font, _font_for, add_combo = self._build_with_patches(
+                font_id=4242,
+                settings=AppSettings(language="ko"),
+            )
+
+        language_combo = add_combo.call_args_list[0].kwargs
+        self.assertEqual(language_combo["items"], ["English", "简体中文", "한국어"])
+        self.assertEqual(language_combo["default_value"], "한국어")
+
+        language_combo["callback"]("language_combo", "한국어")
+
+        shell.update_language.assert_called_once_with("ko")
 
 
 class TestLoggingVerbosityCombo(unittest.TestCase):

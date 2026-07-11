@@ -9,7 +9,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from ctypes import wintypes as w
-from typing import Any
+from typing import Any, NamedTuple
 
 from zd_app.services.xinput import describe_battery_level, get_connected_controllers
 from zd_app.i18n import t
@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 from zd_app.services._log_entry import (
+    ComposedLogEntry,
     LogEntry,
     _render_log_fmt_args,
     render_log_entry,
@@ -288,6 +289,19 @@ def _entry_instance_ids(entries: list[dict[str, str]]) -> list[str]:
     ]
 
 
+class OfficialSummaryReadResult(NamedTuple):
+    """Outcome of a best-effort official-app summary scrape (see
+    :meth:`DeviceService.read_official_summary_into_state`).
+
+    ``applied`` is True only when a summary was found and folded into state;
+    ``retained_protocol_active_profile`` is True when a protocol-owned active
+    profile was kept instead of being overwritten by the (lagging) scrape.
+    """
+
+    applied: bool
+    retained_protocol_active_profile: bool
+
+
 class DeviceService:
     UNKNOWN_SUMMARY_SOURCE_KEY = "device.summary.source.unknown_fallback"
     SUMMARY_SOURCE_KEY_FOR = {
@@ -334,12 +348,16 @@ class DeviceService:
                 "Firmware": "unknown_pending_protocol_work",
             }
         )
-        self.event_log: deque[str | LogEntry] = deque(maxlen=80)
-        self.last_apply_result: str | LogEntry | None = None
+        self.event_log: deque[str | LogEntry | ComposedLogEntry] = deque(maxlen=80)
+        self.last_apply_result: str | LogEntry | ComposedLogEntry | None = None
         self.last_read_duration_ms: float | None = None
         self.last_write_duration_ms: float | None = None
         self._last_presence_signature: tuple[str, str] = ("", "")
         self._last_connected_identifier: str = ""
+        # Summary values may intentionally remain visible across a disconnect,
+        # but their "current" qualifier is valid only after a live source has
+        # refreshed that field during this connection.
+        self._summary_fields_refreshed_this_connection: set[str] = set()
         self._clock = clock or time.monotonic
         self._presence_cache_ttl_connected_seconds = max(0.0, presence_cache_ttl_connected_seconds)
         self._presence_cache_ttl_disconnected_seconds = max(0.0, presence_cache_ttl_disconnected_seconds)
@@ -443,10 +461,23 @@ class DeviceService:
         if self.state.summary_sources.get("battery") != "official_app_ui":
             self.state.battery_level = battery_level
             self.state.summary_sources["battery"] = "xinput" if battery_level != "Unknown" else "unknown"
+            if battery_level != "Unknown":
+                self._mark_summary_field_refreshed_this_connection("battery")
         self.state.sync_status = "Connected" if identity_changed else sync_status
         self.state.xinput_slot = slot
         if connection_state == "no_device" and was_connected:
+            self._summary_fields_refreshed_this_connection.clear()
             self.state.data_freshness = "stale"
+            # A disconnect ends the validity of any protocol profile readback:
+            # the onboard profile can be switched on the controller itself
+            # (START+D-Pad) while unplugged, invisibly to us. Downgrade the
+            # protocol verification so the active-profile row renders INFERRED
+            # (retained), never re-greens to "Verified from device" on a
+            # same-unit reconnect without a fresh readback, and becomes
+            # overwritable again by a later official-app scrape. The retained
+            # value (active_onboard_profile + summary_sources) is intentionally
+            # left intact so the last-known slot stays visible as inferred.
+            self.state.active_profile_protocol_verified_this_connection = False
         if connection_state == "connected" and device_class == "zd_ultimate_legend":
             self._schedule_model_fingerprint_collection(stable_identifier, pnp_entries)
         else:
@@ -497,13 +528,15 @@ class DeviceService:
         self.log_event(message)
         return message
 
-    def record_apply_result(self, success: bool, message: str | LogEntry) -> None:
+    def record_apply_result(
+        self, success: bool, message: str | LogEntry | ComposedLogEntry
+    ) -> None:
         self.last_apply_result = message
         self.last_write_duration_ms = 0.0
         self.state.last_apply_time = utc_now_iso()
         self.state.data_freshness = "write_success" if success else "write_failed"
         self.state.sync_status = "Ready" if success else "Apply Failed"
-        if isinstance(message, LogEntry):
+        if isinstance(message, (LogEntry, ComposedLogEntry)):
             self.event_log.appendleft(message)
         else:
             self.log_event(message)
@@ -511,6 +544,11 @@ class DeviceService:
     def record_protocol_active_profile(self, slot_id: int) -> None:
         self.state.active_onboard_profile = slot_id
         self.state.summary_sources["active_profile"] = "protocol"
+        self._mark_summary_field_refreshed_this_connection("active_profile")
+        # This readback is valid for the currently-connected session; the flag
+        # is cleared on the next disconnect / identity change (see
+        # refresh_state / _clear_retained_read_state_for_identity_change).
+        self.state.active_profile_protocol_verified_this_connection = True
 
     def log_event(self, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")
@@ -820,19 +858,69 @@ class DeviceService:
         if summary.battery_level:
             self.state.battery_level = summary.battery_level
             self.state.summary_sources["battery"] = "official_app_ui"
+            self._mark_summary_field_refreshed_this_connection("battery")
         if summary.firmware_version:
             self.state.firmware_version = summary.firmware_version
             self.state.summary_sources["firmware"] = "official_app_ui"
+            self._mark_summary_field_refreshed_this_connection("firmware")
         if summary.active_onboard_profile is not None:
-            if self.state.summary_sources.get("active_profile") == "protocol":
+            # The protocol retention guard only holds while the protocol
+            # readback is still valid for THIS connection. After a disconnect
+            # the flag is cleared, so a later official-app scrape is allowed to
+            # correct the (now-stale) protocol value instead of being refused.
+            if (
+                self.state.summary_sources.get("active_profile") == "protocol"
+                and self.state.active_profile_protocol_verified_this_connection
+            ):
                 retained_protocol_active_profile = True
             else:
                 self.state.active_onboard_profile = summary.active_onboard_profile
                 self.state.summary_sources["active_profile"] = "official_app_ui"
+                self._mark_summary_field_refreshed_this_connection("active_profile")
         if summary.sleep_setting:
             self.state.sleep_setting = summary.sleep_setting
             self.state.summary_sources["sleep"] = "official_app_ui"
+            self._mark_summary_field_refreshed_this_connection("sleep")
         return retained_protocol_active_profile
+
+    def read_official_summary_into_state(self) -> "OfficialSummaryReadResult":
+        """Best-effort official-app UI scrape folded into ``state``.
+
+        Mirrors the summary handling in :meth:`read_device_state`: probe the
+        official ZD app's "Controller Settings" window (present only while that
+        app is open) and, if found, apply firmware / active profile / battery /
+        sleep with source ``official_app_ui`` — honoring the protocol-owned
+        active-profile retention guard inside :meth:`_apply_official_app_summary`.
+
+        SILENT DEGRADATION by contract. The scrape is a short PowerShell UI
+        Automation subprocess the caller runs from the HID read job *after* the
+        primary settings batch. Any failure — no window, subprocess error,
+        timeout, parse failure — returns ``applied=False`` and leaves ``state``
+        untouched. The settings snapshot is the read's primary deliverable and
+        must never be delayed or failed by this enrichment. The no-window path
+        fast-returns (~0.27s measured, well under the probe's 3s ceiling), so a
+        Read while the vendor app is closed does not stall.
+        """
+
+        try:
+            summary = self.official_app_summary_service.read_summary(force_refresh=True)
+        except Exception:  # noqa: BLE001 - enrichment must never break the read
+            logger.debug("Official app summary scrape failed", exc_info=True)
+            return OfficialSummaryReadResult(
+                applied=False, retained_protocol_active_profile=False
+            )
+        if summary is None:
+            return OfficialSummaryReadResult(
+                applied=False, retained_protocol_active_profile=False
+            )
+        retained = self._apply_official_app_summary(summary)
+        if retained:
+            self.log_i18n_event("log.read.official_summary_protocol_retained")
+        else:
+            self.log_i18n_event("log.read.official_summary")
+        return OfficialSummaryReadResult(
+            applied=True, retained_protocol_active_profile=retained
+        )
 
     @staticmethod
     def _known_device_identifier(value: str | None) -> bool:
@@ -840,14 +928,27 @@ class DeviceService:
         return bool(text and text.lower() != "unknown")
 
     def _clear_retained_read_state_for_identity_change(self) -> None:
+        self._summary_fields_refreshed_this_connection.clear()
         self.state.firmware_version = "Unknown"
         self.state.battery_level = "Unknown"
         self.state.sleep_setting = "Unknown"
         self.state.active_onboard_profile = 1
+        self.state.active_profile_protocol_verified_this_connection = False
         self.state.last_read_time = None
         self.state.data_freshness = "never_read"
         for field_name in ("battery", "firmware", "active_profile", "sleep"):
             self.state.summary_sources[field_name] = "unknown"
+
+    def summary_field_refreshed_this_connection(self, field_name: str) -> bool:
+        """Whether a live source refreshed ``field_name`` on this connection."""
+
+        return field_name in self._summary_fields_refreshed_this_connection
+
+    def _mark_summary_field_refreshed_this_connection(self, field_name: str) -> None:
+        """Record a live-source update only while the controller is connected."""
+
+        if self.state.connection_state == "connected":
+            self._summary_fields_refreshed_this_connection.add(field_name)
 
     @staticmethod
     def _infer_transport(instance_id: str) -> str:

@@ -106,6 +106,15 @@ def _make_shell(
     profile_service.pending_changes_count.return_value = 0
     wrapper_profile_store = MagicMock()
     wrapper_profile_store.list_profiles.return_value = []
+    if restore_point_service is None:
+        restore_point_service = MagicMock()
+        restore_point_service.capture.return_value = SimpleNamespace(
+            id="rp_busy_guard_test",
+            title="Busy guard test restore point",
+        )
+        restore_point_service.read_current_state_with_provenance.side_effect = (
+            lambda: (settings_service.get_all_settings(), {}, {})
+        )
     shell = AppShell(
         device_service=device_service,
         profile_service=profile_service,
@@ -117,11 +126,7 @@ def _make_shell(
         restore_point_service=restore_point_service,
         hid_executor=hid_executor,
     )
-    # Suppress the default-built RestorePointService unless a test passes its
-    # own — keeps the refresh job's first-connect capture a deterministic
-    # no-op (no fresh-read against the gated stub, no on-disk RP writes).
-    if restore_point_service is None:
-        shell.restore_point_service = None
+    # The injected service keeps automatic captures deterministic and in-memory.
     shell.refresh_shell = lambda: None
     shell.rebuild_current_screen = lambda: None
     return shell
@@ -543,10 +548,8 @@ class EntryPointBusyRefusalTests(_BusyWindowTestCase):
             _capture_widget_state(
                 lambda: shell.safe_import_apply(apply_to_controller=True)
             )
-            # Save + Apply's device sequence is itself a jobbed flow now
-            # (Safe-Import jobbing work): the disk save runs synchronously
-            # but the apply happens on the worker — drain its completion
-            # before asserting the device work happened.
+            # Save + Apply's complete sequence is jobbed. Drain its completion
+            # before asserting the checkpoint, profile save, and device work.
             _drain_queued_completions(shell, 1)
             _capture_widget_state(shell._drain_hid_job_completions)
 
@@ -599,8 +602,19 @@ class SliderTrailingFlushTests(_BusyWindowTestCase):
         # consumed pending meant no trailing flush ever ran the verify).
         shell, service = self._busy_shell()
         # Plant an elapsed pending trailing write, as a drag-storm would.
-        shell._slider_throttle._pending["step_size"] = 123
-        shell._slider_throttle._last_write_ts["step_size"] = monotonic() - 60.0
+        throttle = shell._slider_throttle
+        now = monotonic()
+        throttle._last_write_ts["step_size"] = now
+        self.assertFalse(
+            throttle.should_write_now(
+                "step_size",
+                123,
+                now=now + 0.001,
+                no_restore_point=False,
+                stable_identifier=shell._manual_write_stable_identifier(),
+            )
+        )
+        throttle._last_write_ts["step_size"] = monotonic() - 60.0
 
         with self.assertLogs("zd_app.ui.app_shell", level="DEBUG") as logs:
             values, _ = _capture_widget_state(shell._flush_slider_throttle)
@@ -612,7 +626,10 @@ class SliderTrailingFlushTests(_BusyWindowTestCase):
             any("deferred" in line for line in logs.output), logs.output
         )
         # ...but the pending is RE-QUEUED, not discarded.
-        self.assertEqual(shell._slider_throttle._pending.get("step_size"), 123)
+        pending = shell._slider_throttle._pending.get("step_size")
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.value, 123)
+        self.assertFalse(pending.no_restore_point)
 
         self._finish(shell, service)
 
@@ -899,8 +916,8 @@ class SafeImportApplyJobbingTests(unittest.TestCase):
                 )
             )
 
-            # The render thread came straight back: disk save done, the
-            # import modals were torn down at job start, busy flag is up
+            # The render thread came straight back; the import modals were torn
+            # down at job start and the busy flag is up
             # while the worker sits mid-burst.
             self.assertIsNone(returned[0])
             shell.wrapper_profile_store.save.assert_called_once()
@@ -909,9 +926,8 @@ class SafeImportApplyJobbingTests(unittest.TestCase):
             deleted = {call.args[0] for call in delete_item.call_args_list}
             self.assertIn(safe_import_screen.CONFIRM_MODAL, deleted)
             self.assertIn(safe_import_screen.PREVIEW_MODAL, deleted)
-            # The RP capture already ran job-side, before the burst (no
-            # restore_point_service wired -> its None result was recorded).
-            self.assertIsNone(audit.restore_point_name)
+            # The RP capture already ran job-side, before the burst.
+            self.assertEqual(audit.restore_point_name, "Busy guard test restore point")
             # None of the on_done UI has fired mid-job.
             open_result.assert_not_called()
             shell.device_service.record_apply_result.assert_not_called()
@@ -1072,7 +1088,7 @@ class SafeImportApplyJobbingTests(unittest.TestCase):
 
         def record_capture():
             order.append("capture")
-            return None
+            return "Sync test restore point"
 
         shell._create_safe_import_restore_point = record_capture
         service.get_all_settings = lambda: order.append("read") or snapshot
@@ -1096,12 +1112,12 @@ class SafeImportApplyJobbingTests(unittest.TestCase):
                 lambda: shell.safe_import_apply(apply_to_controller=True)
             )
 
-        # The pre-seam inline order, statement for statement.
+        # Safe Import now captures before its first write (the profile save).
         self.assertEqual(
             order,
             [
-                "save",
                 "capture",
+                "save",
                 "apply",
                 "settle",
                 "read",

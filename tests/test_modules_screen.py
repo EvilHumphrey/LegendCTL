@@ -18,6 +18,8 @@ from unittest.mock import MagicMock, patch
 
 from datetime import datetime, timedelta, timezone
 
+from tests.r2_shell_test_helpers import make_shell
+from zd_app.models import DeviceState
 from zd_app.services.diagnostic_bundle import DiagnosticBundleService
 from zd_app.services.module_passport import (
     CharacterizationOrchestrator,
@@ -986,6 +988,24 @@ class ExportModalTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].details.get("format"), "md")
         self.assertEqual(events[0].details.get("output_filename"), target.name)
+
+    def test_generate_markdown_preserves_official_app_firmware_provenance(self) -> None:
+        state = modules_screen.ModulesScreenState()
+        shell = make_shell()
+        shell.module_passport_service = self.service
+        shell.diagnostic_bundle_service = self.bundle
+        shell.modules_screen_state = state
+        shell.device_service.state = DeviceState(firmware_version="1.24")
+        shell.device_service.state.summary_sources["firmware"] = "official_app_ui"
+
+        target = modules_screen._generate_markdown(shell, self.bundle, state)
+
+        self.assertIsNotNone(target)
+        assert target is not None
+        self.assertIn(
+            "Firmware: 1.24 (Official App UI)",
+            target.read_text(encoding="utf-8"),
+        )
 
     def test_generate_zip_writes_file_and_emits_event(self) -> None:
         state = modules_screen.ModulesScreenState()

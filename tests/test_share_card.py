@@ -81,6 +81,15 @@ class ShareCardRendererTests(unittest.TestCase):
                 self.assertNotIn("ABC123DEF456", rendered)
                 self.assertNotIn(r"C:\Users", rendered)
 
+    def test_firmware_provenance_label_flows_to_markdown_and_html(self) -> None:
+        state = DeviceState(firmware_version="1.24")
+        state.summary_sources["firmware"] = "official_app_ui"
+
+        card = build_share_card(device_state=state, now=_NOW)
+
+        self.assertIn(r"- Firmware: 1.24 \(Official App UI\)", card.to_markdown())
+        self.assertIn("Firmware</span><strong>1.24 (Official App UI)", card.to_html())
+
     def test_html_escapes_interpolated_metacharacters(self) -> None:
         compatibility = build_compatibility_report(
             device_state=DeviceState(

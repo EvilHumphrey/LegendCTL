@@ -402,7 +402,7 @@ class ContentSurfaceScrollbarTests(unittest.TestCase):
                 shell.refresh_shell()
                 self.assertEqual(
                     dpg.get_value(right_rail.FIRMWARE_VALUE_TAG),
-                    "1.24 (last read)",
+                    "1.24 (last read) - Controller Protocol",
                 )
                 self.assertEqual(
                     dpg.get_value(right_rail.PROFILE_VALUE_TAG),
@@ -410,8 +410,25 @@ class ContentSurfaceScrollbarTests(unittest.TestCase):
                 )
 
                 shell.device_service.state.connection_state = "connected"
+                shell.device_service.summary_field_refreshed_this_connection.return_value = False
                 shell.refresh_shell()
-                self.assertEqual(dpg.get_value(right_rail.FIRMWARE_VALUE_TAG), "1.24")
+                self.assertEqual(
+                    dpg.get_value(right_rail.FIRMWARE_VALUE_TAG),
+                    "1.24 (last read) - Controller Protocol",
+                )
+                self.assertEqual(
+                    dpg.get_value(right_rail.PROFILE_VALUE_TAG),
+                    "Profile 3 (last read) - Controller Protocol",
+                )
+
+                # A live source in this connection removes only the retained
+                # qualifier; source labels remain intact.
+                shell.device_service.summary_field_refreshed_this_connection.return_value = True
+                shell.refresh_shell()
+                self.assertEqual(
+                    dpg.get_value(right_rail.FIRMWARE_VALUE_TAG),
+                    "1.24 - Controller Protocol",
+                )
                 self.assertEqual(
                     dpg.get_value(right_rail.PROFILE_VALUE_TAG),
                     "Profile 3 - Controller Protocol",

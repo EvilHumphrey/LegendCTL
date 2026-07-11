@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
+from zd_app import i18n
+
 
 ConnectionState = Literal[
     "no_device",
@@ -309,6 +311,16 @@ class DeviceState:
     battery_level: str = "Unknown"
     sleep_setting: str = "Unknown"
     active_onboard_profile: int = 1
+    # True only while a genuine protocol profile switch (0xd0 0x0f readback) is
+    # still valid for the CURRENTLY-connected session. Set by
+    # ``record_protocol_active_profile``; cleared the moment the controller
+    # disconnects (or the identity changes) because a disconnect ends the
+    # readback's validity — the user can change the onboard profile on the
+    # controller itself (START+D-Pad) while unplugged, and that switch is
+    # invisible to us. The trust matrix's "Verified from device" profile chip
+    # requires this flag, so a retained ``protocol`` source can never re-green
+    # to verified on a same-unit reconnect without a fresh protocol readback.
+    active_profile_protocol_verified_this_connection: bool = False
     sync_status: SyncStatus = "Disconnected"
     connection_state: ConnectionState = "no_device"
     data_freshness: DataFreshness = "never_read"
@@ -414,16 +426,17 @@ class AppSettings:
 
 
 def _normalize_language_code(value: str | None) -> str:
+    if not isinstance(value, str):
+        return "en"
+    if value in i18n.SUPPORTED_LOCALES:
+        return value
     return {
-        None: "en",
         "": "en",
         "English": "en",
-        "en": "en",
         "Simplified Chinese": "zh-CN",
         "Chinese (Simplified)": "zh-CN",
         "简体中文": "zh-CN",
         "zh": "zh-CN",
-        "zh-CN": "zh-CN",
     }.get(value, "en")
 
 

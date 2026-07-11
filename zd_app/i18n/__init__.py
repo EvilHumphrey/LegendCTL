@@ -51,12 +51,14 @@ _REVIEWED_AMBIGUOUS: dict[str, frozenset[str]] = {
             "compat_report.section.controller",
         }
     ),
+    # Lighting-zone Home 区域 is context-distinct from navigation/diagram Home.
     "Home": frozenset(
         {
             "ui.home_70f8bb9a",
             "nav.home",
             "restore_field.lighting_zone.home",
             "diagnostics.live_verify.face_diagram.home",
+            "controller.choice.lighting_zone.home",
         }
     ),
     "Instant": frozenset(
@@ -73,32 +75,47 @@ _REVIEWED_AMBIGUOUS: dict[str, frozenset[str]] = {
             "device_vs_profile.section.layout",
         }
     ),
+    # Lighting-zone 左侧灯 is context-distinct from directional/deadzone Left.
     "Left": frozenset(
         {
             "apply.side.left",
             "health_report.table.col.left",
             "restore_field.deadzones.left",
             "modules.side.left",
+            "controller.choice.lighting_zone.left",
         }
     ),
+    # Lighting-mode 关闭 is context-distinct from the generic lighting-state 关.
     "Off": frozenset(
         {
             "restore_field.lighting.off",
             "restore_field.lighting_mode.off",
+            "controller.choice.lighting_mode.off",
         }
     ),
+    # Lighting-zone 右侧灯 is context-distinct from directional/deadzone Right.
     "Right": frozenset(
         {
             "apply.side.right",
             "health_report.table.col.right",
             "restore_field.deadzones.right",
             "modules.side.right",
+            "controller.choice.lighting_zone.right",
         }
     ),
+    # Trigger-stroke 短行程 is context-distinct from the generic length 短.
     "Short": frozenset(
         {
             "ui.short_0fe7d82f",
             "restore_field.trigger_mode.short",
+            "controller.choice.trigger_mode.short",
+        }
+    ),
+    # Lighting-mode 常亮 is context-distinct from the setting-state 始终开启.
+    "Always On": frozenset(
+        {
+            "ui.always_on_d50f042b",
+            "controller.choice.lighting_mode.always_on",
         }
     ),
 }
@@ -133,13 +150,15 @@ def _load(locale: str) -> dict[str, str]:
     return _loaded[locale]
 
 
-def _other_locale_map_for_ambiguity() -> dict[str, str]:
-    """Read the non-default shipped locale's raw key->value map for the
-    ambiguity check, WITHOUT touching the ``_loaded`` cache (so lazy locale
-    loading is unchanged). Returns ``{}`` if it is missing/unreadable — with no
-    sibling locale there is no mistranslation trap to warn about.
+def _other_locale_maps_for_ambiguity() -> tuple[tuple[str, dict[str, str]], ...]:
+    """Read every shipped non-default locale for the ambiguity check.
+
+    This intentionally bypasses ``_loaded`` so English loading keeps its lazy
+    cache behavior. A future locale may be listed before its JSON ships; a
+    missing or unreadable file is skipped rather than creating a false warning.
     """
 
+    sibling_maps: list[tuple[str, dict[str, str]]] = []
     for locale in SUPPORTED_LOCALES:
         if locale == DEFAULT_LOCALE:
             continue
@@ -147,9 +166,10 @@ def _other_locale_map_for_ambiguity() -> dict[str, str]:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            return {}
-        return data if isinstance(data, dict) else {}
-    return {}
+            continue
+        if isinstance(data, dict):
+            sibling_maps.append((locale, data))
+    return tuple(sibling_maps)
 
 
 def _rebuild_reverse_en() -> None:
@@ -171,7 +191,7 @@ def _rebuild_reverse_en() -> None:
     for key, value in _loaded[DEFAULT_LOCALE].items():
         _reverse_en.setdefault(value, key)
         value_to_keys.setdefault(value, []).append(key)
-    siblings = _other_locale_map_for_ambiguity()
+    sibling_maps = _other_locale_maps_for_ambiguity()
     for value, keys in value_to_keys.items():
         if len(keys) <= 1:
             continue
@@ -182,17 +202,25 @@ def _rebuild_reverse_en() -> None:
             # set) falls through so the distinct-translation check below can
             # re-arm the warning.
             continue
-        distinct = {siblings[k] for k in keys if k in siblings}
-        if len(distinct) > 1:
+        if any(
+            len({sibling_map[key] for key in keys if key in sibling_map}) > 1
+            for _locale, sibling_map in sibling_maps
+        ):
             _ambiguous_en[value] = tuple(keys)
     if _ambiguous_en:
         sample = ", ".join(repr(v) for v in sorted(_ambiguous_en)[:8])
+        sibling_locales = tuple(locale for locale, _map in sibling_maps)
+        locale_label = (
+            sibling_locales[0]
+            if len(sibling_locales) == 1
+            else "non-default locale"
+        )
         logger.warning(
             "i18n: %d English literal(s) map to multiple keys whose %s translation "
             "differs; translate_literal() resolves each to the first key in JSON "
             "order and may mistranslate the differing sibling. Ambiguous literals: %s%s",
             len(_ambiguous_en),
-            next((loc for loc in SUPPORTED_LOCALES if loc != DEFAULT_LOCALE), "other-locale"),
+            locale_label,
             sample,
             "" if len(_ambiguous_en) <= 8 else ", ...",
         )

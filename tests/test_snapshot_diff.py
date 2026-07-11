@@ -924,6 +924,18 @@ class LastAppliedCollectionTests(unittest.TestCase):
 
 
 class LastAppliedSensitivityFoldTests(unittest.TestCase):
+    def test_downgraded_record_renders_the_3point_host_value(self) -> None:
+        # A persistence caller strips the rider after a 3-point fallback, so the
+        # Device-vs-Profile Last Applied cell must use the host curve naturally.
+        diff = compute_snapshot_diff(
+            _snap(sensitivity_left=_SENS_3),
+            _snap(sensitivity_left=_SENS_3),
+            current_read_success={"sensitivity_left": True},
+            last_applied=_snap(sensitivity_left=_SENS_3),
+        )
+        row = _rows_by_name(diff)["sensitivity_left"]
+        self.assertEqual(row.last_applied_value, "Linear")
+
     def test_record_rider_attaches_to_folded_rider_row(self) -> None:
         # Current carries the 8-point curve → the stick's single row is the
         # rider; the record's 8-point value is compared rider-vs-rider.

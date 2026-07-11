@@ -505,6 +505,27 @@ class PreviewRenderTests(_DpgTestCase):
         # A restore point was saved before applying (current snapshot present).
         self.assertIsNotNone(shell._safe_import_result.audit.restore_point_name)
 
+    def test_save_and_apply_aborts_before_profile_or_controller_write_without_restore_point(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        shell.last_controller_snapshot = _snapshot()
+        shell.restore_point_service.capture.return_value = None
+        shell._apply_snapshot_to_controller = MagicMock()
+        self._full_ui(shell)
+        self._scan(shell, _export_dict())
+
+        shell.safe_import_apply(apply_to_controller=True)
+
+        audit = shell._safe_import_result.audit
+        shell.wrapper_profile_store.save.assert_not_called()
+        shell._apply_snapshot_to_controller.assert_not_called()
+        self.assertIsNone(audit.restore_point_name)
+        self.assertEqual(audit.controller_write, "aborted")
+        self.assertTrue(audit.aborted_no_restore_point)
+        self.assertTrue(dpg.does_item_exist(safe_import.RESULT_MODAL))
+        joined = "\n".join(self._labels(safe_import.RESULT_MODAL))
+        self.assertIn(i18n.t("safe_import.apply.aborted_no_restore_point"), joined)
+        self._assert_no_placeholders(safe_import.RESULT_MODAL)
+
     def test_scan_empty_path_shows_error(self) -> None:
         shell = make_shell(settings_service=MagicMock())
         shell.open_safe_import()
@@ -837,6 +858,54 @@ class ApplyVerifyTests(_DpgTestCase):
         self.assertEqual(audit.verify_unverifiable, [])
         self.assertFalse(audit.verify_read_failed)
 
+    def test_downgraded_8point_apply_discloses_and_verifies_sent_host_curve(self) -> None:
+        host_curve = (
+            SensitivityAnchor(0, 0),
+            SensitivityAnchor(50, 40),
+            SensitivityAnchor(100, 100),
+        )
+        shell = make_shell(settings_service=MagicMock())
+        shell.last_controller_snapshot = _snapshot()
+        applied: dict = {}
+
+        def fake_apply(snapshot):
+            applied["snapshot"] = snapshot
+            return SimpleNamespace(
+                failed=[],
+                sensitivity_downgrades=("sens_left",),
+            )
+
+        shell._apply_snapshot_to_controller = MagicMock(side_effect=fake_apply)
+        self._full_ui(shell)
+        self._scan(
+            shell,
+            _export_dict(
+                sensitivity_left=host_curve,
+                sensitivity_left_8point=_ANCHORS_8,
+            ),
+        )
+        shell.restore_point_service.read_current_state_with_provenance = MagicMock(
+            side_effect=lambda: (
+                dataclasses.replace(
+                    applied["snapshot"], sensitivity_left_8point=None
+                ),
+                {},
+                {},
+            )
+        )
+
+        with patch("zd_app.ui.app_shell.time.sleep"):
+            shell.safe_import_apply(apply_to_controller=True)
+
+        audit = shell._safe_import_result.audit
+        self.assertEqual(audit.sensitivity_downgrades, ("sens_left",))
+        self.assertEqual(audit.controller_write, "verified")
+        self.assertTrue(audit.verified)
+        self.assertEqual(audit.verify_mismatched, [])
+        self.assertEqual(audit.verify_unverifiable, [])
+        joined = "\n".join(self._labels(safe_import.RESULT_MODAL))
+        self.assertIn(i18n.t("apply.result.sens_8point_downgraded"), joined)
+
     def test_mismatched_readback_downgrades_to_sent_and_names_field(self) -> None:
         shell, applied = self._apply_shell()
 
@@ -970,9 +1039,7 @@ class ApplyVerifyTests(_DpgTestCase):
         self.assertIn(settle, order)
         self.assertLess(order.index(settle), order.index("read"))
 
-    def test_fallback_readback_via_settings_service(self) -> None:
-        # No RestorePointService wired -> the verify read falls back to
-        # settings_service.get_all_settings() and can still earn "verified".
+    def test_missing_restore_point_service_aborts_before_apply(self) -> None:
         shell, applied = self._apply_shell()
         shell.restore_point_service = None
         shell.settings_service.get_all_settings = MagicMock(
@@ -982,9 +1049,10 @@ class ApplyVerifyTests(_DpgTestCase):
             shell.safe_import_apply(apply_to_controller=True)
 
         audit = shell._safe_import_result.audit
-        self.assertEqual(audit.controller_write, "verified")
-        self.assertTrue(audit.verified)
-        shell.settings_service.get_all_settings.assert_called_once()
+        self.assertEqual(audit.controller_write, "aborted")
+        self.assertTrue(audit.aborted_no_restore_point)
+        self.assertNotIn("snapshot", applied)
+        shell.settings_service.get_all_settings.assert_not_called()
 
 
 class ProfilesTabTests(_DpgTestCase):

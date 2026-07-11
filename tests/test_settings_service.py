@@ -3376,6 +3376,8 @@ class TestSupports8PointSensitivity(unittest.TestCase):
         service = _make_service(rec)
 
         self.assertTrue(service.supports_8point_sensitivity())
+        read_events = [e for e in rec.events if e[0] == "read_file"]
+        self.assertEqual(len(read_events), 1)
 
     def test_probe_uses_short_timeout(self) -> None:
         rec = _Recorder(
@@ -3394,10 +3396,39 @@ class TestSupports8PointSensitivity(unittest.TestCase):
         self.assertEqual(read_events[0][3], SENSITIVITY_8POINT_PROBE_TIMEOUT_MS)
 
     def test_timeout_is_not_capable(self) -> None:
-        rec = _Recorder(read_results=[TimeoutError("device never answered 0x86")])
+        rec = _Recorder(
+            read_results=[
+                TimeoutError("device never answered 0x86"),
+                TimeoutError("device never answered 0x86"),
+            ]
+        )
         service = _make_service(rec)
 
         self.assertFalse(service.supports_8point_sensitivity())
+        # Both misses are probed, then the false verdict is cached.
+        self.assertFalse(service.supports_8point_sensitivity())
+        read_events = [e for e in rec.events if e[0] == "read_file"]
+        self.assertEqual(len(read_events), 2)
+
+    def test_first_miss_second_hit_is_capable_and_cached(self) -> None:
+        rec = _Recorder(
+            read_results=[
+                TimeoutError("transient 0x86 read miss"),
+                _make_8point_read_response(
+                    SENSITIVITY_STICK_LEFT, _VERIFIED_LEFT_8POINT
+                ),
+            ]
+        )
+        service = _make_service(rec)
+
+        self.assertTrue(service.supports_8point_sensitivity())
+        # A successful retry is cached; no third probe runs.
+        self.assertTrue(service.supports_8point_sensitivity())
+        read_events = [e for e in rec.events if e[0] == "read_file"]
+        self.assertEqual(len(read_events), 2)
+        self.assertTrue(
+            all(event[3] == SENSITIVITY_8POINT_PROBE_TIMEOUT_MS for event in read_events)
+        )
 
     def test_garbage_response_is_not_capable(self) -> None:
         anchors = [SensitivityAnchor(i * 10, i * 10) for i in range(8)]

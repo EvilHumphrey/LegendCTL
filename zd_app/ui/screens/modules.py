@@ -273,11 +273,14 @@ def _bundle_service(shell) -> Optional[DiagnosticBundleService]:
 def _device_identity(shell) -> dict:
     """Best-effort device identity for the bundle's Hardware section.
 
-    Reads ``product_name``/``firmware_version``/``connection_state`` off
-    the shell's device service when present. The bundle service treats
-    every missing field as "Unknown", so partial data is fine.
+    An AppShell supplies the canonical Diagnostics rich-bundle builder, so
+    Modules delegates to it and preserves firmware provenance exactly. Small
+    screen-only test shells fall back to the same best-effort construction.
     """
 
+    bundle_identity = getattr(shell, "_bundle_device_identity", None)
+    if callable(bundle_identity):
+        return bundle_identity()
     device_service = getattr(shell, "device_service", None)
     if device_service is None:
         return {}
@@ -286,9 +289,12 @@ def _device_identity(shell) -> dict:
     except Exception:  # noqa: BLE001 — best-effort
         logger.exception("modules.export: device_service.state lookup raised")
         return {}
+    firmware_version = getattr(state, "firmware_version", None) or None
+    summary_sources = getattr(state, "summary_sources", {}) or {}
     return {
         "product_string": getattr(state, "product_name", None) or None,
-        "firmware_version": getattr(state, "firmware_version", None) or None,
+        "firmware_version": firmware_version,
+        "firmware_source": summary_sources.get("firmware") if firmware_version else None,
         "connection": getattr(state, "connection_state", None) or None,
         "active_slot": None,
     }

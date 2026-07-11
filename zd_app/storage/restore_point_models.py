@@ -204,6 +204,7 @@ class RestoreResult:
     fields: tuple[RestoreFieldOutcome, ...]
     before_restore_point_id: Optional[str]
     completed_at: str   # ISO-8601 UTC
+    sensitivity_downgrades: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

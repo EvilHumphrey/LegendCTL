@@ -27,7 +27,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import dearpygui.dearpygui as dpg
+
 from tests.r2_shell_test_helpers import make_shell
+from zd_app.services._log_entry import ComposedLogEntry, render_log_message
 from zd_app.services.settings_apply_coordinator import outcome_label
 from zd_app.services.settings_service import (
     ControllerSnapshot,
@@ -150,6 +153,52 @@ class ProfileApplyHookTests(unittest.TestCase):
         )
         self.assertEqual(self.service.captures, [])
 
+    def test_capture_failure_stops_before_write_then_continue_redispatches(self) -> None:
+        dpg.create_context()
+        self.addCleanup(dpg.destroy_context)
+        self.shell._dpg_context_ready = True
+        self.service.capture = MagicMock(return_value=None)
+        self.shell._apply_wrapper_profile_snapshot = MagicMock()
+        profile = self._profile(with_device=True)
+
+        self.shell._apply_wrapper_profile_resolved("Apex", profile, include_device=True)
+
+        self.shell._apply_wrapper_profile_snapshot.assert_not_called()
+        self.assertTrue(dpg.does_item_exist(app_shell_module.APPLY_NO_RESTORE_POINT_MODAL))
+        self.assertEqual(
+            dpg.get_item_label(app_shell_module.APPLY_NO_RESTORE_POINT_MODAL),
+            "No restore point",
+        )
+        self.assertTrue(
+            dpg.does_item_exist(app_shell_module.APPLY_NO_RESTORE_POINT_CONTINUE_BUTTON)
+        )
+
+        dpg.get_item_callback(
+            app_shell_module.APPLY_NO_RESTORE_POINT_CONTINUE_BUTTON
+        )()
+
+        self.shell._apply_wrapper_profile_snapshot.assert_called_once()
+        self.assertTrue(
+            self.shell._apply_wrapper_profile_snapshot.call_args.kwargs[
+                "no_restore_point"
+            ]
+        )
+        self.assertEqual(self.service.capture.call_count, 1)
+
+    def test_capture_failure_cancel_writes_nothing_and_logs_cancel(self) -> None:
+        dpg.create_context()
+        self.addCleanup(dpg.destroy_context)
+        self.shell._dpg_context_ready = True
+        self.service.capture = MagicMock(return_value=None)
+        self.shell._apply_wrapper_profile_snapshot = MagicMock()
+        profile = self._profile(with_device=True)
+
+        self.shell._apply_wrapper_profile_resolved("Apex", profile, include_device=True)
+        dpg.get_item_callback(app_shell_module.APPLY_NO_RESTORE_POINT_CANCEL_BUTTON)()
+
+        self.shell._apply_wrapper_profile_snapshot.assert_not_called()
+        self.shell.device_service.log_i18n_event.assert_called_with("actions.cancel")
+
 
 # ---------------------------------------------------------------------------
 # before_safe_import_apply
@@ -222,20 +271,112 @@ class ManualDeviceWriteHookTests(unittest.TestCase):
             "before_manual_device_setting_write",
         ])
 
+    def test_same_device_window_still_debounces(self) -> None:
+        self.shell.device_service.state.stable_identifier = "zd-unit-a"
+
+        first_allowed, first_disclosed = self.shell._manual_device_write_gate(
+            field_key="step_size", on_continue=lambda: None
+        )
+        second_allowed, second_disclosed = self.shell._manual_device_write_gate(
+            field_key="step_size", on_continue=lambda: None
+        )
+
+        self.assertTrue(first_allowed)
+        self.assertFalse(first_disclosed)
+        self.assertTrue(second_allowed)
+        self.assertFalse(second_disclosed)
+        self.assertEqual(len(self.service.captures), 1)
+
+    def test_a_to_b_swap_re_gates_restore_point_and_consent_windows(self) -> None:
+        # Audit26 ST-F1: A's successful restore point and no-checkpoint
+        # consent must not cover the same field on B during the seven-second
+        # window. B's capture failure therefore reopens the explicit gate.
+        self.shell.device_service.state.stable_identifier = "zd-unit-a"
+        self.service.capture = MagicMock(
+            side_effect=[SimpleNamespace(id="rp-a"), None]
+        )
+        self.shell._open_no_restore_point_confirm = MagicMock()
+
+        allowed_a, disclosed_a = self.shell._manual_device_write_gate(
+            field_key="step_size", on_continue=lambda: None
+        )
+        self.assertTrue(allowed_a)
+        self.assertFalse(disclosed_a)
+        self.shell._manual_no_restore_point_confirmed_for_field[
+            ("zd-unit-a", "step_size")
+        ] = app_shell_module.time.monotonic()
+
+        self.shell.device_service.state.stable_identifier = "zd-unit-b"
+        allowed_b, disclosed_b = self.shell._manual_device_write_gate(
+            field_key="step_size", on_continue=lambda: None
+        )
+
+        self.assertFalse(allowed_b)
+        self.assertFalse(disclosed_b)
+        self.assertEqual(self.service.capture.call_count, 2)
+        self.shell._open_no_restore_point_confirm.assert_called_once()
+        self.assertEqual(self.shell._last_manual_rp_for_field, {})
+        self.assertEqual(self.shell._manual_no_restore_point_confirmed_for_field, {})
+
+    def test_disconnect_observation_clears_manual_write_windows(self) -> None:
+        self.shell.device_service.state.connection_state = "connected"
+        self.shell.device_service.state.stable_identifier = "zd-unit-a"
+        self.shell._sync_manual_write_windows_to_device_state()
+        scope_key = ("zd-unit-a", "step_size")
+        self.shell._last_manual_rp_for_field[scope_key] = 1.0
+        self.shell._manual_no_restore_point_confirmed_for_field[scope_key] = 1.0
+
+        self.shell.device_service.state.connection_state = "no_device"
+        self.shell.device_service.state.stable_identifier = "unknown"
+        self.shell._sync_manual_write_windows_to_device_state()
+
+        self.assertEqual(self.shell._last_manual_rp_for_field, {})
+        self.assertEqual(self.shell._manual_no_restore_point_confirmed_for_field, {})
+
+    def test_pending_consent_restarts_the_gate_after_an_identity_change(self) -> None:
+        # The confirmation modal is asynchronous. If it was opened for A and B
+        # arrives before Continue, only the normal B gate may resume the action.
+        self.shell.device_service.state.stable_identifier = "zd-unit-a"
+        self.service.capture = MagicMock(return_value=None)
+        self.shell._open_no_restore_point_confirm = MagicMock()
+        resumed_without_regate = MagicMock()
+        re_gate = MagicMock()
+
+        allowed, disclosed = self.shell._manual_device_write_gate(
+            field_key="step_size",
+            on_continue=resumed_without_regate,
+            on_identity_changed=re_gate,
+        )
+        self.assertFalse(allowed)
+        self.assertFalse(disclosed)
+        continue_callback = self.shell._open_no_restore_point_confirm.call_args.kwargs[
+            "on_continue"
+        ]
+
+        self.shell.device_service.state.stable_identifier = "zd-unit-b"
+        continue_callback()
+
+        resumed_without_regate.assert_not_called()
+        re_gate.assert_called_once_with()
+
     def test_capture_fires_again_after_debounce_window_elapses(self) -> None:
         self.shell._maybe_capture_before_manual_device_write(field_key="step_size")
         # Rewind the debounce timestamp so the next call is past the window.
-        self.shell._last_manual_rp_for_field["step_size"] -= (
+        scope_key = (
+            self.shell.device_service.state.stable_identifier,
+            "step_size",
+        )
+        self.shell._last_manual_rp_for_field[scope_key] -= (
             app_shell_module.MANUAL_DEVICE_WRITE_RP_WINDOW_S + 1.0
         )
         self.shell._maybe_capture_before_manual_device_write(field_key="step_size")
         captures = [trigger for trigger, _, _ in self.service.captures]
         self.assertEqual(len(captures), 2)
 
-    def test_apply_step_size_source_contains_hook_call(self) -> None:
+    def test_apply_step_size_source_contains_disclosed_gate_before_write(self) -> None:
         # Source-level smoke: the public ``apply_step_size`` entry point's
-        # body must invoke ``_maybe_capture_before_manual_device_write``
-        # with ``field_key='step_size'`` BEFORE the write path dispatch.
+        # body must invoke the disclosed gate with ``field_key='step_size'``
+        # BEFORE the write path dispatch.
         # Inspecting source avoids the segfault that DPG-less invocation of
         # the full apply chain triggers on Windows at process exit while
         # still proving the wiring. After the drag-storm-debounce work the actual
@@ -244,25 +385,81 @@ class ManualDeviceWriteHookTests(unittest.TestCase):
         # to that helper is the load-bearing post-hook anchor.
         import inspect
         src = inspect.getsource(self.shell.__class__.apply_step_size)
-        hook_idx = src.find("_maybe_capture_before_manual_device_write")
+        hook_idx = src.find("_manual_device_write_gate")
         write_idx = src.find("_do_write_step_size(")
         self.assertGreater(hook_idx, 0, "step_size hook missing")
         self.assertGreater(write_idx, 0, "step_size write dispatch missing")
         self.assertLess(hook_idx, write_idx, "hook must fire BEFORE write")
         self.assertIn("field_key=\"step_size\"", src)
 
-    def test_apply_polling_rate_source_contains_hook_call(self) -> None:
+    def test_apply_polling_rate_source_contains_disclosed_gate_before_write(self) -> None:
         # See ``test_apply_step_size_source_contains_hook_call`` — same
         # rationale for inspecting the dispatch to ``_do_write_polling_rate``
         # instead of the inner ``settings_service.set_polling_rate`` call.
         import inspect
         src = inspect.getsource(self.shell.__class__.apply_polling_rate)
-        hook_idx = src.find("_maybe_capture_before_manual_device_write")
+        hook_idx = src.find("_manual_device_write_gate")
         write_idx = src.find("_do_write_polling_rate(")
         self.assertGreater(hook_idx, 0, "polling_rate hook missing")
         self.assertGreater(write_idx, 0, "polling_rate write dispatch missing")
         self.assertLess(hook_idx, write_idx, "hook must fire BEFORE write")
         self.assertIn("field_key=\"polling_rate\"", src)
+
+    def test_step_size_capture_failure_blocks_write_until_continue_and_marks_result(self) -> None:
+        dpg.create_context()
+        self.addCleanup(dpg.destroy_context)
+        self.shell._dpg_context_ready = True
+        self.shell._step_size_hydrated = True
+        self.service.capture = MagicMock(return_value=None)
+        self.shell.refresh_shell = MagicMock()
+        self.shell._maybe_offer_save_step_size_to_profile = MagicMock()
+        self.shell._record_settings_apply_result = MagicMock()
+
+        self.shell.apply_step_size(42)
+
+        self.shell.settings_service.set_step_size.assert_not_called()
+        self.assertTrue(dpg.does_item_exist(app_shell_module.APPLY_NO_RESTORE_POINT_MODAL))
+
+        dpg.get_item_callback(
+            app_shell_module.APPLY_NO_RESTORE_POINT_CONTINUE_BUTTON
+        )()
+
+        self.shell.settings_service.set_step_size.assert_called_once_with(42)
+        self.assertTrue(
+            self.shell._record_settings_apply_result.call_args.kwargs[
+                "no_restore_point"
+            ]
+        )
+
+    def test_step_size_capture_failure_cancel_writes_nothing(self) -> None:
+        dpg.create_context()
+        self.addCleanup(dpg.destroy_context)
+        self.shell._dpg_context_ready = True
+        self.shell._step_size_hydrated = True
+        self.service.capture = MagicMock(return_value=None)
+
+        self.shell.apply_step_size(42)
+        dpg.get_item_callback(app_shell_module.APPLY_NO_RESTORE_POINT_CANCEL_BUTTON)()
+
+        self.shell.settings_service.set_step_size.assert_not_called()
+        self.shell.device_service.log_i18n_event.assert_called_with("actions.cancel")
+
+    def test_disclosed_result_appends_note_and_emits_activity_event(self) -> None:
+        self.shell._update_apply_status = MagicMock()
+
+        self.shell._record_settings_apply_result(
+            True,
+            "Applied setting.",
+            no_restore_point=True,
+        )
+
+        recorded = self.shell.device_service.record_apply_result.call_args.args[1]
+        self.assertIsInstance(recorded, ComposedLogEntry)
+        self.assertIn(
+            "Note: no restore point was created before this apply.",
+            render_log_message(recorded),
+        )
+        self.shell.device_service.log_i18n_event.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -334,7 +531,10 @@ class CaptureExceptionContainmentTests(unittest.TestCase):
         # The debounce timestamp should NOT have been set (capture returned
         # None), so a follow-up call would still attempt capture — that's
         # the intentional retry-on-transient-failure behavior.
-        self.assertNotIn("step_size", shell._last_manual_rp_for_field)
+        self.assertNotIn(
+            (shell.device_service.state.stable_identifier, "step_size"),
+            shell._last_manual_rp_for_field,
+        )
 
     def test_first_connect_helper_swallows_capture_exception(self) -> None:
         shell, _ = _make_shell_with_recording_rp_service()

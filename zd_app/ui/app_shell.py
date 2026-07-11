@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 import dearpygui.dearpygui as dpg
 
-from zd_app.i18n import set_locale, t
+from zd_app.i18n import DEFAULT_LOCALE, SUPPORTED_LOCALES, set_locale, t
 from zd_app.models import (
     AppSettings,
     BUTTON_ACTIONS,
@@ -27,6 +27,7 @@ from zd_app.models import (
     WrapperProfile,
     utc_now_iso,
 )
+from zd_app.services._log_entry import ComposedLogEntry
 from zd_app.services.device_service import DeviceService, LogEntry, render_log_message
 from zd_app.services.diagnostics_service import DiagnosticsService
 from zd_app.services.health_report import (
@@ -61,6 +62,7 @@ from zd_app.services.settings_apply_coordinator import (
     outcome_used_retry as _settings_outcome_used_retry,
     result_error_text as _settings_result_error_text,
     result_is_transient as _settings_result_is_transient,
+    snapshot_as_sent,
 )
 from zd_app.services.settings_service import (
     AxisInversion,
@@ -105,7 +107,9 @@ from zd_app.ui import (
     right_rail,
     safe_import_model,
     support_reference,
+    trust_front_door,
 )
+from zd_app.ui.choice_labels import to_canonical, to_display
 from zd_app.ui.fonts import bind_default_font, register_fonts
 from zd_app.ui.typography import screen_title
 from zd_app.ui.localized_dpg import install_dearpygui_i18n
@@ -139,11 +143,15 @@ from zd_app.version import __app_name__, __build_commit__, __version__
 # Device-settings widget/modal tags.
 SAVE_AS_INCLUDE_DEVICE_CHECKBOX = "wrapper_profile_include_device_checkbox"
 APPLY_DEVICE_CONFIRM_MODAL = "apply_device_confirm_modal"
+APPLY_NO_RESTORE_POINT_MODAL = "apply_no_restore_point_modal"
+APPLY_NO_RESTORE_POINT_CONTINUE_BUTTON = "apply_no_restore_point_continue_button"
+APPLY_NO_RESTORE_POINT_CANCEL_BUTTON = "apply_no_restore_point_cancel_button"
 CLEAR_DIAGNOSTIC_LOGS_CONFIRM_MODAL = "clear_diagnostic_logs_confirm_modal"
 CLEAR_DIAGNOSTIC_LOGS_CONFIRM_BUTTON = "clear_diagnostic_logs_confirm_button"
 CLEAR_DIAGNOSTIC_LOGS_MODAL_SWAP_DELETE_TAGS = (
     CLEAR_DIAGNOSTIC_LOGS_CONFIRM_MODAL,
     APPLY_DEVICE_CONFIRM_MODAL,
+    APPLY_NO_RESTORE_POINT_MODAL,
     "wrapper_profile_delete_popup",
     "wrapper_profile_save_as_modal",
     "support_guide_modal",
@@ -245,6 +253,15 @@ def threaded_hid_executor(
     threading.Thread(target=_worker, name="zd-hid-job", daemon=True).start()
 
 
+@dataclass(frozen=True)
+class _PendingSliderWrite:
+    """A throttled live-write plus the trust context it was admitted under."""
+
+    value: Any
+    no_restore_point: bool
+    stable_identifier: str
+
+
 class _SliderWriteThrottle:
     """Throttle slider live-writes with leading-edge fire + trailing-edge flush.
 
@@ -262,9 +279,17 @@ class _SliderWriteThrottle:
     def __init__(self, *, window_s: float = SLIDER_LIVE_WRITE_THROTTLE_S):
         self._window_s = window_s
         self._last_write_ts: dict[str, float] = {}
-        self._pending: dict[str, Any] = {}
+        self._pending: dict[str, _PendingSliderWrite] = {}
 
-    def should_write_now(self, field_key: str, value: Any, *, now: float) -> bool:
+    def should_write_now(
+        self,
+        field_key: str,
+        value: Any,
+        *,
+        now: float,
+        no_restore_point: bool,
+        stable_identifier: str,
+    ) -> bool:
         """Returns True if ``value`` should be written immediately.
 
         If False, the value is stored as pending and will fire on the next
@@ -276,23 +301,27 @@ class _SliderWriteThrottle:
             self._last_write_ts[field_key] = now
             self._pending.pop(field_key, None)
             return True
-        self._pending[field_key] = value
+        self._pending[field_key] = _PendingSliderWrite(
+            value=value,
+            no_restore_point=no_restore_point,
+            stable_identifier=stable_identifier,
+        )
         return False
 
-    def flush_pending(self, *, now: float) -> list[tuple[str, Any]]:
-        """Return ``(field_key, value)`` pairs whose throttle window has elapsed.
+    def flush_pending(self, *, now: float) -> list[tuple[str, _PendingSliderWrite]]:
+        """Return queued writes whose throttle window has elapsed.
 
         Updates ``_last_write_ts`` for each flushed field so a subsequent
         write within the next window is throttled normally.
         """
 
-        flushed: list[tuple[str, Any]] = []
-        for field_key, value in list(self._pending.items()):
+        flushed: list[tuple[str, _PendingSliderWrite]] = []
+        for field_key, pending in list(self._pending.items()):
             last = self._last_write_ts.get(field_key, 0.0)
             if now - last >= self._window_s:
                 self._last_write_ts[field_key] = now
                 del self._pending[field_key]
-                flushed.append((field_key, value))
+                flushed.append((field_key, pending))
         return flushed
 
     def peek_pending(self) -> list[str]:
@@ -697,6 +726,30 @@ def _make_log_entry(key: str, **fmt_args) -> LogEntry:
     )
 
 
+def _with_log_note_keys(
+    message: str | LogEntry | ComposedLogEntry,
+    *note_keys: str,
+) -> str | LogEntry | ComposedLogEntry:
+    """Append localized note keys without rendering the base message early."""
+
+    additions = tuple(key for key in note_keys if key)
+    if not additions:
+        return message
+    if isinstance(message, ComposedLogEntry):
+        base = message.base
+        existing = message.note_keys
+        timestamp = message.timestamp
+    else:
+        base = message
+        existing = ()
+        timestamp = message.timestamp if isinstance(message, LogEntry) else time.strftime("%H:%M:%S")
+    return ComposedLogEntry(
+        base=base,
+        note_keys=tuple(dict.fromkeys((*existing, *additions))),
+        timestamp=timestamp,
+    )
+
+
 def _deadzone_verify_status_key(readback, written: "StickDeadzones") -> str:
     """Map a deadzone read-back result to a diagnostics status key (item J).
 
@@ -1034,6 +1087,10 @@ class AppShell:
         # store; None keeps the recording hooks no-ops.
         self.last_applied_store = last_applied_store
         self.settings = settings_store.load()
+        # ``How to verify this`` intentionally lets a first-run user inspect
+        # proof surfaces before accepting. Keep that session in a distinct
+        # pending state so those reads stay open while controller writes do not.
+        self._consent_pending_verify = False
         set_locale(self.settings.language)
         self._locale_router = LocaleRouter()
         self._locale_router.subscribe(self._on_locale_changed)
@@ -1063,6 +1120,12 @@ class AppShell:
         # (see home._settings_read_this_session).
         self.last_snapshot_identity: str | None = None
         self.last_snapshot_status = ""
+        # Keep the structured message as well as its current display text.
+        # ``ComposedLogEntry`` disclosure notes must render under the locale at
+        # the point the footer/status strip is consumed, not the locale that
+        # happened to be active when the HID job completed.
+        self._apply_status_message: str | LogEntry | ComposedLogEntry | None = None
+        self._apply_status_success = False
         self._apply_status_text: str | None = None
         self._apply_status_clear_after: float | None = None
         self._last_apply_result: ApplyResult | None = None
@@ -1221,11 +1284,24 @@ class AppShell:
         # ModulesScreenState on first build.
         self.modules_screen_state = None
         # Debounce state for the before_manual_device_setting_write trigger.
-        # Map: setting-field-key -> monotonic timestamp of the last RP we
-        # captured for that field. A new RP only fires if the elapsed time
-        # exceeds MANUAL_DEVICE_WRITE_RP_WINDOW_S — keeps slider drags from
-        # creating one RP per tick (the "Trigger model" design + spec RPU4).
-        self._last_manual_rp_for_field: dict[str, float] = {}
+        # Map: (stable-identifier, setting-field-key) -> monotonic timestamp
+        # of the last RP we captured for that device/field pair. A new RP only
+        # fires if the elapsed time exceeds MANUAL_DEVICE_WRITE_RP_WINDOW_S —
+        # keeps slider drags from creating one RP per tick without allowing a
+        # restore point from one controller to cover another.
+        self._last_manual_rp_for_field: dict[tuple[str, str], float] = {}
+        # A user who explicitly accepts a manual device write without a restore
+        # point may continue the current drag/interaction window without a modal
+        # per callback. This is scoped to the same controller/field pair; each
+        # resulting write still carries the disclosure note.
+        self._manual_no_restore_point_confirmed_for_field: dict[tuple[str, str], float] = {}
+        manual_window_state = self.device_service.state
+        self._manual_write_windows_connection_state = getattr(
+            manual_window_state, "connection_state", "no_device"
+        )
+        self._manual_write_windows_stable_identifier = str(
+            getattr(manual_window_state, "stable_identifier", "unknown") or "unknown"
+        )
         # Inner drag-storm throttle for slider live-writes. The outer
         # debounce above governs RP capture (7 s); this inner throttle
         # governs the HID write itself (~150 ms). Drag-storm debounce
@@ -1320,6 +1396,7 @@ class AppShell:
 
     def run(self) -> None:
         self.device_service.refresh_state(background=False)
+        self._sync_manual_write_windows_to_device_state()
         self._last_connection_state = self.device_service.state.connection_state
         dpg.create_context()
         self._dpg_context_ready = True
@@ -1691,6 +1768,8 @@ class AppShell:
         self._build_main_window()
         self.rebuild_current_screen()
         self.refresh_shell()
+        if self._apply_status_clear_after is not None:
+            self._render_active_apply_status()
         self._set_window_title(self.window_title())
 
     def window_title(self) -> str:
@@ -1965,6 +2044,11 @@ class AppShell:
         # auto-read and drawer-created restore points both land after that
         # build; this flips the ✓ live. No-op off Home / when dismissed.
         home.refresh_setup_drawer(self)
+        # Re-derive the Diagnostics provenance matrix in place. Its rows snapshot
+        # the device-state signals at build time, but the startup auto-read,
+        # async fingerprint, and disconnects all land afterward; this keeps each
+        # row's verified/inferred/unknown label live. No-op off Diagnostics.
+        diagnostics.refresh_trust_matrix(self)
         right_rail.refresh(self)
 
     def _set_if_exists(self, tag: str, value) -> None:
@@ -2154,6 +2238,26 @@ class AppShell:
         if not self._hid_job_in_flight:
             return True
         self._refuse_hid_job()
+        return False
+
+    def _consent_pending_write_allowed_or_refuse(self) -> bool:
+        """Refuse a controller write while first-run consent is pending.
+
+        ``_verify`` is deliberately read-only and leaves navigation open.  It
+        must not turn into an implicit acceptance path for writes, so the
+        affected write entry points call this after their ordinary HID/device
+        availability guard.  The status records why the write did not happen,
+        and the existing first-run modal is re-offered instead of adding a new
+        persistent banner surface.
+        """
+
+        if not self._consent_pending_verify:
+            return True
+        self._record_settings_apply_result(
+            False,
+            t("first_run.pending_write_blocked"),
+        )
+        self._show_first_run_acknowledgment_modal_if_needed()
         return False
 
     def _set_hid_flow_buttons_enabled(self, enabled: bool) -> None:
@@ -2382,6 +2486,16 @@ class AppShell:
         # controller within one session doesn't spam the vault. The capture
         # itself is best-effort and never blocks the read.
         first_connect_identity = self._capture_first_readable_connect()
+        # Best-effort official-app summary enrichment. Firmware + active profile
+        # are NOT protocol-readable from the controller (proven by the 2026-07-06
+        # RE investigation); the only in-app source is the official ZD app's
+        # "Controller Settings" window, scraped here so a Read populates them
+        # honestly (source "official_app_ui" -> the trust matrix's amber
+        # "From the official app" chip). Runs job-side because it spawns a short
+        # PowerShell UIA probe; it degrades silently and never delays/fails the
+        # primary settings snapshot above. The common case (vendor app closed)
+        # fast-returns (~0.27s, well under the probe's 3s ceiling).
+        self.device_service.read_official_summary_into_state()
         return snapshot, first_connect_identity, skipped_fields
 
     def _refresh_read_on_done(self, outcome, *, include_device: bool) -> None:
@@ -2577,7 +2691,7 @@ class AppShell:
         if label is None:
             missing.append("vibration")
             return
-        self._set_widget("vibration_mode_combo", label)
+        self._set_widget("vibration_mode_combo", to_display("vibration_mode", label))
 
     def _hydrate_triggers(
         self,
@@ -2594,7 +2708,7 @@ class AppShell:
             if label is None:
                 missing.append("trigger_left")
             else:
-                self._set_widget("trigger_left_mode_combo", label)
+                self._set_widget("trigger_left_mode_combo", to_display("trigger_mode", label))
         if right is None:
             missing.append("trigger_right")
         else:
@@ -2604,7 +2718,7 @@ class AppShell:
             if label is None:
                 missing.append("trigger_right")
             else:
-                self._set_widget("trigger_right_mode_combo", label)
+                self._set_widget("trigger_right_mode_combo", to_display("trigger_mode", label))
 
     def _hydrate_deadzones(
         self,
@@ -2841,7 +2955,10 @@ class AppShell:
             missing.append("lighting_zones")
             return
         zone = LightingZone.HOME if LightingZone.HOME in zones else next(iter(zones))
-        self._set_widget("lighting_zone_combo", LIGHTING_ZONE_LABEL_BY_ENUM[zone])
+        self._set_widget(
+            "lighting_zone_combo",
+            to_display("lighting_zone", LIGHTING_ZONE_LABEL_BY_ENUM[zone]),
+        )
         self._update_lighting_widgets_for_zone(zone)
 
     def _set_widget(self, tag: str, value) -> None:
@@ -2881,11 +2998,33 @@ class AppShell:
         self._set_if_exists("settings_v2_status_text", text)
         self._set_if_exists("footer_status_text", text)
 
-    def _record_settings_apply_result(self, success: bool, message: str | LogEntry) -> None:
+    def _record_settings_apply_result(
+        self,
+        success: bool,
+        message: str | LogEntry | ComposedLogEntry,
+        *,
+        no_restore_point: bool = False,
+    ) -> None:
+        if no_restore_point:
+            message = _with_log_note_keys(message, "apply.result.no_restore_point_note")
         rendered = render_log_message(message)
-        record_message = message if isinstance(self.device_service, DeviceService) else rendered
+        record_message = (
+            message
+            if isinstance(self.device_service, DeviceService)
+            or isinstance(message, ComposedLogEntry)
+            else rendered
+        )
         self.device_service.record_apply_result(success, record_message)
-        self._update_apply_status(rendered, success)
+        self._update_apply_status(message, success)
+
+    def _with_sensitivity_downgrade_notice(
+        self,
+        message: str | LogEntry | ComposedLogEntry,
+        apply_result: ApplyResult,
+    ) -> str | LogEntry | ComposedLogEntry:
+        if not getattr(apply_result, "sensitivity_downgrades", ()):
+            return message
+        return _with_log_note_keys(message, "apply.result.sens_8point_downgraded")
 
     def list_wrapper_profiles(self) -> list[WrapperProfile]:
         try:
@@ -2983,6 +3122,8 @@ class AppShell:
         if not self._zd_write_allowed_or_refuse():
             self.refresh_shell()
             return
+        if not self._consent_pending_write_allowed_or_refuse():
+            return
 
         if self.settings_service is None:
             message = t("apply.profile.unavailable")
@@ -3021,11 +3162,13 @@ class AppShell:
         *,
         title: str | None = None,
     ):
-        """Capture a restore point without ever crashing the apply path.
+        """Capture a restore point without ever crashing the calling flow.
 
         Wraps :meth:`RestorePointService.capture` in a broad try/except —
-        per the "Apply coordinator interaction" design, a failed capture must
-        not block the actual write. Returns the
+        capture failures never raise through a user action. The caller owns the
+        flow-specific policy: Safe Import fails closed, while normal applies may
+        continue only after the user explicitly accepts the missing checkpoint.
+        Returns the
         :class:`~zd_app.storage.restore_point_models.RestorePoint` on
         success, ``None`` on no-service or any exception.
 
@@ -3056,10 +3199,69 @@ class AppShell:
             return rp
         except Exception:
             logger.exception(
-                "Restore-point capture failed for trigger %r — apply path continues",
+                "Restore-point capture failed for trigger %r",
                 trigger.type,
             )
             return None
+
+    def _open_no_restore_point_confirm(
+        self,
+        *,
+        on_continue: Callable[[], None],
+        on_cancel: Callable[[], None] | None = None,
+    ) -> None:
+        """Ask before a normal apply proceeds without a restore point.
+
+        This is deliberately a render-thread-only modal. Job-side callers post
+        it through :meth:`_defer_modal_swap`; direct Device callbacks are
+        already render-side and call it as a simple pre-write gate.
+        """
+
+        cancel = on_cancel or (lambda: None)
+        if not self._dpg_context_ready:
+            # There is no visible confirmation surface in a headless path, so a
+            # normal apply cannot silently proceed without the checkpoint.
+            self.device_service.log_i18n_event("actions.cancel")
+            cancel()
+            return
+        if dpg.does_item_exist(APPLY_NO_RESTORE_POINT_MODAL):
+            dpg.delete_item(APPLY_NO_RESTORE_POINT_MODAL)
+
+        def continue_without_restore_point() -> None:
+            if dpg.does_item_exist(APPLY_NO_RESTORE_POINT_MODAL):
+                dpg.delete_item(APPLY_NO_RESTORE_POINT_MODAL)
+            on_continue()
+
+        def cancel_without_restore_point() -> None:
+            if dpg.does_item_exist(APPLY_NO_RESTORE_POINT_MODAL):
+                dpg.delete_item(APPLY_NO_RESTORE_POINT_MODAL)
+            self.device_service.log_i18n_event("actions.cancel")
+            cancel()
+
+        with dpg.window(
+            tag=APPLY_NO_RESTORE_POINT_MODAL,
+            label=t("apply.no_restore_point.title"),
+            modal=True,
+            no_resize=True,
+            width=520,
+            height=190,
+            on_close=cancel_without_restore_point,
+        ):
+            dpg.add_text(t("apply.no_restore_point.body"), wrap=480)
+            dpg.add_spacer(height=10)
+            with dpg.group(horizontal=True):
+                dpg.add_button(
+                    label=t("apply.no_restore_point.continue"),
+                    width=230,
+                    callback=continue_without_restore_point,
+                    tag=APPLY_NO_RESTORE_POINT_CONTINUE_BUTTON,
+                )
+                dpg.add_button(
+                    label=t("actions.cancel"),
+                    width=100,
+                    callback=cancel_without_restore_point,
+                    tag=APPLY_NO_RESTORE_POINT_CANCEL_BUTTON,
+                )
 
     def _record_last_applied_safe(
         self,
@@ -3102,7 +3304,7 @@ class AppShell:
                     failed_fields=tuple(
                         failure.setting_label for failure in apply_result.failed
                     ),
-                    snapshot=snapshot,
+                    snapshot=snapshot_as_sent(snapshot, apply_result),
                 )
             )
         except Exception:
@@ -3214,7 +3416,47 @@ class AppShell:
                 identity.product_string or "__unknown__",
             )
 
-    def _maybe_capture_before_manual_device_write(self, *, field_key: str) -> None:
+    def _manual_write_stable_identifier(self) -> str:
+        """Return the device identity that currently owns a manual write."""
+
+        state = self.device_service.state
+        return str(getattr(state, "stable_identifier", "unknown") or "unknown")
+
+    def _sync_manual_write_windows_to_device_state(self) -> None:
+        """Discard manual-write windows at a disconnect or identity boundary.
+
+        The keyed maps below are the primary cross-device safety boundary. This
+        transition clear additionally removes stale interaction state as soon as
+        AppShell observes the same presence transitions that
+        ``DeviceService.refresh_state`` applies, including a connected-to-
+        connected controller swap.
+        """
+
+        state = self.device_service.state
+        connection_state = getattr(state, "connection_state", "no_device")
+        stable_identifier = self._manual_write_stable_identifier()
+        previous_connection_state = self._manual_write_windows_connection_state
+        previous_stable_identifier = self._manual_write_windows_stable_identifier
+        disconnected = (
+            previous_connection_state == "connected"
+            and connection_state != "connected"
+        )
+        identity_changed = stable_identifier != previous_stable_identifier
+        if disconnected or identity_changed:
+            self._last_manual_rp_for_field.clear()
+            self._manual_no_restore_point_confirmed_for_field.clear()
+            logger.debug(
+                "Cleared manual-write restore-point and consent windows after "
+                "a disconnect or controller identity change."
+            )
+        self._manual_write_windows_connection_state = connection_state
+        self._manual_write_windows_stable_identifier = stable_identifier
+
+    def _manual_write_scope_key(self, field_key: str) -> tuple[str, str]:
+        self._sync_manual_write_windows_to_device_state()
+        return self._manual_write_stable_identifier(), field_key
+
+    def _maybe_capture_before_manual_device_write(self, *, field_key: str) -> bool:
         """Debounced capture before a manual write to a global device-class field.
 
         ``field_key`` is the field being written (e.g. ``"polling_rate"`` or
@@ -3225,11 +3467,12 @@ class AppShell:
         """
 
         if self.restore_point_service is None:
-            return
+            return False
+        scope_key = self._manual_write_scope_key(field_key)
         now = time.monotonic()
-        last = self._last_manual_rp_for_field.get(field_key)
+        last = self._last_manual_rp_for_field.get(scope_key)
         if last is not None and (now - last) < MANUAL_DEVICE_WRITE_RP_WINDOW_S:
-            return
+            return True
         rp = self._capture_restore_point_safe(
             RestorePointTrigger(
                 type="before_manual_device_setting_write",
@@ -3240,7 +3483,61 @@ class AppShell:
             ),
         )
         if rp is not None:
-            self._last_manual_rp_for_field[field_key] = now
+            self._last_manual_rp_for_field[scope_key] = now
+            self._manual_no_restore_point_confirmed_for_field.pop(scope_key, None)
+            return True
+        return False
+
+    def _manual_device_write_gate(
+        self,
+        *,
+        field_key: str,
+        on_continue: Callable[[], None],
+        on_identity_changed: Callable[[], None] | None = None,
+    ) -> tuple[bool, bool]:
+        """Return whether a manual Device write may run and whether it is disclosed."""
+
+        scope_key = self._manual_write_scope_key(field_key)
+        now = time.monotonic()
+        accepted_at = self._manual_no_restore_point_confirmed_for_field.get(scope_key)
+        if accepted_at is not None and (now - accepted_at) < MANUAL_DEVICE_WRITE_RP_WINDOW_S:
+            return True, True
+        if accepted_at is not None:
+            self._manual_no_restore_point_confirmed_for_field.pop(scope_key, None)
+
+        if self._maybe_capture_before_manual_device_write(field_key=field_key):
+            return True, False
+
+        def continue_without_restore_point() -> None:
+            # The modal is asynchronous: a controller can be unplugged or
+            # swapped while it is visible. A consent prompt shown for A must
+            # never directly resume a write for B.
+            if self._manual_write_scope_key(field_key) != scope_key:
+                logger.debug(
+                    "Manual-write consent invalidated by a controller identity change; "
+                    "re-gating the requested write."
+                )
+                if on_identity_changed is not None:
+                    on_identity_changed()
+                return
+            self._manual_no_restore_point_confirmed_for_field[scope_key] = time.monotonic()
+            on_continue()
+
+        self._open_no_restore_point_confirm(on_continue=continue_without_restore_point)
+        return False, False
+
+    def _manual_write_is_disclosed(self, field_key: str, *, now: float | None = None) -> bool:
+        """Whether the current manual-write debounce window lacks a checkpoint."""
+
+        scope_key = self._manual_write_scope_key(field_key)
+        accepted_at = self._manual_no_restore_point_confirmed_for_field.get(scope_key)
+        if accepted_at is None:
+            return False
+        current = time.monotonic() if now is None else now
+        if (current - accepted_at) < MANUAL_DEVICE_WRITE_RP_WINDOW_S:
+            return True
+        self._manual_no_restore_point_confirmed_for_field.pop(scope_key, None)
+        return False
 
     def _current_device_identity(self) -> DeviceIdentity:
         """Build a :class:`DeviceIdentity` from the current device-service state.
@@ -3294,7 +3591,12 @@ class AppShell:
         )
 
     def _apply_wrapper_profile_resolved(
-        self, name: str, profile: WrapperProfile, *, include_device: bool
+        self,
+        name: str,
+        profile: WrapperProfile,
+        *,
+        include_device: bool,
+        skip_capture: bool = False,
     ) -> None:
         """Apply a profile after the Device-override choice (Device confirm).
 
@@ -3310,14 +3612,14 @@ class AppShell:
             else without_device_settings(profile.snapshot)
         )
 
-        def job() -> None:
-            if include_device:
+        def job() -> bool:
+            if include_device and not skip_capture:
                 # Trigger model #3 — capture before applying a
                 # profile whose payload includes Device settings (polling
                 # rate / step size). Skipped when include_device=False
                 # because "Profile settings only" doesn't change the device
                 # class. The capture is its own HID read, hence job-side.
-                self._capture_restore_point_safe(
+                rp = self._capture_restore_point_safe(
                     RestorePointTrigger(
                         type="before_profile_apply_with_device_settings",
                         source_label="Profile apply (with Device settings)",
@@ -3328,25 +3630,58 @@ class AppShell:
                     ),
                     title=f"Before Device settings apply — {name}",
                 )
+                if rp is None:
+                    # Phase one stops here. The render-side on_done posts a
+                    # visible confirmation; no coordinator write has run.
+                    return False
             # Nested jobbed flow: under the sync default this runs inline; on
             # a worker it executes here and its DPG on_done drains in _tick.
             self._apply_wrapper_profile_snapshot(
-                name, snapshot, include_device=include_device
+                name,
+                snapshot,
+                include_device=include_device,
+                no_restore_point=include_device and skip_capture,
             )
+            return True
 
         def on_done(outcome) -> None:
             if isinstance(outcome, BaseException):
                 raise outcome  # today's path has no catch at this level
+            if outcome:
+                return
+
+            # The Device-confirm modal was closed when the phase-one job
+            # started. Keep the no-restore-point confirmation on the modal
+            # swap seam so DPG receives a rendered frame between teardown and
+            # this new modal's creation.
+            self._defer_modal_swap(
+                lambda: self._open_no_restore_point_confirm(
+                    on_continue=lambda: self._apply_wrapper_profile_resolved(
+                        name,
+                        profile,
+                        include_device=include_device,
+                        skip_capture=True,
+                    ),
+                ),
+                delete_tags=(APPLY_DEVICE_CONFIRM_MODAL,),
+                key="apply_profile_no_restore_point_confirm",
+            )
 
         self._run_hid_job(job, on_done)
 
     def _apply_wrapper_profile_snapshot(
-        self, name: str, snapshot: ControllerSnapshot, *, include_device: bool = True
+        self,
+        name: str,
+        snapshot: ControllerSnapshot,
+        *,
+        include_device: bool = True,
+        no_restore_point: bool = False,
     ) -> None:
         if not self._zd_write_allowed_or_refuse():
             self.refresh_shell()
             return
-
+        if not self._consent_pending_write_allowed_or_refuse():
+            return
         # ``include_device=False`` flows through the post-write
         # refresh_from_controller so the step-size slider and polling-rate
         # combo do not snap to the post-write read; the user's live-write value
@@ -3368,9 +3703,11 @@ class AppShell:
 
         def job() -> ApplyResult:
             apply_result = self._apply_snapshot_to_controller(snapshot)
-            # Phase 2: persist what was just sent (best-effort, never affects
-            # the apply). ``snapshot`` is post any device-field filtering, so
-            # the record holds exactly what the coordinator received.
+            # Phase 2: persist what was actually sent (best-effort, never
+            # affects the apply). ``snapshot`` is post device-field filtering;
+            # any 8-point rider the coordinator downgraded is stripped by the
+            # record seam so the stored curve is the 3-point fallback it wrote.
+            apply_result.no_restore_point = no_restore_point
             self._record_last_applied_safe(
                 name, snapshot, apply_result, include_device=include_device
             )
@@ -3418,7 +3755,12 @@ class AppShell:
                         name=name,
                         n=apply_result.total_attempted,
                     )
-                self._record_settings_apply_result(True, message)
+                message = self._with_sensitivity_downgrade_notice(message, apply_result)
+                self._record_settings_apply_result(
+                    True,
+                    message,
+                    no_restore_point=no_restore_point,
+                )
             else:
                 message = _make_log_entry(
                     "apply.profile.partial",
@@ -3427,7 +3769,12 @@ class AppShell:
                     n=apply_result.total_attempted,
                     k=len(apply_result.failed),
                 )
-                self._record_settings_apply_result(False, message)
+                message = self._with_sensitivity_downgrade_notice(message, apply_result)
+                self._record_settings_apply_result(
+                    False,
+                    message,
+                    no_restore_point=no_restore_point,
+                )
                 self._show_apply_failure_modal(apply_result)
 
         self._run_hid_job(job, on_done)
@@ -3713,11 +4060,20 @@ class AppShell:
         than proceeding into the app. ``dpg.delete_item`` does not fire
         ``on_close``, so accept's teardown never trips the decline path.
 
-        The body reuses ``about.zd_disclaimer`` — the single source of truth
-        for the ZD-required disclaimer — and adds concise risk language. It
-        is ``modal=True`` so it blocks the app behind it; the per-session
-        trust card is ``modal=False`` and does not occupy DPG's single modal
-        slot, so the two never fight over it and need no sequencing here.
+        The compressed factual body gives the identity disclosure, reuses
+        ``about.zd_disclaimer`` as the single source of truth for the
+        ZD-required disclaimer, lists local reads / user-chosen writes / no
+        telemetry, then keeps the legal as-is line. Its ``How to verify
+        this`` link is a deliberate third path: it deletes this modal and
+        opens the Diagnostics trust matrix without acknowledging, saving, or
+        exiting. That lets a user inspect the proof surfaces before consent;
+        because the flag stays unset, the gate returns on the next launch.
+        The link creates no modal, so this direct screen switch needs no
+        ``_defer_modal_swap``. The gate is ``modal=True`` while the
+        per-session trust card is ``modal=False``, so they never fight over
+        DPG's single modal slot.  That verify path leaves an in-memory pending
+        state active: reads and proof surfaces remain open, while a controller
+        write re-opens this gate until acceptance.
 
         Testable without a render loop: the method only creates the window
         and returns (it never spins a loop), and the accept/decline callbacks
@@ -3731,6 +4087,7 @@ class AppShell:
 
         def _accept() -> None:
             self.settings.first_run_acknowledged = True
+            self._consent_pending_verify = False
             try:
                 self.settings_store.save(self.settings)
             except OSError:
@@ -3745,6 +4102,12 @@ class AppShell:
                 dpg.delete_item("first_run_ack_modal")
             self._request_app_exit()
 
+        def _verify() -> None:
+            self._consent_pending_verify = True
+            if dpg.does_item_exist("first_run_ack_modal"):
+                dpg.delete_item("first_run_ack_modal")
+            trust_front_door.open_trust_surface(self, "trust_matrix")
+
         if dpg.does_item_exist("first_run_ack_modal"):
             dpg.delete_item("first_run_ack_modal")
 
@@ -3756,7 +4119,7 @@ class AppShell:
             no_resize=True,
             no_collapse=True,
             width=660,
-            height=540,
+            height=440,
             on_close=lambda *_args: _decline(),
         ):
             dpg.add_text(t("first_run.intro"), wrap=620, tag="first_run_ack_intro_text")
@@ -3768,28 +4131,34 @@ class AppShell:
             )
             dpg.add_spacer(height=10)
             dpg.add_text(
-                t("first_run.risk.writes"),
+                t("first_run.fact.reads"),
                 wrap=600,
                 bullet=True,
-                tag="first_run_ack_risk_writes_text",
+                tag="first_run_ack_fact_reads_text",
             )
             dpg.add_text(
-                t("first_run.risk.hardware"),
+                t("first_run.fact.writes"),
                 wrap=600,
                 bullet=True,
-                tag="first_run_ack_risk_hardware_text",
+                tag="first_run_ack_fact_writes_text",
             )
             dpg.add_text(
-                t("first_run.risk.reversible"),
+                t("first_run.fact.telemetry"),
                 wrap=600,
                 bullet=True,
-                tag="first_run_ack_risk_reversible_text",
+                tag="first_run_ack_fact_telemetry_text",
             )
             dpg.add_text(
                 t("first_run.risk.as_is"),
                 wrap=600,
-                bullet=True,
                 tag="first_run_ack_risk_as_is_text",
+            )
+            dpg.add_spacer(height=8)
+            dpg.add_button(
+                label=t("first_run.verify_link"),
+                small=True,
+                callback=lambda *_args: _verify(),
+                tag="first_run_ack_verify_link",
             )
             dpg.add_spacer(height=14)
             with dpg.group(horizontal=True):
@@ -3840,6 +4209,7 @@ class AppShell:
                     width=150,
                     callback=lambda *args: self._retry_failed_settings(
                         list(apply_result.failed),
+                        originating_result=apply_result,
                     ),
                 )
                 dpg.add_button(
@@ -3853,6 +4223,8 @@ class AppShell:
     def _retry_failed_settings(
         self,
         failures: list[ApplyFailure] | None = None,
+        *,
+        originating_result: ApplyResult | None = None,
     ) -> ApplyResult | None:
         """Retry the failed subset of the last apply as a HID job.
 
@@ -3877,11 +4249,16 @@ class AppShell:
         if not self._hid_available_or_refuse():
             return None
 
+        originating_result = originating_result or self._last_apply_result
+
         if self._dpg_context_ready and dpg.does_item_exist("apply_failure_modal"):
             dpg.delete_item("apply_failure_modal")
 
         def job() -> ApplyResult:
-            retry_result = self._apply_coordinator.retry_failures(retry_failures)
+            retry_result = self._apply_coordinator.retry_failures(
+                retry_failures,
+                originating_result=originating_result,
+            )
             # Phase 2: labels that just recovered are no longer "failed at
             # apply" — amend the stored Last-Applied record (best-effort).
             self._update_last_applied_after_retry_safe(retry_failures, retry_result)
@@ -3900,20 +4277,30 @@ class AppShell:
             completed.append(retry_result)
             self._last_apply_result = retry_result
             if retry_result.failed:
-                message = t(
+                message = _make_log_entry(
                     "apply.retry.partial",
                     m=retry_result.succeeded,
                     n=retry_result.total_attempted,
                     k=len(retry_result.failed),
                 )
-                self._record_settings_apply_result(False, message)
+                message = self._with_sensitivity_downgrade_notice(message, retry_result)
+                self._record_settings_apply_result(
+                    False,
+                    message,
+                    no_restore_point=retry_result.no_restore_point,
+                )
                 self._show_apply_failure_modal(retry_result)
             else:
-                message = t(
+                message = _make_log_entry(
                     "apply.retry.success",
                     n=retry_result.total_attempted,
                 )
-                self._record_settings_apply_result(True, message)
+                message = self._with_sensitivity_downgrade_notice(message, retry_result)
+                self._record_settings_apply_result(
+                    True,
+                    message,
+                    no_restore_point=retry_result.no_restore_point,
+                )
             # Chained post-retry refresh, itself a jobbed read: the drain
             # clears the busy flag before invoking on_done, so this starts
             # its own job instead of being refused by its predecessor.
@@ -4058,7 +4445,24 @@ class AppShell:
         except Exception:
             logger.debug("Footer profile combo refresh skipped", exc_info=True)
 
-    def _update_apply_status(self, message: str, success: bool) -> None:
+    def _render_active_apply_status(self) -> None:
+        """Render the currently active apply status under the current locale."""
+
+        if not self._dpg_context_ready or self._apply_status_message is None:
+            return
+        self._apply_status_text = _apply_banner_message(
+            render_log_message(self._apply_status_message),
+            self._apply_status_success,
+        )
+        logger.info("_update_apply_status setting widget to: %s", self._apply_status_text)
+        self._set_if_exists("settings_v2_status_text", self._apply_status_text)
+        self._set_if_exists("footer_status_text", self._apply_status_text)
+
+    def _update_apply_status(
+        self,
+        message: str | LogEntry | ComposedLogEntry,
+        success: bool,
+    ) -> None:
         if not self._dpg_context_ready:
             logger.info("_update_apply_status skipped: context not ready")
             return
@@ -4074,11 +4478,10 @@ class AppShell:
                 exc_info=True,
             )
             return
-        self._apply_status_text = _apply_banner_message(message, success)
+        self._apply_status_message = message
+        self._apply_status_success = success
         self._apply_status_clear_after = time.time() + 5.0
-        logger.info("_update_apply_status setting widget to: %s", self._apply_status_text)
-        self._set_if_exists("settings_v2_status_text", self._apply_status_text)
-        self._set_if_exists("footer_status_text", self._apply_status_text)
+        self._render_active_apply_status()
 
     def _tick_settings_service_tasks(self, now: float) -> None:
         # A reconnect that landed mid-job deferred its service restart (see
@@ -4114,6 +4517,8 @@ class AppShell:
             self._apply_status_clear_after is not None
             and now >= self._apply_status_clear_after
         ):
+            self._apply_status_message = None
+            self._apply_status_success = False
             self._apply_status_text = None
             self._apply_status_clear_after = None
             self._render_settings_snapshot_status()
@@ -4265,7 +4670,7 @@ class AppShell:
         self._set_widget("lighting_on_checkbox", settings_obj.light_on)
         label = LIGHTING_MODE_LABEL_BY_ENUM.get(settings_obj.mode)
         if label:
-            self._set_widget("lighting_mode_combo", label)
+            self._set_widget("lighting_mode_combo", to_display("lighting_mode", label))
         self._set_widget("lighting_brightness_slider", settings_obj.brightness_byte)
         self._set_widget("lighting_r_slider", settings_obj.color.r)
         self._set_widget("lighting_g_slider", settings_obj.color.g)
@@ -4277,7 +4682,7 @@ class AppShell:
             self._update_target_combo_for_slot(slot)
 
     def on_lighting_zone_changed(self, label: str) -> None:
-        zone = LIGHTING_ZONE_BY_LABEL.get(label)
+        zone = LIGHTING_ZONE_BY_LABEL.get(to_canonical("lighting_zone", label))
         if zone:
             self._update_lighting_widgets_for_zone(zone)
 
@@ -4406,6 +4811,7 @@ class AppShell:
             # ~60ms on device enumeration. XInput still runs here, so
             # connect/disconnect is still detected within one poll interval.
             self.device_service.refresh_state(background=True, allow_probe=False)
+            self._sync_manual_write_windows_to_device_state()
             current_connection_state = self.device_service.state.connection_state
 
             if self.device_service.state.xinput_slot is not None:
@@ -4420,12 +4826,14 @@ class AppShell:
             if xinput_slot_dropped and self._fast_disconnect_force_probe_armed:
                 self._fast_disconnect_force_probe_armed = False
                 self.device_service.refresh_state(background=False, force_probe=True)
+                self._sync_manual_write_windows_to_device_state()
                 current_connection_state = self.device_service.state.connection_state
 
             was_disconnected = self._last_connection_state in (None, "no_device")
             is_connected = current_connection_state == "connected"
             if was_disconnected and is_connected:
                 self.device_service.refresh_state(background=False, force_probe=True)
+                self._sync_manual_write_windows_to_device_state()
                 current_connection_state = self.device_service.state.connection_state
                 if (
                     current_connection_state == "connected"
@@ -4507,6 +4915,7 @@ class AppShell:
 
     def read_controller(self) -> None:
         state = self.device_service.read_device_state()
+        self._sync_manual_write_windows_to_device_state()
         if state.connection_state == "connected" or state.summary_sources.get("active_profile") != "unknown":
             self.profile_service.read_from_controller(
                 state.active_onboard_profile,
@@ -4637,13 +5046,21 @@ class AppShell:
         self.profile_service.select_onboard_target(slot_id)
         self.rebuild_current_screen()
 
-    def apply_polling_rate(self, label: str):
+    def apply_polling_rate(
+        self,
+        label: str,
+        *,
+        skip_restore_point_capture: bool = False,
+        no_restore_point: bool = False,
+    ):
         try:
             rate = POLLING_RATE_BY_LABEL[label]
         except KeyError as exc:
             raise ValueError(f"Unsupported polling-rate label: {label!r}") from exc
 
         if not self._hid_available_or_refuse():
+            return None
+        if not self._consent_pending_write_allowed_or_refuse():
             return None
 
         if self.settings_service is None:
@@ -4658,22 +5075,45 @@ class AppShell:
             logger.debug("Ignoring polling-rate callback before hydration from a real read.")
             return None
 
-        # Trigger model #4 — capture before a manual device-class
-        # write. Debounced so drag-storms collapse into one RP (see
-        # ``_maybe_capture_before_manual_device_write``). The RP hook fires
-        # BEFORE the throttle check so user intent is captured even when the
-        # inner slider write is suppressed.
-        self._maybe_capture_before_manual_device_write(field_key="polling_rate")
+        # Trigger model #4 — capture before a manual device-class write. A
+        # failed capture stops the render-side callback before it reaches the
+        # throttle or service write and opens the disclosed-continue gate.
+        if not skip_restore_point_capture:
+            allowed, no_restore_point = self._manual_device_write_gate(
+                field_key="polling_rate",
+                on_continue=lambda: self.apply_polling_rate(
+                    label,
+                    skip_restore_point_capture=True,
+                    no_restore_point=True,
+                ),
+                on_identity_changed=lambda: self.apply_polling_rate(label),
+            )
+            if not allowed:
+                return None
 
         if not self._slider_throttle.should_write_now(
-            "polling_rate", (rate, label), now=time.monotonic()
+            "polling_rate",
+            (rate, label),
+            now=time.monotonic(),
+            no_restore_point=no_restore_point,
+            stable_identifier=self._manual_write_stable_identifier(),
         ):
             # Stored as pending; trailing-edge fire happens via
             # _flush_slider_throttle() on the next render tick.
             return None
-        return self._do_write_polling_rate(rate, label)
+        return self._do_write_polling_rate(
+            rate,
+            label,
+            no_restore_point=no_restore_point,
+        )
 
-    def _do_write_polling_rate(self, rate: PollingRate, label: str):
+    def _do_write_polling_rate(
+        self,
+        rate: PollingRate,
+        label: str,
+        *,
+        no_restore_point: bool = False,
+    ):
         result = self.settings_service.set_polling_rate(rate)
         success = _settings_outcome_is_success(result.outcome)
         if success and rate is PollingRate.HZ_8000:
@@ -4689,7 +5129,11 @@ class AppShell:
             # a false "8000Hz" displayed.
             committed = self._read_polling_rate_for_confirm()
             if committed is not None and committed is not PollingRate.HZ_8000:
-                return self._record_polling_rate_non_commit(result, committed)
+                return self._record_polling_rate_non_commit(
+                    result,
+                    committed,
+                    no_restore_point=no_restore_point,
+                )
             # committed is HZ_8000 (capable device honoured it) or None
             # (unverifiable — fail safe by trusting the ACK rather than crying
             # non-commit on a transient read miss). Either way, fall through to
@@ -4699,7 +5143,11 @@ class AppShell:
         else:
             message = _make_result_log_entry("apply.polling_rate.failed", result, label=label)
 
-        self._record_settings_apply_result(success, message)
+        self._record_settings_apply_result(
+            success,
+            message,
+            no_restore_point=no_restore_point,
+        )
         self.refresh_shell()
         return result
 
@@ -4720,7 +5168,13 @@ class AppShell:
             logger.info("polling-rate commit read-back failed: %s", exc)
             return None
 
-    def _record_polling_rate_non_commit(self, result, committed: PollingRate):
+    def _record_polling_rate_non_commit(
+        self,
+        result,
+        committed: PollingRate,
+        *,
+        no_restore_point: bool = False,
+    ):
         """Handle a confirmed 8000 Hz non-commit (firmware kept a lower rate).
 
         Surfaces the localized firmware-capability message and reconciles the
@@ -4739,12 +5193,24 @@ class AppShell:
         message = _make_log_entry(
             "apply.polling_rate.non_commit_8000", kept=committed_label
         )
-        self._record_settings_apply_result(False, message)
+        self._record_settings_apply_result(
+            False,
+            message,
+            no_restore_point=no_restore_point,
+        )
         self.refresh_shell()
         return result
 
-    def apply_step_size(self, value: int):
+    def apply_step_size(
+        self,
+        value: int,
+        *,
+        skip_restore_point_capture: bool = False,
+        no_restore_point: bool = False,
+    ):
         if not self._hid_available_or_refuse():
+            return None
+        if not self._consent_pending_write_allowed_or_refuse():
             return None
 
         if self.settings_service is None:
@@ -4759,21 +5225,38 @@ class AppShell:
             logger.debug("Ignoring step-size callback before hydration from a real read.")
             return None
 
-        # Trigger model #4 — capture before a manual device-class
-        # write. Debounced so slider drag-storms collapse into one RP. The
-        # RP hook fires BEFORE the throttle check so user intent is captured
-        # even when the inner slider write is suppressed.
-        self._maybe_capture_before_manual_device_write(field_key="step_size")
+        # Trigger model #4 — capture before a manual device-class write. A
+        # failed capture stops before the throttle or service write and posts
+        # the disclosed-continue gate.
+        if not skip_restore_point_capture:
+            allowed, no_restore_point = self._manual_device_write_gate(
+                field_key="step_size",
+                on_continue=lambda: self.apply_step_size(
+                    value,
+                    skip_restore_point_capture=True,
+                    no_restore_point=True,
+                ),
+                on_identity_changed=lambda: self.apply_step_size(value),
+            )
+            if not allowed:
+                return None
 
         if not self._slider_throttle.should_write_now(
-            "step_size", int(value), now=time.monotonic()
+            "step_size",
+            int(value),
+            now=time.monotonic(),
+            no_restore_point=no_restore_point,
+            stable_identifier=self._manual_write_stable_identifier(),
         ):
             # Stored as pending; trailing-edge fire happens via
             # _flush_slider_throttle() on the next render tick.
             return None
-        return self._do_write_step_size(int(value))
+        return self._do_write_step_size(
+            int(value),
+            no_restore_point=no_restore_point,
+        )
 
-    def _do_write_step_size(self, value: int):
+    def _do_write_step_size(self, value: int, *, no_restore_point: bool = False):
         # Live slider path: a PLAIN write. This fires rapidly during a drag (the
         # slider callback plus the trailing-edge throttle flush), and a per-move
         # verified read-back is both slow and timeout-prone -- on real hardware
@@ -4791,7 +5274,11 @@ class AppShell:
         else:
             message = _make_result_log_entry("apply.step_size.failed", result, value=value)
 
-        self._record_settings_apply_result(success, message)
+        self._record_settings_apply_result(
+            success,
+            message,
+            no_restore_point=no_restore_point,
+        )
         # Fix B: after a successful live change, offer to persist it into the
         # active profile when it diverges from that profile's stored step_size.
         # A failed write (device gone / write error) changed nothing on-device,
@@ -4964,6 +5451,7 @@ class AppShell:
         throttle = getattr(self, "_slider_throttle", None)
         if throttle is None:
             return
+        self._sync_manual_write_windows_to_device_state()
         if getattr(self, "_hid_job_in_flight", False):
             # A threaded HID job is mid-flight — e.g. a deadzone read-back
             # verify, which holds the gate for ~1s (POST_APPLY_READ_SETTLE_S +
@@ -4985,10 +5473,23 @@ class AppShell:
                 )
             return
         now = time.monotonic()
-        for field_key, value in throttle.flush_pending(now=now):
+        current_identifier = self._manual_write_stable_identifier()
+        for field_key, pending in throttle.flush_pending(now=now):
+            if pending.stable_identifier != current_identifier:
+                logger.debug(
+                    "Dropping slider trailing write for %s because the drag belonged "
+                    "to a different controller.",
+                    field_key,
+                )
+                continue
+            value = pending.value
+            no_restore_point = pending.no_restore_point
             if field_key == "step_size":
                 committed_value = int(value)
-                self._do_write_step_size(committed_value)
+                self._do_write_step_size(
+                    committed_value,
+                    no_restore_point=no_restore_point,
+                )
                 self._record_wear_event(
                     SLIDER_WRITE,
                     summary=f"Slider committed: step_size = {committed_value}",
@@ -4999,7 +5500,11 @@ class AppShell:
                 )
             elif field_key == "polling_rate":
                 rate, label = value
-                self._do_write_polling_rate(rate, label)
+                self._do_write_polling_rate(
+                    rate,
+                    label,
+                    no_restore_point=no_restore_point,
+                )
                 self._record_wear_event(
                     SLIDER_WRITE,
                     summary=f"Slider committed: polling_rate = {label}",
@@ -5012,7 +5517,11 @@ class AppShell:
             elif field_key == "deadzones":
                 # Trailing-edge (drag release): write the final value AND
                 # read it back to confirm the firmware committed it.
-                self._do_write_deadzones(value, verify=True)
+                self._do_write_deadzones(
+                    value,
+                    verify=True,
+                    no_restore_point=no_restore_point,
+                )
                 self._record_wear_event(
                     SLIDER_WRITE,
                     summary="Slider committed: stick deadzones",
@@ -5098,7 +5607,7 @@ class AppShell:
             self.refresh_shell()
             return None
 
-        mode_label = dpg.get_value("vibration_mode_combo")
+        mode_label = to_canonical("vibration_mode", dpg.get_value("vibration_mode_combo"))
         mode = VIBRATION_MODE_BY_LABEL.get(mode_label)
         if mode is None:
             message = t("apply.vibration.unknown_mode", mode=mode_label)
@@ -5150,7 +5659,7 @@ class AppShell:
             self.refresh_shell()
             return None
 
-        mode_label = dpg.get_value(mode_tag)
+        mode_label = to_canonical("trigger_mode", dpg.get_value(mode_tag))
         mode = TRIGGER_MODE_BY_LABEL.get(mode_label)
         if mode is None:
             message = t("apply.trigger.unknown_mode", mode=mode_label, side=_side_label(side))
@@ -5220,7 +5729,13 @@ class AppShell:
         self.refresh_shell()
         return result
 
-    def apply_diagnostics_deadzone(self, deadzones: StickDeadzones):
+    def apply_diagnostics_deadzone(
+        self,
+        deadzones: StickDeadzones,
+        *,
+        skip_restore_point_capture: bool = False,
+        no_restore_point: bool = False,
+    ):
         """Live-write the firmware ``StickDeadzones`` from the Diagnostics panel.
 
         Mirrors :meth:`apply_step_size`'s live-slider contract: busy-gate
@@ -5236,6 +5751,8 @@ class AppShell:
 
         if not self._hid_available_or_refuse():
             return None
+        if not self._consent_pending_write_allowed_or_refuse():
+            return None
         if self.settings_service is None:
             self._diag_deadzone_status_key = "unavailable"
             return None
@@ -5244,19 +5761,45 @@ class AppShell:
             # callbacks so we never clobber the controller with a default.
             logger.debug("Ignoring diagnostics deadzone callback before hydration.")
             return None
-        # Trigger model #4 — capture a restore point before a manual
-        # device-class write, debounced so a drag-storm collapses into one RP.
-        self._maybe_capture_before_manual_device_write(field_key="deadzones")
+        # Trigger model #4 — capture before a manual Device write. A failed
+        # capture stops before the throttle or service write and posts the
+        # disclosed-continue gate.
+        if not skip_restore_point_capture:
+            allowed, no_restore_point = self._manual_device_write_gate(
+                field_key="deadzones",
+                on_continue=lambda: self.apply_diagnostics_deadzone(
+                    deadzones,
+                    skip_restore_point_capture=True,
+                    no_restore_point=True,
+                ),
+                on_identity_changed=lambda: self.apply_diagnostics_deadzone(deadzones),
+            )
+            if not allowed:
+                return None
         if not self._slider_throttle.should_write_now(
-            "deadzones", deadzones, now=time.monotonic()
+            "deadzones",
+            deadzones,
+            now=time.monotonic(),
+            no_restore_point=no_restore_point,
+            stable_identifier=self._manual_write_stable_identifier(),
         ):
             # Stored as pending; the trailing-edge write + read-back verify
             # fires via _flush_slider_throttle() once the quiet window elapses.
             self._diag_deadzone_status_key = "sending"
             return None
-        return self._do_write_deadzones(deadzones, verify=False)
+        return self._do_write_deadzones(
+            deadzones,
+            verify=False,
+            no_restore_point=no_restore_point,
+        )
 
-    def _do_write_deadzones(self, deadzones: StickDeadzones, *, verify: bool):
+    def _do_write_deadzones(
+        self,
+        deadzones: StickDeadzones,
+        *,
+        verify: bool,
+        no_restore_point: bool = False,
+    ):
         """Write a full ``StickDeadzones`` frame; optionally read-back-verify.
 
         One cat-0x09 frame carries all four deadzone fields, so every write
@@ -5298,7 +5841,11 @@ class AppShell:
             self._deadzone_pending_verify = None
             message = _make_result_log_entry("apply.deadzone.failed", result)
             self._diag_deadzone_status_key = "failed"
-        self._record_settings_apply_result(success, message)
+        self._record_settings_apply_result(
+            success,
+            message,
+            no_restore_point=no_restore_point,
+        )
         self.refresh_shell()
         return result
 
@@ -5631,7 +6178,7 @@ class AppShell:
             self.refresh_shell()
             return None
 
-        zone_label = dpg.get_value("lighting_zone_combo")
+        zone_label = to_canonical("lighting_zone", dpg.get_value("lighting_zone_combo"))
         zone = LIGHTING_ZONE_BY_LABEL.get(zone_label)
         if zone is None:
             message = t("apply.lighting.unknown_zone", zone=zone_label)
@@ -5640,7 +6187,7 @@ class AppShell:
             self.refresh_shell()
             return None
 
-        mode_label = dpg.get_value("lighting_mode_combo")
+        mode_label = to_canonical("lighting_mode", dpg.get_value("lighting_mode_combo"))
         mode = LIGHTING_MODE_BY_LABEL.get(mode_label)
         if mode is None:
             message = t("apply.lighting.unknown_mode", mode=mode_label)
@@ -5894,12 +6441,10 @@ class AppShell:
     def safe_import_apply(self, apply_to_controller: bool = False) -> None:
         """Save the imported profile; optionally apply + verify as a HID job.
 
-        Jobbed like the profile apply: the device
-        sequence — pre-apply RP capture, write burst, settle + read-back
-        verify — runs as the DPG-free job; the result banner, footer-combo
-        refresh, screen rebuild, result modal, and failure modal are the
-        on_done half. The disk save stays synchronous on the render thread
-        BEFORE the job so its failure path never races the device work.
+        Jobbed like the profile apply: Safe Import captures its required
+        restore point before any profile or controller write. The write burst,
+        settle, and read-back verify remain DPG-free jobs; result rendering is
+        always on the render thread.
         Plain Save (``apply_to_controller=False``) is store-only: no busy
         check, no job, today's inline path.
         """
@@ -5915,12 +6460,11 @@ class AppShell:
         # but unapplied); the user re-clicks when idle (the confirm modal
         # is left untouched through a refusal). Plain Save
         # (apply_to_controller=False) is store-only and stays available.
-        if (
-            apply_to_controller
-            and self.settings_service is not None
-            and not self._hid_available_or_refuse()
-        ):
-            return
+        if apply_to_controller and self.settings_service is not None:
+            if not self._hid_available_or_refuse():
+                return
+            if not self._consent_pending_write_allowed_or_refuse():
+                return
 
         name = result.generated_name
         if dpg.does_item_exist(safe_import.NAME_INPUT):
@@ -5944,17 +6488,16 @@ class AppShell:
             if category not in selected and result.categories.get(category)
         ]
 
-        try:
-            self.wrapper_profile_store.save(profile)
-        except WrapperProfileError as exc:
-            safe_import.close_modals()
-            self._record_settings_apply_result(
-                False, t("safe_import.error.save_failed", reason=exc)
-            )
-            self.refresh_shell()
-            return
-
         if not (apply_to_controller and self.settings_service is not None):
+            try:
+                self.wrapper_profile_store.save(profile)
+            except WrapperProfileError as exc:
+                safe_import.close_modals()
+                self._record_settings_apply_result(
+                    False, t("safe_import.error.save_failed", reason=exc)
+                )
+                self.refresh_shell()
+                return
             # Plain Save (or no service wired): store-only — the render
             # thread never waits on the controller here, and the disk save
             # above already happened synchronously. Modal-swap hop: the
@@ -6006,11 +6549,26 @@ class AppShell:
                 if dpg.does_item_exist(tag):
                     dpg.delete_item(tag)
 
-        def job() -> None:
-            # Device sequence, statement-for-statement today's order. The
-            # audit / _last_apply_result writes are plain Python state —
-            # allowed on the worker; everything DearPyGui is in on_done.
+        audit.restore_point_name = None
+        audit.aborted_no_restore_point = False
+
+        def job() -> tuple[str, WrapperProfileError | None]:
+            # Safe Import's checkpoint is a hard precondition. The same worker
+            # owns capture, the now-post-capture profile save, and the device
+            # sequence, so no other HID flow can interleave between them.
             audit.restore_point_name = self._create_safe_import_restore_point()
+            if audit.restore_point_name is None:
+                audit.controller_write = "aborted"
+                audit.verified = False
+                audit.aborted_no_restore_point = True
+                return "aborted", None
+            try:
+                self.wrapper_profile_store.save(profile)
+            except WrapperProfileError as exc:
+                return "save_failed", exc
+
+            # Audit / _last_apply_result writes are plain Python state — allowed
+            # on the worker; everything DearPyGui is in on_done.
             apply_result = self._apply_snapshot_to_controller(snapshot)
             # Phase 2: a Safe Import apply is a profile apply — record it
             # under the saved profile name (best-effort, never affects the
@@ -6023,15 +6581,31 @@ class AppShell:
                 include_device=has_device_settings(snapshot),
             )
             self._last_apply_result = apply_result
+            audit.sensitivity_downgrades = tuple(
+                getattr(apply_result, "sensitivity_downgrades", ())
+            )
             if apply_result.failed:
                 audit.controller_write = "sent"
                 audit.verified = False
             else:
-                self._verify_safe_import_write(snapshot, audit)
+                self._verify_safe_import_write(snapshot, audit, apply_result)
+
+            return "applied", None
 
         def on_done(outcome) -> None:
             if isinstance(outcome, BaseException):
                 raise outcome  # today's path has no catch at this level
+            state, save_error = outcome
+            if state == "aborted":
+                self._finish_safe_import_abort()
+                return
+            if state == "save_failed":
+                safe_import.close_modals()
+                self._record_settings_apply_result(
+                    False, t("safe_import.error.save_failed", reason=save_error)
+                )
+                self.refresh_shell()
+                return
             self._finish_safe_import_apply(name, apply_to_controller=True)
 
         self._run_hid_job(job, on_done)
@@ -6046,7 +6620,14 @@ class AppShell:
         either way.
         """
 
-        self._record_settings_apply_result(True, t("safe_import.result.saved_as", name=name))
+        message: str | LogEntry | ComposedLogEntry = _make_log_entry(
+            "safe_import.result.saved_as", name=name
+        )
+        if apply_to_controller and self._last_apply_result is not None:
+            message = self._with_sensitivity_downgrade_notice(
+                message, self._last_apply_result
+            )
+        self._record_settings_apply_result(True, message)
         self._refresh_footer_profile_combo(selected_name=name)
         self.rebuild_current_screen()
         apply_failed = (
@@ -6065,6 +6646,16 @@ class AppShell:
             self._show_apply_failure_modal(self._last_apply_result)
         else:
             safe_import.open_result(self)
+
+    def _finish_safe_import_abort(self) -> None:
+        """Render the Safe Import fail-closed outcome after a missing checkpoint."""
+
+        self._record_settings_apply_result(
+            False,
+            t("safe_import.apply.aborted_no_restore_point"),
+        )
+        self.rebuild_current_screen()
+        safe_import.open_result(self)
 
     def _create_safe_import_restore_point(self) -> str | None:
         """Capture a real Restore Point before Safe Import applies to the controller.
@@ -6094,7 +6685,10 @@ class AppShell:
         return rp.title if rp is not None else None
 
     def _verify_safe_import_write(
-        self, snapshot: ControllerSnapshot, audit: safe_import_model.ImportAudit
+        self,
+        snapshot: ControllerSnapshot,
+        audit: safe_import_model.ImportAudit,
+        apply_result: ApplyResult,
     ) -> None:
         """Earn ``audit.controller_write = "verified"`` by read-back, never by ACKs.
 
@@ -6131,7 +6725,9 @@ class AppShell:
             audit.verify_read_failed = True
             return
 
-        mismatched, unverifiable = verify_applied_snapshot(snapshot, readback)
+        mismatched, unverifiable = verify_applied_snapshot(
+            snapshot_as_sent(snapshot, apply_result), readback
+        )
         audit.verify_mismatched = mismatched
         audit.verify_unverifiable = unverifiable
         if mismatched or unverifiable:
@@ -6324,9 +6920,12 @@ class AppShell:
         except Exception:  # noqa: BLE001 — best-effort
             logger.exception("Diagnostics rich bundle: device state lookup raised")
             return {}
+        firmware_version = getattr(state, "firmware_version", None) or None
+        summary_sources = getattr(state, "summary_sources", {}) or {}
         return {
             "product_string": getattr(state, "product_name", None) or None,
-            "firmware_version": getattr(state, "firmware_version", None) or None,
+            "firmware_version": firmware_version,
+            "firmware_source": summary_sources.get("firmware") if firmware_version else None,
             "connection": getattr(state, "connection_state", None) or None,
             "active_slot": None,
         }
@@ -6402,7 +7001,7 @@ class AppShell:
             return False
 
     def update_language(self, locale: str) -> None:
-        normalized = locale if locale in {"en", "zh-CN"} else "en"
+        normalized = locale if locale in SUPPORTED_LOCALES else DEFAULT_LOCALE
         self.settings.language = normalized
         # Apply the locale regardless of save success so in-memory state, the
         # active locale, and the visible UI stay consistent (A4).
@@ -6445,7 +7044,7 @@ def _last_apply_result_text(device_service) -> str:
     value = getattr(device_service, "last_apply_result", None)
     if isinstance(value, str) and value:
         return value
-    if isinstance(value, LogEntry):
+    if isinstance(value, (LogEntry, ComposedLogEntry)):
         return render_log_message(value)
     # Pre-apply baseline: friendlier "Ready." than the older
     # "No writes attempted yet." complaint-toned sentinel

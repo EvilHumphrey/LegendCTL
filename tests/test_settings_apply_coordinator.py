@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from zd_app.services.settings_apply_coordinator import (
@@ -232,6 +233,34 @@ class CoordinatorRetryTests(unittest.TestCase):
         retry_result = coordinator.retry_failures([])
         self.assertEqual(retry_result.total_attempted, 0)
         self.assertEqual(retry_result.failed, [])
+
+    def test_retry_merges_originating_disclosure_context(self) -> None:
+        coordinator = SettingsApplyCoordinator(mock.Mock())
+        retry_result = coordinator.retry_failures(
+            [
+                ApplyFailure(
+                    setting_label="vibration",
+                    error="transient",
+                    is_transient=True,
+                    retry_fn=mock.Mock(
+                        return_value=SimpleNamespace(
+                            outcome=SetPollingRateOutcome.OK,
+                            sensitivity_downgrades=("sens_right",),
+                        )
+                    ),
+                )
+            ],
+            originating_result=ApplyResult(
+                sensitivity_downgrades=("sens_left",),
+                no_restore_point=True,
+            ),
+        )
+
+        self.assertEqual(
+            retry_result.sensitivity_downgrades,
+            ("sens_left", "sens_right"),
+        )
+        self.assertTrue(retry_result.no_restore_point)
 
 
 class CoordinatorExceptionPathTests(unittest.TestCase):
@@ -1136,12 +1165,13 @@ class CoordinatorSensitivity8PointDispatchTests(unittest.TestCase):
             sensitivity_right_8point=self._RIGHT_8,
         )
 
-        coordinator.apply_snapshot(snapshot)
+        result = coordinator.apply_snapshot(snapshot)
 
         svc.set_left_stick_sensitivity_curve_8point.assert_called_once_with(self._LEFT_8)
         svc.set_right_stick_sensitivity_curve_8point.assert_called_once_with(self._RIGHT_8)
         svc.set_left_stick_sensitivity_curve.assert_not_called()
         svc.set_right_stick_sensitivity_curve.assert_not_called()
+        self.assertEqual(result.sensitivity_downgrades, ())
 
     def test_capability_verdict_fixed_at_start_not_reprobed_mid_apply(self) -> None:
         # A11: an earlier trailer write that disconnects invalidates the cached
@@ -1184,12 +1214,13 @@ class CoordinatorSensitivity8PointDispatchTests(unittest.TestCase):
             sensitivity_right_8point=self._RIGHT_8,
         )
 
-        coordinator.apply_snapshot(snapshot)
+        result = coordinator.apply_snapshot(snapshot)
 
         svc.set_left_stick_sensitivity_curve.assert_called_once_with(self._LEFT_3)
         svc.set_right_stick_sensitivity_curve.assert_called_once_with(self._RIGHT_3)
         svc.set_left_stick_sensitivity_curve_8point.assert_not_called()
         svc.set_right_stick_sensitivity_curve_8point.assert_not_called()
+        self.assertEqual(result.sensitivity_downgrades, ("sens_left", "sens_right"))
 
     def test_legacy_snapshot_without_8point_never_probes(self) -> None:
         # The guard: a snapshot with no 8-point curve must NOT consult the
@@ -1202,11 +1233,12 @@ class CoordinatorSensitivity8PointDispatchTests(unittest.TestCase):
             sensitivity_right=self._RIGHT_3,
         )
 
-        coordinator.apply_snapshot(snapshot)
+        result = coordinator.apply_snapshot(snapshot)
 
         svc.supports_8point_sensitivity.assert_not_called()
         svc.set_left_stick_sensitivity_curve.assert_called_once_with(self._LEFT_3)
         svc.set_right_stick_sensitivity_curve.assert_called_once_with(self._RIGHT_3)
+        self.assertEqual(result.sensitivity_downgrades, ())
 
     def test_8point_write_preserves_trailer_settle(self) -> None:
         # The per-field burst-rejection trailer must wrap the 8-point write

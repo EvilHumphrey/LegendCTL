@@ -62,6 +62,19 @@ class AppShellCopyTests(unittest.TestCase):
         self.assertEqual(_top_profile_label(unknown), "Profile: Not verified")
         self.assertEqual(_top_profile_label(known), "Profile 2")
 
+    def test_bundle_device_identity_preserves_firmware_source_token(self) -> None:
+        shell = self.make_shell()
+        shell.device_service.state = DeviceState(firmware_version="1.24")
+        shell.device_service.state.summary_sources["firmware"] = "official_app_ui"
+
+        identity = shell._bundle_device_identity()
+
+        self.assertEqual(identity["firmware_version"], "1.24")
+        self.assertEqual(identity["firmware_source"], "official_app_ui")
+
+        shell.device_service.state.firmware_version = ""
+        self.assertIsNone(shell._bundle_device_identity()["firmware_source"])
+
     def test_top_bar_does_not_boot_with_default_config_1(self) -> None:
         shell = self.make_shell()
 

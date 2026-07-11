@@ -221,7 +221,16 @@ _WORKSPACE_MODEL_CARD_W_WIDE = 780
 _WORKSPACE_INSPECTOR_W = 400
 _WORKSPACE_INSPECTOR_W_WIDE = 360
 _WORKSPACE_GAP = 18
-_INSPECTOR_WRAP = 360
+# Headroom between the Inspector card's width and its prose wrap: the card's
+# ~32px WindowPadding plus the same ~8px slack the original windowed tuning
+# carried (400-wide card, fixed wrap 360). The wrap must be DERIVED from the
+# rail-aware panel width, not fixed: the panel NARROWS to 360 in the
+# wide/rail layout (_WORKSPACE_INSPECTOR_W_WIDE), so the old fixed 360 wrap
+# exceeded its ~328px inner width and clipped the explanation mid-sentence
+# ("A mapped paddle can look identical to th..." — 2026-07-06 visual review,
+# 12_live_verify_front_maximized.png). Windowed rendering is unchanged:
+# 400 - 40 = the previous fixed 360.
+_INSPECTOR_WRAP_HEADROOM = 40
 _WORKSPACE_VIEW_FRONT = "front"
 _WORKSPACE_VIEW_BACK = "back"
 _WORKSPACE_VIEW_TOP = "top"
@@ -769,6 +778,12 @@ def _workspace_inspector_width(shell) -> int:
     return _WORKSPACE_INSPECTOR_W_WIDE if right_rail.is_wide(shell) else _WORKSPACE_INSPECTOR_W
 
 
+def _inspector_wrap(shell) -> int:
+    """Prose wrap derived from the rail-aware Inspector panel width."""
+
+    return _workspace_inspector_width(shell) - _INSPECTOR_WRAP_HEADROOM
+
+
 def _diagram_scale(shell) -> float:
     return _WIDE_DIAGRAM_SCALE if right_rail.is_wide(shell) else 1.0
 
@@ -957,7 +972,7 @@ def _build_inspector(shell) -> None:
         t("diagnostics.live_verify.inspector.select_hint"),
         tag=LIVE_VERIFY_INSPECTOR_HINT_TAG,
         color=shell.COLORS["muted"],
-        wrap=_INSPECTOR_WRAP,
+        wrap=_inspector_wrap(shell),
     )
     dpg.add_spacer(height=6)
     dpg.add_text(
@@ -968,7 +983,7 @@ def _build_inspector(shell) -> None:
         "",
         tag=LIVE_VERIFY_INSPECTOR_IDENTITY_TAG,
         color=shell.COLORS["text"],
-        wrap=_INSPECTOR_WRAP,
+        wrap=_inspector_wrap(shell),
     )
     dpg.add_spacer(height=6)
     dpg.add_text(
@@ -979,7 +994,7 @@ def _build_inspector(shell) -> None:
         "",
         tag=LIVE_VERIFY_INSPECTOR_LIVE_TAG,
         color=shell.COLORS["muted"],
-        wrap=_INSPECTOR_WRAP,
+        wrap=_inspector_wrap(shell),
     )
     dpg.add_progress_bar(
         default_value=0.0,
@@ -997,7 +1012,7 @@ def _build_inspector(shell) -> None:
         "",
         tag=LIVE_VERIFY_INSPECTOR_BINDING_TAG,
         color=shell.COLORS["muted"],
-        wrap=_INSPECTOR_WRAP,
+        wrap=_inspector_wrap(shell),
     )
     with dpg.tooltip(binding_item, tag=LIVE_VERIFY_INSPECTOR_BINDING_TIP_TAG):
         dpg.add_text(t("controller.buttons.current.unknown_tooltip"), wrap=320)
@@ -1015,7 +1030,7 @@ def _build_inspector(shell) -> None:
         t("diagnostics.live_verify.face_diagram.note"),
         tag=LIVE_VERIFY_INSPECTOR_EXPLANATION_TAG,
         color=shell.COLORS["muted"],
-        wrap=_INSPECTOR_WRAP,
+        wrap=_inspector_wrap(shell),
     )
     dpg.add_spacer(height=8)
     dpg.add_button(

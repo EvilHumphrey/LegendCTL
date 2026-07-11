@@ -1718,6 +1718,38 @@ class Restore8PointSensitivityTests(unittest.TestCase):
             self.assertTrue(left.write_succeeded)
             self.assertIs(left.verify_matched, True)
 
+    def test_restore_downgrade_verifies_the_sent_3point_hosts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = _full_populated_stub_8point()
+            service, _stub, _store = _make_service(tmpdir=tmp, settings_stub=stub)
+            captured = service.capture(_basic_trigger(), device_identity=_identity())
+            assert captured is not None
+
+            # The point was captured on a capable controller, then the restore
+            # probe cannot confirm cat-0x86. The coordinator writes the host
+            # curves; the 8-point read-back is unavailable and must not turn
+            # the actual 3-point restore into an "unverified" result.
+            stub.supports_8point = False
+            result = service.restore(captured.id)
+
+            self.assertEqual(
+                result.sensitivity_downgrades,
+                ("sens_left", "sens_right"),
+            )
+            self.assertEqual(result.label, RestoreResultLabel.VERIFIED)
+            names = {field.field_name for field in result.fields}
+            self.assertIn("sensitivity_left", names)
+            self.assertIn("sensitivity_right", names)
+            self.assertNotIn("sensitivity_left_8point", names)
+            self.assertNotIn("sensitivity_right_8point", names)
+            self.assertTrue(
+                next(
+                    field
+                    for field in result.fields
+                    if field.field_name == "sensitivity_left"
+                ).verify_matched
+            )
+
     def test_restore_8point_uses_0x86_setter_not_3point(self) -> None:
         # The coordinator must reach for the 8-point setter on a capable device;
         # the 3-point setter must not fire for a stick that has an 8-point curve.

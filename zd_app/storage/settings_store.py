@@ -17,6 +17,10 @@ from zd_app.version import __app_id__
 logger = logging.getLogger(__name__)
 
 SETUP_DRAWER_DISMISSED_KEY = "setup_drawer_dismissed"
+MIGRATION_STATE_FILENAME = ".zd_migration_state"
+MIGRATION_STATE_STARTED = "started"
+MIGRATION_STATE_COMPLETE = "complete"
+MIGRATION_TEMP_SUFFIX = ".zdmig.tmp"
 
 
 def _default_user_data_dir() -> Path:
@@ -41,17 +45,168 @@ def initialize_user_data_dir() -> Path:
         return target
 
     legacy = Path(sys.executable).parent / "zd_data"
-    if not legacy.exists() or any(target.iterdir()):
+    marker_path = target / MIGRATION_STATE_FILENAME
+    state = _read_migration_state(marker_path)
+    if state == MIGRATION_STATE_COMPLETE:
         return target
+
+    # A prior interrupted copy leaves only these reserved temporary files.
+    # Remove them before continuing the one permitted resume path so they
+    # cannot accumulate or be mistaken for user data on an unmarked target.
+    _remove_stale_migration_temps(target)
+
+    if state is None:
+        if not legacy.exists():
+            _write_migration_state(target, MIGRATION_STATE_COMPLETE)
+            return target
+        if _target_has_user_data(target):
+            # Preserve the legacy no-clobber behavior for already in-use
+            # installs that predate the migration marker.
+            _write_migration_state(target, MIGRATION_STATE_COMPLETE)
+            return target
+        _write_migration_state(target, MIGRATION_STATE_STARTED)
+
+    if legacy.exists():
+        _copy_missing_legacy_items(legacy, target)
+        logger.info("Migrated legacy zd_data/ -> %s", target)
+    _write_migration_state(target, MIGRATION_STATE_COMPLETE)
+    return target
+
+
+def _read_migration_state(marker_path: Path) -> str | None:
+    """Return the saved state, failing closed for an invalid marker.
+
+    ``None`` is reserved for an absent marker so callers can distinguish a
+    pre-marker install from an interrupted migration. Only a marker that is
+    exactly ``{"state": "started"}`` may resume a migration. A corrupt or
+    unrecognised marker cannot prove that copying was interrupted, so it is
+    normalised to ``complete`` rather than risking resurrection of legacy data
+    the user deliberately deleted from the migrated location.
+    """
+
+    if not marker_path.exists():
+        return None
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return _normalise_unreadable_migration_state(marker_path)
+    if payload == {"state": MIGRATION_STATE_STARTED}:
+        return MIGRATION_STATE_STARTED
+    if payload == {"state": MIGRATION_STATE_COMPLETE}:
+        return MIGRATION_STATE_COMPLETE
+    return _normalise_unreadable_migration_state(marker_path)
+
+
+def _normalise_unreadable_migration_state(marker_path: Path) -> str:
+    """Treat an ambiguous migration state as complete without touching legacy."""
+
+    logger.warning(
+        "Frozen-data migration state at %s was unreadable or invalid; treating it "
+        "as complete and normalizing the marker",
+        marker_path,
+    )
+    try:
+        _write_migration_state(marker_path.parent, MIGRATION_STATE_COMPLETE)
+    except OSError:
+        # Even if the normalization write fails, return complete: the legacy
+        # source remains available for manual recovery and must not be copied
+        # automatically from an ambiguous marker.
+        logger.warning(
+            "Could not normalize unreadable frozen-data migration state at %s; "
+            "continuing fail-closed",
+            marker_path,
+            exc_info=True,
+        )
+    return MIGRATION_STATE_COMPLETE
+
+
+def _write_migration_state(target: Path, state: str) -> None:
+    """Durably replace the frozen-data migration state marker."""
+
+    marker_path = target / MIGRATION_STATE_FILENAME
+    temp_path = marker_path.with_name(f"{marker_path.name}.tmp")
+    payload = json.dumps({"state": state})
+    try:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                logger.debug("fsync unavailable for %s", temp_path, exc_info=True)
+        os.replace(temp_path, marker_path)
+    except OSError:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _target_has_user_data(target: Path) -> bool:
+    """Whether ``target`` has data other than migration bookkeeping."""
+
+    ignored = {
+        MIGRATION_STATE_FILENAME,
+        f"{MIGRATION_STATE_FILENAME}.tmp",
+    }
+    return any(
+        item.name not in ignored and not item.name.endswith(MIGRATION_TEMP_SUFFIX)
+        for item in target.iterdir()
+    )
+
+
+def _remove_stale_migration_temps(target: Path) -> None:
+    """Best-effort removal of per-file temporary copies from a prior resume."""
+
+    for temp_path in target.rglob(f"*{MIGRATION_TEMP_SUFFIX}"):
+        if temp_path.is_dir():
+            continue
+        try:
+            temp_path.unlink()
+        except OSError:
+            logger.warning(
+                "Could not remove stale frozen-data migration temp %s",
+                temp_path,
+                exc_info=True,
+            )
+
+
+def _copy_missing_legacy_items(legacy: Path, target: Path) -> None:
+    """Resume migration without overwriting files already in ``target``."""
+
+    def _copy_file_if_missing(source: str, destination: str, *args, **kwargs) -> str:
+        destination_path = Path(destination)
+        if destination_path.exists():
+            return str(destination_path)
+        temp_path = destination_path.with_name(
+            f"{destination_path.name}{MIGRATION_TEMP_SUFFIX}"
+        )
+        # Publish each file only after the same-directory temporary copy is
+        # durable. A process interruption can leave a temp, but never a final
+        # path that a later resume mistakes for a completed copy.
+        shutil.copy2(source, temp_path, *args, **kwargs)
+        with open(temp_path, "rb") as handle:
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                logger.debug("fsync unavailable for %s", temp_path, exc_info=True)
+        os.replace(temp_path, destination_path)
+        return str(destination_path)
 
     for item in legacy.iterdir():
         destination = target / item.name
         if item.is_dir():
-            shutil.copytree(item, destination, dirs_exist_ok=True)
-        else:
-            shutil.copy2(item, destination)
-    logger.info("Migrated legacy zd_data/ -> %s", target)
-    return target
+            shutil.copytree(
+                item,
+                destination,
+                dirs_exist_ok=True,
+                copy_function=_copy_file_if_missing,
+            )
+        elif not destination.exists():
+            _copy_file_if_missing(str(item), str(destination))
 
 
 def _settings_with_default_paths() -> AppSettings:

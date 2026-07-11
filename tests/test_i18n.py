@@ -13,6 +13,18 @@ from unittest import mock
 from zd_app import i18n
 
 
+def _locale_tables() -> dict[str, dict[str, str]]:
+    locale_dir = Path("zd_app/i18n/locales")
+    return {
+        locale: json.loads((locale_dir / f"{locale}.json").read_text(encoding="utf-8"))
+        for locale in i18n.SUPPORTED_LOCALES
+    }
+
+
+def _placeholders(value: str) -> set[str]:
+    return set(re.findall(r"{([^{}]+)}", value))
+
+
 class I18nTests(unittest.TestCase):
     def setUp(self) -> None:
         i18n._loaded.clear()
@@ -37,6 +49,14 @@ class I18nTests(unittest.TestCase):
     def test_language_zh_cn_label_is_real_hanzi(self) -> None:
         self.assertEqual(i18n.t("language.zh-CN"), "简体中文")
 
+    def test_language_ko_autonym_is_byte_identical_in_shipped_locales(self) -> None:
+        expected = '"language.ko": "한국어"'.encode("utf-8")
+        locale_dir = Path("zd_app/i18n/locales")
+
+        for locale in i18n.SUPPORTED_LOCALES:
+            with self.subTest(locale=locale):
+                self.assertIn(expected, (locale_dir / f"{locale}.json").read_bytes())
+
     def test_t_returns_bracketed_key_when_missing_in_both(self) -> None:
         self.assertEqual(i18n.t("does.not.exist"), "[does.not.exist]")
 
@@ -49,18 +69,113 @@ class I18nTests(unittest.TestCase):
         self.assertEqual(i18n.get_locale(), "en")
 
     def test_locale_jsons_have_matching_keys(self) -> None:
+        locales = _locale_tables()
+        default = locales[i18n.DEFAULT_LOCALE]
+
+        for locale, values in locales.items():
+            with self.subTest(locale=locale):
+                self.assertEqual(set(default), set(values))
+
+    def test_locale_jsons_no_empty_values(self) -> None:
+        for locale, data in _locale_tables().items():
+            with self.subTest(locale=locale):
+                self.assertFalse([key for key, value in data.items() if not value])
+
+    def test_locale_jsons_have_matching_placeholder_sets(self) -> None:
+        locales = _locale_tables()
+        default = locales[i18n.DEFAULT_LOCALE]
+
+        for locale, values in locales.items():
+            for key, default_value in default.items():
+                with self.subTest(locale=locale, key=key):
+                    self.assertEqual(
+                        _placeholders(default_value),
+                        _placeholders(values.get(key, "")),
+                    )
+
+    def test_restore_point_contract_copy_is_exact_in_both_locales(self) -> None:
         locale_dir = Path("zd_app/i18n/locales")
         en = json.loads((locale_dir / "en.json").read_text(encoding="utf-8"))
         zh = json.loads((locale_dir / "zh-CN.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(set(en), set(zh))
+        self.assertEqual(
+            {
+                "apply.no_restore_point.title": "No restore point",
+                "apply.no_restore_point.body": (
+                    "A restore point could not be created before this change. If you "
+                    "continue, there will be no automatic undo for it. Continue anyway?"
+                ),
+                "apply.no_restore_point.continue": "Continue without a restore point",
+                "apply.result.no_restore_point_note": (
+                    "Note: no restore point was created before this apply."
+                ),
+                "safe_import.apply.aborted_no_restore_point": (
+                    "Nothing was written. A restore point could not be created, and Safe "
+                    "Import writes only after one exists. Check disk space or the app data "
+                    "folder, then try again."
+                ),
+                "restore_points.list.empty_state": (
+                    "No restore points yet. LegendCTL tries to create one automatically before "
+                    "higher-risk controller changes, and you can save one manually after reading "
+                    "the controller. They capture app-supported settings only; they are not "
+                    "factory backups."
+                ),
+            },
+            {key: en[key] for key in (
+                "apply.no_restore_point.title",
+                "apply.no_restore_point.body",
+                "apply.no_restore_point.continue",
+                "apply.result.no_restore_point_note",
+                "safe_import.apply.aborted_no_restore_point",
+                "restore_points.list.empty_state",
+            )},
+        )
+        self.assertEqual(
+            {
+                "apply.no_restore_point.title": "无还原点",
+                "apply.no_restore_point.body": "本次更改前未能创建还原点。如果继续，此更改将没有自动撤销途径。仍要继续吗？",
+                "apply.no_restore_point.continue": "不创建还原点并继续",
+                "apply.result.no_restore_point_note": "注意：本次应用前未创建还原点。",
+                "safe_import.apply.aborted_no_restore_point": "未写入任何内容。无法创建还原点，而安全导入只会在还原点创建成功后才写入。请检查磁盘空间或应用数据文件夹后重试。",
+                "restore_points.list.empty_state": "暂无还原点。在风险较高的手柄变更前会尽量自动创建还原点，您也可以在读取手柄后手动保存一个。它们仅捕获应用支持的设置，并非出厂备份。",
+            },
+            {key: zh[key] for key in (
+                "apply.no_restore_point.title",
+                "apply.no_restore_point.body",
+                "apply.no_restore_point.continue",
+                "apply.result.no_restore_point_note",
+                "safe_import.apply.aborted_no_restore_point",
+                "restore_points.list.empty_state",
+            )},
+        )
+        # The new cancel action intentionally reuses the existing generic key.
+        self.assertNotIn("apply.no_restore_point.cancel", en)
+        self.assertNotIn("apply.no_restore_point.cancel", zh)
+        self.assertEqual(en["actions.cancel"], "Cancel")
+        self.assertEqual(zh["actions.cancel"], "取消")
 
-    def test_locale_jsons_no_empty_values(self) -> None:
+    def test_sensitivity_downgrade_copy_is_exact_in_both_locales(self) -> None:
         locale_dir = Path("zd_app/i18n/locales")
-        for path in (locale_dir / "en.json", locale_dir / "zh-CN.json"):
-            data = json.loads(path.read_text(encoding="utf-8"))
-            with self.subTest(path=path):
-                self.assertFalse([key for key, value in data.items() if not value])
+        en = json.loads((locale_dir / "en.json").read_text(encoding="utf-8"))
+        zh = json.loads((locale_dir / "zh-CN.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            en["apply.result.sens_8point_downgraded"],
+            "Sensitivity: the 8-point curve could not be confirmed on this controller - "
+            "applied the standard 3-point curve instead.",
+        )
+        self.assertEqual(
+            en["log.apply.sens_8point_downgraded"],
+            "8-point sensitivity not confirmed; applied the 3-point curve instead.",
+        )
+        self.assertEqual(
+            zh["apply.result.sens_8point_downgraded"],
+            "灵敏度：无法确认此手柄支持 8 点曲线——已改为应用标准 3 点曲线。",
+        )
+        self.assertEqual(
+            zh["log.apply.sens_8point_downgraded"],
+            "未能确认 8 点灵敏度支持；已改为应用 3 点曲线。",
+        )
 
     def test_apply_status_transport_profile_namespaces_in_both_locales(self) -> None:
         locale_dir = Path("zd_app/i18n/locales")
@@ -189,6 +304,14 @@ class I18nAmbiguousLiteralGuardTests(unittest.TestCase):
 
         self.assertEqual(getattr(i18n, "_ambiguous_en", {}), {})
 
+    def test_reviewed_ambiguous_allowlist_matches_current_english_literals(self) -> None:
+        en = _locale_tables()["en"]
+        for literal, keys in i18n._REVIEWED_AMBIGUOUS.items():
+            for key in keys:
+                with self.subTest(literal=literal, key=key):
+                    self.assertIn(key, en)
+                    self.assertEqual(en[key], literal)
+
     def test_synthetic_new_ambiguity_still_warns(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -225,6 +348,121 @@ class I18nAmbiguousLiteralGuardTests(unittest.TestCase):
         self.assertIn("Synthetic Preview", joined)
         # Resolution is UNCHANGED: the first JSON-order key still wins.
         self.assertEqual(i18n._reverse_en["Synthetic Preview"], "controller.side.preview")
+
+    def test_third_locale_ambiguity_rearms_warning(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        locale_dir = Path(tmp.name)
+        (locale_dir / "en.json").write_text(
+            json.dumps(
+                {
+                    "controller.side.preview": "Synthetic Preview",
+                    "ui.tab.preview": "Synthetic Preview",
+                }
+            ),
+            encoding="utf-8",
+        )
+        # zh-CN is harmless here; the third sibling is context-different.
+        (locale_dir / "zh-CN.json").write_text(
+            json.dumps(
+                {
+                    "controller.side.preview": "预览",
+                    "ui.tab.preview": "预览",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (locale_dir / "ko.json").write_text(
+            json.dumps(
+                {
+                    "controller.side.preview": "미리 보기",
+                    "ui.tab.preview": "미리보기",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        i18n._loaded.clear()
+        i18n._reverse_en.clear()
+        with mock.patch.object(i18n, "SUPPORTED_LOCALES", ("en", "zh-CN", "ko")), mock.patch.object(
+            i18n, "_locale_dir", return_value=locale_dir
+        ):
+            with self.assertLogs("zd_app.i18n", level="WARNING") as captured:
+                i18n._load("en")
+
+        self.assertIn("Synthetic Preview", "\n".join(captured.output))
+        self.assertIn("Synthetic Preview", i18n._ambiguous_en)
+
+    def test_reviewed_literal_covers_all_sibling_locales(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        locale_dir = Path(tmp.name)
+        keys = {
+            "controller.back_paddles.target.BACK": "Back",
+            "diagnostics.live_verify.workspace.back_view": "Back",
+        }
+        (locale_dir / "en.json").write_text(json.dumps(keys), encoding="utf-8")
+        (locale_dir / "zh-CN.json").write_text(
+            json.dumps(
+                {
+                    "controller.back_paddles.target.BACK": "返回键",
+                    "diagnostics.live_verify.workspace.back_view": "背面",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (locale_dir / "ko.json").write_text(
+            json.dumps(
+                {
+                    "controller.back_paddles.target.BACK": "뒤로",
+                    "diagnostics.live_verify.workspace.back_view": "뒤쪽",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        i18n._loaded.clear()
+        i18n._reverse_en.clear()
+        with mock.patch.object(i18n, "SUPPORTED_LOCALES", ("en", "zh-CN", "ko")), mock.patch.object(
+            i18n, "_locale_dir", return_value=locale_dir
+        ):
+            with self.assertNoLogs("zd_app.i18n", level="WARNING"):
+                i18n._load("en")
+
+        self.assertEqual(i18n._ambiguous_en, {})
+
+    def test_missing_future_locale_file_is_skipped_silently(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        locale_dir = Path(tmp.name)
+        (locale_dir / "en.json").write_text(
+            json.dumps(
+                {
+                    "controller.side.left": "Synthetic Left",
+                    "ui.tab.left": "Synthetic Left",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (locale_dir / "zh-CN.json").write_text(
+            json.dumps(
+                {
+                    "controller.side.left": "左",
+                    "ui.tab.left": "左",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        i18n._loaded.clear()
+        i18n._reverse_en.clear()
+        with mock.patch.object(i18n, "SUPPORTED_LOCALES", ("en", "zh-CN", "ko")), mock.patch.object(
+            i18n, "_locale_dir", return_value=locale_dir
+        ):
+            with self.assertNoLogs("zd_app.i18n", level="WARNING"):
+                i18n._load("en")
+
+        self.assertEqual(i18n._ambiguous_en, {})
 
     def test_same_translation_duplicate_does_not_warn(self) -> None:
         # A duplicate English literal whose siblings translate IDENTICALLY is

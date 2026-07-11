@@ -46,6 +46,33 @@ class FootprintFinding:
 
 
 @dataclass(frozen=True)
+class ScanIntegrity:
+    readable: bool
+    python_file_count: int
+    parse_failures: tuple[str, ...]
+    entry_module_scanned: bool
+
+
+@dataclass(frozen=True)
+class _ScanPath:
+    path: Path
+    relative_path: str
+
+
+@dataclass(frozen=True)
+class _PackageFiles:
+    readable: bool
+    files: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class _StaticScan:
+    files: tuple[_ScanPath, ...]
+    parsed_python_files: tuple[tuple[_ScanPath, ast.AST], ...]
+    integrity: ScanIntegrity
+
+
+@dataclass(frozen=True)
 class TrustSelfCheckRow:
     key: str
     claim: str
@@ -63,6 +90,7 @@ class TrustSelfCheckResult:
     executable_path: str
     data_dir: str
     package_file_count: int
+    scan_integrity: ScanIntegrity
     network_import_findings: tuple[StaticImportFinding, ...]
     browser_handoffs: tuple[BrowserHandoff, ...]
     footprint_findings: tuple[FootprintFinding, ...]
@@ -137,6 +165,7 @@ class TrustSelfCheckResult:
 def build_trust_self_check(
     *,
     package_root: str | Path | None = None,
+    entry_module_path: str | Path | None = None,
     executable_path: str | Path | None = None,
     user_data_dir: str | Path | None = None,
     frozen: bool | None = None,
@@ -151,10 +180,12 @@ def build_trust_self_check(
     executable = _display_path(executable_path or sys.executable)
     data_dir = _display_path(user_data_dir or _default_user_data_dir())
     run_mode = _run_mode_label(is_frozen, str(executable_path or sys.executable))
-    network_findings = scan_network_imports(root)
-    handoffs = scan_browser_handoffs(root)
-    package_file_count = _package_file_count(root)
-    footprint_findings = scan_driver_footprint(root)
+    scan = _collect_static_scan(root, entry_module_path)
+    scan_integrity = scan.integrity
+    scan_verified = _scan_verified(scan_integrity)
+    network_findings = scan_network_imports(root, _scan=scan)
+    handoffs = scan_browser_handoffs(root, _scan=scan)
+    footprint_findings = scan_driver_footprint(root, _scan=scan)
     version = _clean_observed_value(getattr(app_version, "__version__", ""))
     build_commit = _clean_observed_value(
         getattr(app_version, "__build_commit__", "")
@@ -164,21 +195,36 @@ def build_trust_self_check(
     ) or t("trust_self_check.value.not_embedded")
     boundary = t(BOUNDARY_TEXT_KEY)
 
+    if network_findings or scan_verified:
+        network_claim = t("trust_self_check.network.claim")
+    else:
+        network_claim = t("trust_self_check.scan.unverified_claim.network")
+    if footprint_findings or scan_verified:
+        driver_claim = t("trust_self_check.drivers.claim")
+        driver_boundary = t("trust_self_check.drivers.boundary")
+    else:
+        driver_claim = t("trust_self_check.scan.unverified_claim.drivers")
+        driver_boundary = boundary
+
     rows = (
         TrustSelfCheckRow(
             key="network",
-            claim=t("trust_self_check.network.claim"),
-            evidence=_network_evidence(network_findings, handoffs),
+            claim=network_claim,
+            evidence=_network_evidence(
+                network_findings,
+                handoffs,
+                scan_integrity=scan_integrity,
+            ),
             boundary=boundary,
         ),
         TrustSelfCheckRow(
             key="drivers",
-            claim=t("trust_self_check.drivers.claim"),
+            claim=driver_claim,
             evidence=_driver_evidence(
                 footprint_findings,
-                package_file_count=package_file_count,
+                scan_integrity=scan_integrity,
             ),
-            boundary=t("trust_self_check.drivers.boundary"),
+            boundary=driver_boundary,
         ),
         TrustSelfCheckRow(
             key="background",
@@ -222,7 +268,8 @@ def build_trust_self_check(
         run_mode=run_mode,
         executable_path=executable,
         data_dir=data_dir,
-        package_file_count=package_file_count,
+        package_file_count=scan_integrity.python_file_count,
+        scan_integrity=scan_integrity,
         network_import_findings=network_findings,
         browser_handoffs=handoffs,
         footprint_findings=footprint_findings,
@@ -235,16 +282,16 @@ def scan_network_imports(
     package_root: str | Path | None = None,
     *,
     roots: Iterable[str] = NETWORK_IMPORT_ROOTS,
+    entry_module_path: str | Path | None = None,
+    _scan: _StaticScan | None = None,
 ) -> tuple[StaticImportFinding, ...]:
     """Statically scan Python imports for networking modules."""
 
     root = Path(package_root) if package_root is not None else _default_package_root()
+    scan = _scan or _collect_static_scan(root, entry_module_path)
     blocked_roots = frozenset(roots)
     findings: list[StaticImportFinding] = []
-    for path in _python_files(root):
-        tree = _parse_python(path)
-        if tree is None:
-            continue
+    for source, tree in scan.parsed_python_files:
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -252,7 +299,7 @@ def scan_network_imports(
                     if module_root in blocked_roots:
                         findings.append(
                             StaticImportFinding(
-                                relative_path=_rel(path, root),
+                                relative_path=source.relative_path,
                                 line=node.lineno,
                                 module=alias.name,
                             )
@@ -262,7 +309,7 @@ def scan_network_imports(
                 if module_root in blocked_roots:
                     findings.append(
                         StaticImportFinding(
-                            relative_path=_rel(path, root),
+                            relative_path=source.relative_path,
                             line=node.lineno,
                             module=node.module,
                         )
@@ -272,15 +319,16 @@ def scan_network_imports(
 
 def scan_browser_handoffs(
     package_root: str | Path | None = None,
+    *,
+    entry_module_path: str | Path | None = None,
+    _scan: _StaticScan | None = None,
 ) -> tuple[BrowserHandoff, ...]:
     """Find deliberate browser handoffs without counting them as telemetry."""
 
     root = Path(package_root) if package_root is not None else _default_package_root()
+    scan = _scan or _collect_static_scan(root, entry_module_path)
     handoffs: list[BrowserHandoff] = []
-    for path in _python_files(root):
-        tree = _parse_python(path)
-        if tree is None:
-            continue
+    for source, tree in scan.parsed_python_files:
         webbrowser_names = _webbrowser_aliases(tree)
         if not webbrowser_names:
             continue
@@ -296,7 +344,7 @@ def scan_browser_handoffs(
             ):
                 handoffs.append(
                     BrowserHandoff(
-                        relative_path=_rel(path, root),
+                        relative_path=source.relative_path,
                         line=node.lineno,
                         call=f"{func.value.id}.open",
                     )
@@ -306,24 +354,28 @@ def scan_browser_handoffs(
 
 def scan_driver_footprint(
     package_root: str | Path | None = None,
+    *,
+    entry_module_path: str | Path | None = None,
+    _scan: _StaticScan | None = None,
 ) -> tuple[FootprintFinding, ...]:
     """Scan the shipped package tree for driver or virtual-device artifacts."""
 
     root = Path(package_root) if package_root is not None else _default_package_root()
+    scan = _scan or _collect_static_scan(root, entry_module_path)
     findings: list[FootprintFinding] = []
-    for path in _package_files(root):
-        name = path.name.lower()
-        if path.suffix.lower() in DRIVER_ARTIFACT_SUFFIXES:
+    for source in scan.files:
+        name = source.path.name.lower()
+        if source.path.suffix.lower() in DRIVER_ARTIFACT_SUFFIXES:
             findings.append(
                 FootprintFinding(
-                    relative_path=_rel(path, root),
+                    relative_path=source.relative_path,
                     reason=t("trust_self_check.drivers.artifact.driver_file"),
                 )
             )
         elif any(token in name for token in VIRTUAL_DEVICE_NAME_TOKENS):
             findings.append(
                 FootprintFinding(
-                    relative_path=_rel(path, root),
+                    relative_path=source.relative_path,
                     reason=t("trust_self_check.drivers.artifact.virtual_device"),
                 )
             )
@@ -333,6 +385,8 @@ def scan_driver_footprint(
 def _network_evidence(
     findings: tuple[StaticImportFinding, ...],
     handoffs: tuple[BrowserHandoff, ...],
+    *,
+    scan_integrity: ScanIntegrity,
 ) -> str:
     if findings:
         scan = t(
@@ -340,11 +394,18 @@ def _network_evidence(
             count=len(findings),
             findings=_format_import_findings(findings),
         )
-    else:
+    elif _scan_verified(scan_integrity):
         scan = t(
-            "trust_self_check.network.evidence.clean",
+            (
+                "trust_self_check.network.evidence.clean"
+                if scan_integrity.entry_module_scanned
+                else "trust_self_check.network.evidence.clean_no_entry"
+            ),
             modules="/".join(NETWORK_IMPORT_ROOTS),
+            py_count=scan_integrity.python_file_count,
         )
+    else:
+        return _unverified_evidence(scan_integrity)
     if handoffs:
         handoff = t(
             "trust_self_check.network.evidence.handoff",
@@ -358,7 +419,7 @@ def _network_evidence(
 def _driver_evidence(
     findings: tuple[FootprintFinding, ...],
     *,
-    package_file_count: int,
+    scan_integrity: ScanIntegrity,
 ) -> str:
     if findings:
         return t(
@@ -366,10 +427,37 @@ def _driver_evidence(
             count=len(findings),
             files=_format_footprint_findings(findings),
         )
-    return t(
-        "trust_self_check.drivers.evidence.clean",
-        file_count=package_file_count,
+    if _scan_verified(scan_integrity):
+        return t(
+            "trust_self_check.drivers.evidence.clean",
+            file_count=scan_integrity.python_file_count,
+        )
+    return _unverified_evidence(scan_integrity)
+
+
+def _scan_verified(scan_integrity: ScanIntegrity) -> bool:
+    return (
+        scan_integrity.readable
+        and scan_integrity.python_file_count > 0
+        and not scan_integrity.parse_failures
     )
+
+
+def _unverified_evidence(scan_integrity: ScanIntegrity) -> str:
+    return t(
+        "trust_self_check.scan.unverified_evidence",
+        reason=_scan_integrity_reason(scan_integrity),
+        file_count=scan_integrity.python_file_count,
+        parse_failures=_format_parse_failures(scan_integrity.parse_failures),
+    )
+
+
+def _scan_integrity_reason(scan_integrity: ScanIntegrity) -> str:
+    if not scan_integrity.readable:
+        return t("trust_self_check.scan.reason.unreadable")
+    if scan_integrity.parse_failures:
+        return t("trust_self_check.scan.reason.parse_failures")
+    return t("trust_self_check.scan.reason.no_files")
 
 
 def _run_mode_label(is_frozen: bool, executable: str) -> str:
@@ -459,6 +547,12 @@ def _format_footprint_findings(findings: tuple[FootprintFinding, ...]) -> str:
     )
 
 
+def _format_parse_failures(parse_failures: tuple[str, ...]) -> str:
+    if not parse_failures:
+        return "0"
+    return f"{len(parse_failures)} ({'; '.join(parse_failures[:8])})"
+
+
 def _webbrowser_aliases(tree: ast.AST) -> set[str]:
     aliases: set[str] = set()
     for node in ast.walk(tree):
@@ -476,19 +570,76 @@ def _parse_python(path: Path) -> ast.AST | None:
         return None
 
 
-def _python_files(root: Path) -> tuple[Path, ...]:
-    return tuple(path for path in _package_files(root) if path.suffix == ".py")
+def _collect_static_scan(
+    root: Path,
+    entry_module_path: str | Path | None,
+) -> _StaticScan:
+    package_files = _package_files(root)
+    files = tuple(
+        _ScanPath(path=path, relative_path=_rel(path, root))
+        for path in package_files.files
+    )
+    entry_module = _entry_module(root, entry_module_path)
+    if entry_module is not None and all(
+        source.path != entry_module.path for source in files
+    ):
+        files += (entry_module,)
+
+    parsed_python_files: list[tuple[_ScanPath, ast.AST]] = []
+    parse_failures: list[str] = []
+    entry_module_scanned = False
+    for source in files:
+        if source.path.suffix.lower() != ".py":
+            continue
+        tree = _parse_python(source.path)
+        if tree is None:
+            parse_failures.append(source.relative_path)
+        else:
+            parsed_python_files.append((source, tree))
+            if entry_module is not None and source.path == entry_module.path:
+                entry_module_scanned = True
+
+    return _StaticScan(
+        files=files,
+        parsed_python_files=tuple(parsed_python_files),
+        integrity=ScanIntegrity(
+            readable=package_files.readable,
+            python_file_count=len(parsed_python_files),
+            parse_failures=tuple(parse_failures),
+            entry_module_scanned=entry_module_scanned,
+        ),
+    )
 
 
-def _package_files(root: Path) -> tuple[Path, ...]:
+def _entry_module(
+    root: Path,
+    entry_module_path: str | Path | None,
+) -> _ScanPath | None:
+    candidate = (
+        Path(entry_module_path)
+        if entry_module_path is not None
+        else root.parent / "main_zd.py"
+    )
     try:
-        return tuple(sorted(path for path in root.rglob("*") if path.is_file()))
+        if not candidate.is_file():
+            return None
     except OSError:
-        return ()
+        # A module that cannot be inspected must weaken the scan, while an
+        # absent module remains an allowed frozen-build condition.
+        pass
+    return _ScanPath(path=candidate, relative_path=candidate.name)
 
 
-def _package_file_count(root: Path) -> int:
-    return len(_package_files(root))
+def _package_files(root: Path) -> _PackageFiles:
+    try:
+        if not root.is_dir():
+            return _PackageFiles(readable=False, files=())
+        return _PackageFiles(
+            readable=True,
+            files=tuple(sorted(path for path in root.rglob("*") if path.is_file())),
+        )
+    except OSError:
+        return _PackageFiles(readable=False, files=())
 
 
 def _default_package_root() -> Path:
@@ -522,6 +673,7 @@ __all__ = [
     "VIRTUAL_DEVICE_NAME_TOKENS",
     "BrowserHandoff",
     "FootprintFinding",
+    "ScanIntegrity",
     "StaticImportFinding",
     "TrustSelfCheckResult",
     "TrustSelfCheckRow",

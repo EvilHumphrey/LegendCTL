@@ -12,7 +12,8 @@ from typing import Iterable, Literal, Sequence
 from zd_app import version as app_version
 from zd_app.i18n import t
 from zd_app.models import DeviceState
-from zd_app.services._log_entry import LogEntry, render_log_entry
+from zd_app.services._log_entry import ComposedLogEntry, LogEntry, render_log_entry
+from zd_app.services.device_service import DeviceService
 from zd_app.services.diagnostics_service import _redact_instance_id
 from zd_app.services.markdown_safety import escape_markdown
 from zd_app.services.model_fingerprint import ModelFingerprint, fingerprint_display_rows
@@ -397,10 +398,24 @@ def _xinput_slot_label(slot: object | None) -> str:
 def _firmware_value(raw_value: object, state: DeviceState) -> str:
     explicit = _known_text(raw_value)
     if explicit:
-        return explicit
+        return t(
+            "compat_report.firmware_value_with_source",
+            value=explicit,
+            source=t("compat_report.source.user_entered"),
+        )
     cached = _known_text(getattr(state, "firmware_version", ""))
     if cached:
-        return cached
+        sources = getattr(state, "summary_sources", {}) or {}
+        source = sources.get("firmware", "unknown")
+        source_key = DeviceService.SUMMARY_SOURCE_KEY_FOR.get(
+            source,
+            "device.summary.source.unknown",
+        )
+        return t(
+            "compat_report.firmware_value_with_source",
+            value=cached,
+            source=t(source_key),
+        )
     return t("compat_report.value.unknown")
 
 
@@ -454,7 +469,7 @@ def _recent_event_lines(events: Iterable[str]) -> tuple[str, ...]:
 def _apply_result_text(value: object | None) -> str:
     if isinstance(value, str):
         return value
-    if isinstance(value, LogEntry):
+    if isinstance(value, (LogEntry, ComposedLogEntry)):
         return render_log_entry(value)
     if value is None:
         return ""

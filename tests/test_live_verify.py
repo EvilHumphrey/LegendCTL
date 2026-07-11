@@ -143,6 +143,11 @@ def _make_write_shell(settings_service) -> AppShell:
     profile_service.pending_changes_count.return_value = 0
     wrapper = MagicMock()
     wrapper.list_profiles.return_value = []
+    restore_point_service = MagicMock()
+    restore_point_service.capture.return_value = SimpleNamespace(
+        id="rp_live_verify_test",
+        title="Live Verify test restore point",
+    )
     shell = AppShell(
         device_service=device_service,
         profile_service=profile_service,
@@ -151,9 +156,8 @@ def _make_write_shell(settings_service) -> AppShell:
         preflight_service=MagicMock(),
         settings_service=settings_service,
         wrapper_profile_store=wrapper,
-        restore_point_service=None,
+        restore_point_service=restore_point_service,
     )
-    shell.restore_point_service = None
     shell.refresh_shell = lambda: None
     shell.refresh_current_screen = lambda: None
     shell.rebuild_current_screen = lambda: None
@@ -1816,6 +1820,23 @@ class DiagnosticsDeadzoneWriteTests(unittest.TestCase):
         shell._diag_deadzone_hydrated = True
         return shell, service
 
+    def _queue_elapsed_deadzone_write(self, shell, deadzones: StickDeadzones) -> None:
+        """Build a real metadata-carrying pending throttle entry for a flush test."""
+
+        throttle = shell._slider_throttle
+        now = monotonic()
+        throttle._last_write_ts["deadzones"] = now
+        self.assertFalse(
+            throttle.should_write_now(
+                "deadzones",
+                deadzones,
+                now=now + 0.001,
+                no_restore_point=False,
+                stable_identifier=shell._manual_write_stable_identifier(),
+            )
+        )
+        throttle._last_write_ts["deadzones"] = monotonic() - 60.0
+
     def test_busy_refuses_without_writing(self) -> None:
         shell, service = self._shell(StickDeadzones(5, 6, 7, 8))
         shell._hid_job_in_flight = True
@@ -1846,17 +1867,17 @@ class DiagnosticsDeadzoneWriteTests(unittest.TestCase):
         _capture(lambda: shell.apply_diagnostics_deadzone(StickDeadzones(1, 1, 1, 1)))
         _capture(lambda: shell.apply_diagnostics_deadzone(StickDeadzones(2, 2, 2, 2)))
         self.assertEqual(len(service.writes), 1)  # second is throttled
-        self.assertEqual(
-            shell._slider_throttle._pending.get("deadzones"),
-            StickDeadzones(2, 2, 2, 2),
-        )
+        pending = shell._slider_throttle._pending.get("deadzones")
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.value, StickDeadzones(2, 2, 2, 2))
+        self.assertFalse(pending.no_restore_point)
+        self.assertEqual(pending.stable_identifier, "unknown")
 
     def test_flush_writes_trailing_value_and_verifies(self) -> None:
         shell, service = self._shell(StickDeadzones(0, 0, 0, 0))
         dz = StickDeadzones(3, 3, 3, 3)
         service.readback = dz
-        shell._slider_throttle._pending["deadzones"] = dz
-        shell._slider_throttle._last_write_ts["deadzones"] = monotonic() - 60.0
+        self._queue_elapsed_deadzone_write(shell, dz)
         _capture(shell._flush_slider_throttle)
         self.assertIn(dz, service.writes)
         self.assertGreaterEqual(service.read_calls, 1)  # read-back on flush
@@ -1866,8 +1887,7 @@ class DiagnosticsDeadzoneWriteTests(unittest.TestCase):
         shell, service = self._shell(StickDeadzones(0, 0, 0, 0))
         dz = StickDeadzones(3, 3, 3, 3)
         service.readback = StickDeadzones(9, 9, 9, 9)  # firmware reports something else
-        shell._slider_throttle._pending["deadzones"] = dz
-        shell._slider_throttle._last_write_ts["deadzones"] = monotonic() - 60.0
+        self._queue_elapsed_deadzone_write(shell, dz)
         _capture(shell._flush_slider_throttle)
         self.assertEqual(shell._diag_deadzone_status_key, "mismatch")
 
@@ -1879,8 +1899,7 @@ class DiagnosticsDeadzoneWriteTests(unittest.TestCase):
         shell = _make_write_shell(settings_service=service)
         shell._diag_deadzone_hydrated = True
         dz = StickDeadzones(3, 3, 3, 3)
-        shell._slider_throttle._pending["deadzones"] = dz
-        shell._slider_throttle._last_write_ts["deadzones"] = monotonic() - 60.0
+        self._queue_elapsed_deadzone_write(shell, dz)
         _capture(shell._flush_slider_throttle)  # must not raise
         self.assertIn(dz, service.writes)  # the write landed
         self.assertEqual(shell._diag_deadzone_status_key, "sent_unverified")
@@ -1896,8 +1915,7 @@ class DiagnosticsDeadzoneWriteTests(unittest.TestCase):
         shell._hid_executor = lambda job, deliver: recorded.append((job, deliver))
         dz = StickDeadzones(3, 3, 3, 3)
         service.readback = dz
-        shell._slider_throttle._pending["deadzones"] = dz
-        shell._slider_throttle._last_write_ts["deadzones"] = monotonic() - 60.0
+        self._queue_elapsed_deadzone_write(shell, dz)
         _capture(shell._flush_slider_throttle)
         # Write landed synchronously; the read is deferred to the worker.
         self.assertIn(dz, service.writes)
@@ -1932,8 +1950,7 @@ class DiagnosticsDeadzoneWriteTests(unittest.TestCase):
         # the status parks at "verifying" until the read-back drains.
         dz1 = StickDeadzones(3, 3, 3, 3)
         service.readback = dz1
-        throttle._pending["deadzones"] = dz1
-        throttle._last_write_ts["deadzones"] = monotonic() - 60.0
+        self._queue_elapsed_deadzone_write(shell, dz1)
         _capture(shell._flush_slider_throttle)
         self.assertTrue(shell._hid_job_in_flight)  # the verify holds the gate
         self.assertEqual(shell._diag_deadzone_status_key, "verifying")
@@ -1942,10 +1959,11 @@ class DiagnosticsDeadzoneWriteTests(unittest.TestCase):
         # verify still holds the gate. The render tick fires the flush, but the
         # gate is in flight — the pending must be RE-QUEUED, not consumed.
         dz2 = StickDeadzones(7, 7, 7, 7)
-        throttle._pending["deadzones"] = dz2
-        throttle._last_write_ts["deadzones"] = monotonic() - 60.0
+        self._queue_elapsed_deadzone_write(shell, dz2)
         _capture(shell._flush_slider_throttle)
-        self.assertEqual(throttle._pending.get("deadzones"), dz2)  # not consumed
+        pending = throttle._pending.get("deadzones")
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.value, dz2)  # not consumed
         self.assertEqual(shell._diag_deadzone_status_key, "verifying")
 
         # Verify 1 drains: the gate reliably clears and dz1's status firms up.
@@ -2461,6 +2479,47 @@ class PollServiceConstructionTests(unittest.TestCase):
         self.assertIs(first, again)
         self.assertIs(again, third)
         self.assertEqual(count["n"], 1)  # constructed exactly once
+
+
+class LiveVerifyInspectorWrapTests(unittest.TestCase):
+    """The Inspector prose wrap must track the rail-aware panel width.
+
+    The panel narrows from 400 (windowed) to 360 (rail/wide), but its wrap
+    was a fixed 360 — exceeding the wide panel's ~328px inner width, so the
+    explanation clipped mid-sentence ("A mapped paddle can look identical to
+    th..." — 2026-07-06 visual review, 12_live_verify_front_maximized.png).
+    Static width math: wrap = panel width - headroom, so each state's wrap
+    stays inside its own card padding by construction."""
+
+    def _shell(self, *, wide: bool):
+        shell = make_shell(settings_service=MagicMock())
+        shell._viewport_client_width = (lambda: 2560) if wide else (lambda: 1480)
+        return shell
+
+    def test_windowed_wrap_matches_previous_tuning(self) -> None:
+        # 400-wide panel: wrap must stay the previously shipped 360 (no
+        # windowed rendering change).
+        shell = self._shell(wide=False)
+        self.assertEqual(live_verify._inspector_wrap(shell), 360)
+
+    def test_wide_wrap_fits_the_narrowed_panel(self) -> None:
+        shell = self._shell(wide=True)
+        wrap = live_verify._inspector_wrap(shell)
+        panel = live_verify._workspace_inspector_width(shell)
+        self.assertEqual(panel, live_verify._WORKSPACE_INSPECTOR_W_WIDE)
+        self.assertEqual(wrap, panel - live_verify._INSPECTOR_WRAP_HEADROOM)
+        # The wrap must fit inside the card's inner width (~32px WindowPadding).
+        self.assertLessEqual(wrap, panel - 32)
+
+    def test_wrap_tracks_panel_width_in_both_states(self) -> None:
+        for wide in (False, True):
+            with self.subTest(wide=wide):
+                shell = self._shell(wide=wide)
+                self.assertEqual(
+                    live_verify._inspector_wrap(shell),
+                    live_verify._workspace_inspector_width(shell)
+                    - live_verify._INSPECTOR_WRAP_HEADROOM,
+                )
 
 
 if __name__ == "__main__":

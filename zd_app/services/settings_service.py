@@ -2334,7 +2334,8 @@ class SettingsService:
         """Return whether this controller speaks the 1.2.9 cat-0x86 8-point curve.
 
         Probes once per connection by reading the LEFT stick's 8-point curve
-        with a short timeout; the device is deemed capable iff a fully valid
+        with a short timeout, retrying exactly once only when that read returns
+        no decoded curve; the device is deemed capable iff a fully valid
         8-point curve decodes. The verdict is cached in ``self._supports_8point``
         and reset when handles drop (see ``stop`` / ``_invalidate_cached_handles``),
         so a freshly connected controller re-probes.
@@ -2352,6 +2353,11 @@ class SettingsService:
             SENSITIVITY_STICK_LEFT,
             timeout_ms=SENSITIVITY_8POINT_PROBE_TIMEOUT_MS,
         )
+        if curve is None:
+            curve = self.get_sensitivity_curve_8point(
+                SENSITIVITY_STICK_LEFT,
+                timeout_ms=SENSITIVITY_8POINT_PROBE_TIMEOUT_MS,
+            )
         self._supports_8point = curve is not None
         return self._supports_8point
 

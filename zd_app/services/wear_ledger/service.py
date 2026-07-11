@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional
@@ -95,6 +96,11 @@ class WearLedgerService:
         # negative ``rotation_bytes`` configuration can't thrash the disk
         # rotating after every write.
         self._rotation_bytes = max(256, int(rotation_bytes))
+        # This is deliberately process-local. LegendCTL is a single-window GUI
+        # app, so one process serializes normal ledger writes. Separate GUI
+        # processes could still race a rotation; that is an accepted best-effort
+        # limitation for this non-authoritative wear log.
+        self._write_lock = threading.Lock()
         try:
             self._base_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
@@ -176,17 +182,22 @@ class WearLedgerService:
         # diff-friendly across two same-event writes for tests.
         line = json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True) + "\n"
         encoded = line.encode("utf-8")
-        self._base_dir.mkdir(parents=True, exist_ok=True)
-        active = self.active_path
-        existing_size = 0
-        try:
-            existing_size = active.stat().st_size
-        except FileNotFoundError:
-            pass
-        if existing_size > 0 and existing_size + len(encoded) > self._rotation_bytes:
-            self._rotate()
-        with open(active, "ab") as handle:
-            handle.write(encoded)
+        # The size check, possible rename, and append form one transaction
+        # relative to concurrent UI and worker writers. In particular, a
+        # second writer must not append through a handle selected before the
+        # first writer rotated the active file.
+        with self._write_lock:
+            self._base_dir.mkdir(parents=True, exist_ok=True)
+            active = self.active_path
+            existing_size = 0
+            try:
+                existing_size = active.stat().st_size
+            except FileNotFoundError:
+                pass
+            if existing_size > 0 and existing_size + len(encoded) > self._rotation_bytes:
+                self._rotate()
+            with open(active, "ab") as handle:
+                handle.write(encoded)
 
     def _rotate(self) -> None:
         """Rename the active file to a stamped archive name.
@@ -194,6 +205,12 @@ class WearLedgerService:
         On Windows, ``os.replace`` is atomic for same-volume renames; a
         target collision (very-fast rotation within the same second) is
         resolved by appending a suffix counter.
+
+        Call only while ``_write_lock`` is held by :meth:`_write_line`. That
+        lock is process-local: this rotation relies on LegendCTL's single-GUI-
+        process assumption, and separate processes can still race here. The
+        wear ledger is non-authoritative, so that is an accepted best-effort
+        limitation rather than an interprocess-lock contract.
         """
 
         active = self.active_path

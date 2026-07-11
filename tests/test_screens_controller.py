@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import dearpygui.dearpygui as dpg
 
 from tests.r2_shell_test_helpers import alias_of, empty_snapshot, make_shell
-from zd_app.i18n import t
+from zd_app.i18n import set_locale, t
 from zd_app.services.settings_service import (
     ButtonMapping,
     ButtonSlot,
@@ -74,6 +74,39 @@ class ControllerScreenTests(unittest.TestCase):
             self.assertEqual(controller.POLLING_RATE_DEFAULT_LABEL, "1000Hz")
         finally:
             dpg.destroy_context()
+
+    def test_controller_combo_choices_render_in_zh(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        expected_items = {
+            "vibration_mode_combo": ["原生扳机振动", "立体共振", "扳机振动"],
+            "trigger_left_mode_combo": ["短行程", "长行程"],
+            "trigger_right_mode_combo": ["短行程", "长行程"],
+            "lighting_zone_combo": ["Home 区域", "左侧灯", "右侧灯"],
+            "lighting_mode_combo": ["关闭", "常亮", "呼吸", "渐变", "流光"],
+        }
+        expected_defaults = {
+            "vibration_mode_combo": "原生扳机振动",
+            "trigger_left_mode_combo": "短行程",
+            "trigger_right_mode_combo": "短行程",
+            "lighting_zone_combo": "Home 区域",
+            "lighting_mode_combo": "常亮",
+        }
+
+        set_locale("zh-CN")
+        dpg.create_context()
+        try:
+            with dpg.window():
+                with dpg.child_window(tag="content_region"):
+                    pass
+            controller.build(shell, "content_region")
+
+            for tag, expected in expected_items.items():
+                with self.subTest(tag=tag):
+                    self.assertEqual(dpg.get_item_configuration(tag)["items"], expected)
+                    self.assertEqual(dpg.get_value(tag), expected_defaults[tag])
+        finally:
+            dpg.destroy_context()
+            set_locale("en")
 
     def test_controller_titles_use_type_scale_helpers(self) -> None:
         # The screen title renders via screen_title (h1) and each

@@ -1,8 +1,8 @@
 """Single-record store for the last wrapper-profile apply (Phase 2).
 
-Records what the wrapper last *sent* to the controller — the snapshot exactly
-as :meth:`AppShell._apply_snapshot_to_controller` received it (post any
-device-field filtering), plus the apply outcome's failed-field labels — so the
+Records what the wrapper last *sent* to the controller — the snapshot after
+device-field filtering and any coordinator-selected 8-point-to-3-point
+fallback, plus the apply outcome's failed-field labels — so the
 Device-vs-Profile screen can answer *"has my controller drifted since I applied
 last week?"* across app restarts.
 
@@ -65,7 +65,7 @@ class LastAppliedRecord:
     applied_at: str  # UTC ISO-8601 ``Z`` (see utc_now_iso_z)
     include_device: bool  # device-global fields (polling/step) were part of it
     failed_fields: tuple[str, ...]  # coordinator setting_labels that did not ACK
-    snapshot: ControllerSnapshot  # as-applied (post device-field filtering)
+    snapshot: ControllerSnapshot  # as-sent (post filtering and fallback)
 
 
 def record_to_dict(record: LastAppliedRecord) -> dict:

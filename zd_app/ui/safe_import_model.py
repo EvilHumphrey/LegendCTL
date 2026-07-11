@@ -158,9 +158,11 @@ class ImportAudit:
     skipped_categories: list[RiskCategory] = field(default_factory=list)
     blocked_field_names: list[str] = field(default_factory=list)
     blocked_automation_count: int = 0
-    controller_write: str = "not_performed"  # not_performed | sent | verified
+    controller_write: str = "not_performed"  # not_performed | sent | verified | aborted
     verified: bool = False
     restore_point_name: str | None = None
+    aborted_no_restore_point: bool = False
+    sensitivity_downgrades: tuple[str, ...] = ()
     # Post-apply read-back verification detail, filled by the apply flow when
     # every write was ACKed: "verified" is earned only by a clean read-back
     # comparison (both lists empty); otherwise the result modal renders the

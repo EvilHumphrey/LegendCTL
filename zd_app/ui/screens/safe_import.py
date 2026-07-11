@@ -407,11 +407,24 @@ def open_result(shell) -> None:
             tag_prefix="safe_import_result",
         )
         dpg.add_spacer(height=6)
-        dpg.add_text(t("safe_import.result.saved_as", name=result.generated_name))
-        dpg.add_text(
-            t("safe_import.result.profile_id", id=audit.generated_profile_id),
-            color=shell.COLORS["muted"],
-        )
+        if audit.aborted_no_restore_point:
+            dpg.add_text(
+                t("safe_import.apply.aborted_no_restore_point"),
+                color=shell.COLORS["error"],
+                wrap=520,
+            )
+        else:
+            dpg.add_text(t("safe_import.result.saved_as", name=result.generated_name))
+            if getattr(audit, "sensitivity_downgrades", ()):
+                dpg.add_text(
+                    t("apply.result.sens_8point_downgraded"),
+                    color=shell.COLORS["warn"],
+                    wrap=520,
+                )
+            dpg.add_text(
+                t("safe_import.result.profile_id", id=audit.generated_profile_id),
+                color=shell.COLORS["muted"],
+            )
         dpg.add_spacer(height=6)
         dpg.add_text(
             t("safe_import.result.imported_categories", categories=_category_names(audit.selected_categories))
@@ -427,7 +440,8 @@ def open_result(shell) -> None:
                 wrap=520,
             )
         dpg.add_spacer(height=6)
-        dpg.add_text(_write_status_text(audit), color=_write_status_color(shell, audit))
+        if not audit.aborted_no_restore_point:
+            dpg.add_text(_write_status_text(audit), color=_write_status_color(shell, audit))
         if audit.restore_point_name:
             dpg.add_text(
                 t("safe_import.result.restore_point", name=audit.restore_point_name),
@@ -450,6 +464,8 @@ def _category_names(categories) -> str:
 
 
 def _write_status_text(audit) -> str:
+    if audit.aborted_no_restore_point:
+        return t("safe_import.apply.aborted_no_restore_point")
     if audit.controller_write == "verified":
         return t("safe_import.result.write_verified")
     if audit.controller_write == "sent":
@@ -474,6 +490,8 @@ def _write_status_text(audit) -> str:
 
 
 def _write_status_color(shell, audit):
+    if audit.aborted_no_restore_point:
+        return shell.COLORS["error"]
     if audit.controller_write == "verified":
         return shell.COLORS["success"]
     if audit.controller_write == "sent":

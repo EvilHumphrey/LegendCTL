@@ -280,7 +280,7 @@ class WriteGateAllowsOnZdTests(unittest.TestCase):
         service = _RecordingSettingsService()
         shell = _shell_with_class("zd_ultimate_legend", settings_service=service)
         shell._polling_rate_hydrated = True
-        shell._maybe_capture_before_manual_device_write = lambda **kw: None
+        shell._maybe_capture_before_manual_device_write = lambda **kw: True
         with patch(
             "zd_app.ui.app_shell.dpg.does_item_exist", return_value=False
         ), patch("zd_app.ui.app_shell.dpg.set_value"):

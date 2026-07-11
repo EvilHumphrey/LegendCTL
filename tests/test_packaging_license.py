@@ -17,6 +17,11 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _LICENSE = _REPO_ROOT / "LICENSE"
 _PROJECT_TXT = _REPO_ROOT / "assets" / "licenses" / "project.txt"
 _README = _REPO_ROOT / "README.md"
+_NOTICE = _REPO_ROOT / "NOTICE"
+_PYINSTALLER_SPEC = _REPO_ROOT / "pyinstaller_main_zd.spec"
+_NOTO_SANS_KR_REGULAR = _REPO_ROOT / "assets" / "fonts" / "NotoSansKR-Regular.ttf"
+_NOTO_SANS_KR_SEMIBOLD = _REPO_ROOT / "assets" / "fonts" / "NotoSansKR-SemiBold.ttf"
+_NOTO_SANS_KR_LICENSE = _REPO_ROOT / "assets" / "licenses" / "noto-sans-kr.txt"
 _REQ_FILES = (
     _REPO_ROOT / "requirements.txt",
     _REPO_ROOT / "requirements-build.txt",
@@ -72,6 +77,26 @@ class DependencyPinningTests(unittest.TestCase):
                     self.assertNotIn(">", line, f"floating range in {path.name}: {line}")
                     self.assertNotIn("<", line, f"floating range in {path.name}: {line}")
                     self.assertIn("==", line, f"unpinned requirement in {path.name}: {line}")
+
+
+class NotoSansKrPackagingTests(unittest.TestCase):
+    def test_korean_font_assets_and_ofl_notice_are_present(self) -> None:
+        for path in (_NOTO_SANS_KR_REGULAR, _NOTO_SANS_KR_SEMIBOLD):
+            with self.subTest(path=path.name):
+                self.assertTrue(path.is_file())
+                self.assertGreater(path.stat().st_size, 0)
+
+        license_text = _NOTO_SANS_KR_LICENSE.read_text(encoding="utf-8")
+        self.assertIn("Noto Sans KR", license_text)
+        self.assertIn("Copyright 2014-2021 Adobe", license_text)
+        self.assertIn("SIL OPEN FONT LICENSE Version 1.1", license_text)
+        self.assertIn("Noto Sans KR (font)", _NOTICE.read_text(encoding="utf-8"))
+
+    def test_pyinstaller_globs_korean_ttf_and_license_assets(self) -> None:
+        spec = _PYINSTALLER_SPEC.read_text(encoding="utf-8")
+
+        self.assertIn('("assets/fonts/*.ttf", "assets/fonts")', spec)
+        self.assertIn('("assets/licenses/*.txt", "assets/licenses")', spec)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ import logging
 import warnings
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import dearpygui.dearpygui as dpg
 
@@ -38,7 +38,12 @@ def _safe_add_font(path: Path, size: int, label: str) -> Optional[int]:
         return None
 
 
-def _add_font_with_cjk(path: Path, size: int, label: str) -> Optional[int]:
+def _add_font_with_ranges(
+    path: Path,
+    size: int,
+    label: str,
+    *range_hints: Callable[[], int],
+) -> Optional[int]:
     if not path.exists():
         logger.warning("CJK font missing: %s (%s)", label, path)
         return None
@@ -47,11 +52,28 @@ def _add_font_with_cjk(path: Path, size: int, label: str) -> Optional[int]:
         if _needs_explicit_cjk_range():
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                dpg.add_font_range_hint(dpg.mvFontRangeHint_Chinese_Full, parent=font_id)
+                for range_hint in range_hints:
+                    dpg.add_font_range_hint(range_hint(), parent=font_id)
         return font_id
     except Exception as exc:
         logger.warning("Failed to load CJK font %s: %s", path.name, exc)
         return None
+
+
+def _add_font_with_cjk(path: Path, size: int, label: str) -> Optional[int]:
+    """Load Noto Sans SC for Chinese UI and the Korean picker autonym."""
+
+    return _add_font_with_ranges(
+        path,
+        size,
+        label,
+        lambda: dpg.mvFontRangeHint_Chinese_Full,
+        lambda: dpg.mvFontRangeHint_Korean,
+    )
+
+
+def _add_font_with_korean(path: Path, size: int, label: str) -> Optional[int]:
+    return _add_font_with_ranges(path, size, label, lambda: dpg.mvFontRangeHint_Korean)
 
 
 def _record_font(key: tuple[str, str], font_id: Optional[int]) -> None:
@@ -80,6 +102,8 @@ def register_fonts() -> dict[tuple[str, str], int]:
         jb_mono = fdir / "JetBrainsMono-Regular.ttf"
         noto_sc_regular = fdir / "NotoSansSC-Regular.otf"
         noto_sc_semibold = fdir / "NotoSansSC-SemiBold.otf"
+        noto_kr_regular = fdir / "NotoSansKR-Regular.ttf"
+        noto_kr_semibold = fdir / "NotoSansKR-SemiBold.ttf"
 
         _record_font(("header", "en"), _safe_add_font(inter_semibold, FONT_SIZE["header.h1"], "Inter SemiBold 24"))
         _record_font(("h2", "en"), _safe_add_font(inter_semibold, FONT_SIZE["header.h2"], "Inter SemiBold 18"))
@@ -89,6 +113,10 @@ def register_fonts() -> dict[tuple[str, str], int]:
         _record_font(("h2", "zh-CN"), _add_font_with_cjk(noto_sc_semibold, FONT_SIZE["header.h2"], "Noto Sans SC SemiBold 18"))
         _record_font(("body", "zh-CN"), _add_font_with_cjk(noto_sc_regular, FONT_SIZE["body"], "Noto Sans SC Regular 15"))
         _record_font(("helper", "zh-CN"), _add_font_with_cjk(noto_sc_regular, FONT_SIZE["helper"], "Noto Sans SC Regular 14"))
+        _record_font(("header", "ko"), _add_font_with_korean(noto_kr_semibold, FONT_SIZE["header.h1"], "Noto Sans KR SemiBold 24"))
+        _record_font(("h2", "ko"), _add_font_with_korean(noto_kr_semibold, FONT_SIZE["header.h2"], "Noto Sans KR SemiBold 18"))
+        _record_font(("body", "ko"), _add_font_with_korean(noto_kr_regular, FONT_SIZE["body"], "Noto Sans KR Regular 15"))
+        _record_font(("helper", "ko"), _add_font_with_korean(noto_kr_regular, FONT_SIZE["helper"], "Noto Sans KR Regular 14"))
         mono = _safe_add_font(jb_mono, FONT_SIZE["mono"], "JetBrains Mono Regular 13")
         _record_font(("mono", "en"), mono)
         _record_font(("mono", "zh-CN"), mono)
@@ -99,7 +127,7 @@ def register_fonts() -> dict[tuple[str, str], int]:
 def bind_default_font(locale: str = "en") -> None:
     """Bind the body font for the given locale as the global default."""
 
-    handle = FONT_HANDLES.get(("body", locale)) or FONT_HANDLES.get(("body", "en"))
+    handle = font_for("body", locale)
     if handle is None:
         logger.warning("Body font for locale %s not loaded; using Dear PyGui default", locale)
         return

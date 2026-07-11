@@ -150,7 +150,7 @@ class AssignTests(BaseServiceTestCase):
         self.assertIsNone(result)
         self.assertFalse(self.service.path_for(SIDE_LEFT).exists())
 
-    def test_assign_archives_prior_passport(self) -> None:
+    def test_assign_keeps_archive_when_replacement_persists(self) -> None:
         first = self.service.assign(SIDE_LEFT, "STOCK_FIRST")
         assert first is not None
         second = self.service.assign(SIDE_LEFT, "K_SILVER")
@@ -165,6 +165,17 @@ class AssignTests(BaseServiceTestCase):
         assert active is not None
         self.assertEqual(active.module_id, "K_SILVER")
 
+    def test_assign_removes_archive_when_replacement_persist_fails(self) -> None:
+        self.assertIsNotNone(self.service.assign(SIDE_LEFT, "STOCK_FIRST"))
+        active_path = self.service.path_for(SIDE_LEFT)
+        original_bytes = active_path.read_bytes()
+
+        with mock.patch.object(self.service, "_persist", return_value=False):
+            self.assertIsNone(self.service.assign(SIDE_LEFT, "K_SILVER"))
+
+        self.assertEqual(list(self.service.archive_dir.glob("left_STOCK_FIRST_*")), [])
+        self.assertEqual(active_path.read_bytes(), original_bytes)
+
     def test_assign_archives_history_intact(self) -> None:
         passport = self.service.assign(SIDE_LEFT, "STOCK")
         assert passport is not None
@@ -175,6 +186,52 @@ class AssignTests(BaseServiceTestCase):
         self.assertEqual(len(archived_paths), 1)
         archived = json.loads(archived_paths[0].read_text(encoding="utf-8"))
         self.assertEqual(len(archived["fingerprints"]), 2)
+
+    def test_assign_archives_old_passport_bytes_before_replacing_active(self) -> None:
+        self.assertIsNotNone(self.service.assign(SIDE_LEFT, "STOCK_FIRST"))
+        active_path = self.service.path_for(SIDE_LEFT)
+        original_bytes = active_path.read_bytes()
+
+        replacement = self.service.assign(SIDE_LEFT, "K_SILVER")
+
+        self.assertIsNotNone(replacement)
+        archived = list(self.service.archive_dir.glob("left_STOCK_FIRST_*"))
+        self.assertEqual(len(archived), 1)
+        self.assertEqual(archived[0].read_bytes(), original_bytes)
+        self.assertNotEqual(active_path.read_bytes(), original_bytes)
+
+    def test_assign_preserves_active_when_archive_mkdir_fails(self) -> None:
+        self.assertIsNotNone(self.service.assign(SIDE_LEFT, "STOCK_FIRST"))
+        active_path = self.service.path_for(SIDE_LEFT)
+        original_bytes = active_path.read_bytes()
+
+        with mock.patch.object(Path, "mkdir", side_effect=OSError("simulated mkdir failure")):
+            self.assertIsNone(self.service.assign(SIDE_LEFT, "K_SILVER"))
+
+        self.assertEqual(active_path.read_bytes(), original_bytes)
+
+    def test_assign_preserves_active_when_archive_write_fails(self) -> None:
+        self.assertIsNotNone(self.service.assign(SIDE_LEFT, "STOCK_FIRST"))
+        active_path = self.service.path_for(SIDE_LEFT)
+        original_bytes = active_path.read_bytes()
+
+        with mock.patch("builtins.open", side_effect=OSError("simulated write failure")):
+            self.assertIsNone(self.service.assign(SIDE_LEFT, "K_SILVER"))
+
+        self.assertEqual(active_path.read_bytes(), original_bytes)
+
+    def test_assign_preserves_active_when_archive_replace_fails(self) -> None:
+        self.assertIsNotNone(self.service.assign(SIDE_LEFT, "STOCK_FIRST"))
+        active_path = self.service.path_for(SIDE_LEFT)
+        original_bytes = active_path.read_bytes()
+
+        with mock.patch(
+            "zd_app.services.module_passport.service.os.replace",
+            side_effect=OSError("simulated replace failure"),
+        ):
+            self.assertIsNone(self.service.assign(SIDE_LEFT, "K_SILVER"))
+
+        self.assertEqual(active_path.read_bytes(), original_bytes)
 
     def test_assign_emits_wear_ledger_event(self) -> None:
         self.service.assign(SIDE_LEFT, "STOCK_LEFT", notes="baseline")

@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.6.0 — 2026-07-12
+
+Trust + honesty release. New "What we know right now" provenance card (Diagnostics → Guidance)
+shows verified-from-device / inferred / unknown per fact and updates live. Firmware and active
+profile now populate from the official app's open window via UI Automation, labeled "Official App
+UI" (never "Verified from device"); the right rail and Home show the source and keep a "(last
+read)" qualifier until refreshed this connection. Firmware provenance is now labeled in
+compatibility reports, share cards, and diagnostic bundles. The first-run notice is shorter and
+states honestly that live controls write immediately, with a verify-before-accept link. Simplified
+Chinese now localizes the Controller vibration/trigger/lighting choices. An independent adversarial
+review hardened the release: Safe Import creates its restore point before writing and aborts if it
+can't; other device writes disclose a missing checkpoint; "Last applied" records the curve actually
+sent when 8-point support can't be confirmed; the Trust Self-Check fails closed when its scan can't
+run; and restore points, module records, and data migration are now crash-safe. No new
+wrapper-written settings, no network, nothing uploaded.
+
 ## v2.5.0 — 2026-07-04
 
 Feature release: a read-only model fingerprint (VID/PID, usage page, report shape, interface

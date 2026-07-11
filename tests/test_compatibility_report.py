@@ -135,6 +135,37 @@ class CompatibilityReportRendererTests(unittest.TestCase):
         self.assertIn("v9.99-beta", combined)
         self.assertNotIn("SERIALTAIL", combined)
 
+    def test_cached_firmware_labels_official_app_ui_source(self) -> None:
+        state = DeviceState(firmware_version="1.24")
+        state.summary_sources["firmware"] = "official_app_ui"
+
+        text = build_compatibility_report(device_state=state, now=_NOW).to_markdown()
+
+        self.assertIn(r"- Firmware: 1.24 \(Official App UI\)", text)
+
+    def test_cached_firmware_labels_protocol_source(self) -> None:
+        state = DeviceState(firmware_version="1.24")
+        state.summary_sources["firmware"] = "protocol"
+
+        text = build_compatibility_report(device_state=state, now=_NOW).to_markdown()
+
+        self.assertIn(r"- Firmware: 1.24 \(Controller Protocol\)", text)
+
+    def test_explicit_firmware_labels_user_entered_source(self) -> None:
+        text = build_compatibility_report(
+            device_state=DeviceState(firmware_version="1.24"),
+            firmware="1.25",
+            now=_NOW,
+        ).to_markdown()
+
+        self.assertIn(r"- Firmware: 1.25 \(Manually entered\)", text)
+
+    def test_unknown_firmware_stays_bare(self) -> None:
+        text = build_compatibility_report(device_state=DeviceState(), now=_NOW).to_markdown()
+
+        self.assertIn("- Firmware: unknown", text)
+        self.assertNotIn(r"- Firmware: unknown \(", text)
+
     def test_model_fingerprint_section_is_sanitized_and_excludes_serial(self) -> None:
         state = DeviceState(
             product_name="ZD Ultimate Legend",

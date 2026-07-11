@@ -251,14 +251,21 @@ def _connection_value(shell) -> str:
 
 
 def _firmware_value(shell) -> str:
+    state = shell.device_service.state
     formatter = getattr(shell.device_service, "format_firmware_version", None)
     if callable(formatter):
         value = str(formatter())
     else:
-        firmware = getattr(shell.device_service.state, "firmware_version", "")
+        firmware = getattr(state, "firmware_version", "")
         value = str(firmware or t("common.unknown"))
-    if _has_retained_firmware(shell.device_service.state) and not _is_connected(shell):
-        return t("device.value.last_read", value=value)
+    if _has_retained_firmware(state) and not _summary_field_refreshed_this_connection(
+        shell, "firmware"
+    ):
+        value = t("device.value.last_read", value=value)
+    if _has_retained_firmware(state):
+        source_fn = getattr(shell.device_service, "summary_source_label_for", None)
+        source = source_fn("firmware") if callable(source_fn) else t("common.unknown")
+        return t("device.value.with_source", value=value, source=source)
     return value
 
 
@@ -269,7 +276,9 @@ def _active_profile_value(shell) -> str:
         profile = t("profile.config_state.not_verified")
     elif profile.startswith("Config "):
         profile = t("profile.config_state.config", n=profile.removeprefix("Config "))
-    if _has_retained_active_profile(state) and not _is_connected(shell):
+    if _has_retained_active_profile(state) and not _summary_field_refreshed_this_connection(
+        shell, "active_profile"
+    ):
         profile = t("device.value.last_read", value=profile)
     source_fn = getattr(shell.device_service, "summary_source_label_for", None)
     source = source_fn("active_profile") if callable(source_fn) else t("common.unknown")
@@ -277,21 +286,42 @@ def _active_profile_value(shell) -> str:
 
 
 def _firmware_value_color(shell):
-    if _has_retained_firmware(shell.device_service.state) and not _is_connected(shell):
+    if _has_retained_firmware(shell.device_service.state) and not _summary_field_refreshed_this_connection(
+        shell, "firmware"
+    ):
         return COLORS["text.secondary"]
     return COLORS["text.primary"]
 
 
 def _active_profile_value_color(shell):
-    if _has_retained_active_profile(shell.device_service.state) and not _is_connected(
-        shell
-    ):
+    if _has_retained_active_profile(
+        shell.device_service.state
+    ) and not _summary_field_refreshed_this_connection(shell, "active_profile"):
         return COLORS["text.secondary"]
     return COLORS["text.primary"]
 
 
 def _is_connected(shell) -> bool:
     return getattr(shell.device_service.state, "connection_state", "") == "connected"
+
+
+def _summary_field_refreshed_this_connection(shell, field_name: str) -> bool:
+    """Return current-connection freshness, with a safe legacy-test fallback."""
+
+    if not _is_connected(shell):
+        return False
+    checker = getattr(
+        shell.device_service, "summary_field_refreshed_this_connection", None
+    )
+    if callable(checker):
+        refreshed = checker(field_name)
+        if isinstance(refreshed, bool):
+            return refreshed
+    # Older lightweight UI fakes have no freshness seam. Their connected-state
+    # values represented the former "current" test fixture, so preserve that
+    # behavior only for those fakes; the real DeviceService always supplies the
+    # explicit boolean above.
+    return True
 
 
 def _has_retained_firmware(state) -> bool:

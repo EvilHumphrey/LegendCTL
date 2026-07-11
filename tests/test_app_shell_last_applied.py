@@ -32,9 +32,10 @@ from tests.test_app_shell_hid_busy_guard import (
     _capture_widget_state,
 )
 from zd_app.models import AppSettings, DeviceState
-from zd_app.services.settings_apply_coordinator import ApplyFailure
+from zd_app.services.settings_apply_coordinator import ApplyFailure, ApplyResult
 from zd_app.services.settings_service import (
     PollingRate,
+    SensitivityAnchor,
     TriggerVibrationMode,
     VibrationSettings,
 )
@@ -62,6 +63,11 @@ def _make_shell(settings_service=None, *, last_applied_store=None) -> AppShell:
     profile_service.pending_changes_count.return_value = 0
     wrapper_profile_store = MagicMock()
     wrapper_profile_store.list_profiles.return_value = []
+    restore_point_service = MagicMock()
+    restore_point_service.capture.return_value = SimpleNamespace(
+        id="rp_last_applied_test",
+        title="Last applied test restore point",
+    )
     shell = AppShell(
         device_service=device_service,
         profile_service=profile_service,
@@ -70,12 +76,10 @@ def _make_shell(settings_service=None, *, last_applied_store=None) -> AppShell:
         preflight_service=MagicMock(),
         settings_service=settings_service,
         wrapper_profile_store=wrapper_profile_store,
-        restore_point_service=None,
+        restore_point_service=restore_point_service,
         last_applied_store=last_applied_store,
     )
-    # Same suppression as the busy-guard helper: no default-built RP service,
-    # so apply paths never fresh-read or write RPs on disk.
-    shell.restore_point_service = None
+    # The injected service keeps automatic captures deterministic and in-memory.
     shell.refresh_shell = lambda: None
     shell.rebuild_current_screen = lambda: None
     return shell
@@ -173,6 +177,68 @@ class NamedApplyRecordingTests(unittest.TestCase):
         # The partial-failure banner still fired exactly as before.
         recorded = shell.device_service.record_apply_result.call_args
         self.assertIs(recorded.args[0], False)
+
+    def test_downgraded_apply_records_the_sent_3point_curve_after_round_trip(self) -> None:
+        left_3point = (
+            SensitivityAnchor(0, 0),
+            SensitivityAnchor(50, 40),
+            SensitivityAnchor(100, 100),
+        )
+        right_3point = (
+            SensitivityAnchor(0, 0),
+            SensitivityAnchor(50, 60),
+            SensitivityAnchor(100, 100),
+        )
+        left_8point = tuple(SensitivityAnchor(i * 10, i * 10) for i in range(8))
+        snapshot = empty_snapshot(
+            sensitivity_left=left_3point,
+            sensitivity_right=right_3point,
+            sensitivity_left_8point=left_8point,
+        )
+        with TemporaryDirectory() as tmp:
+            store = LastAppliedStore(base_dir=tmp)
+            service = _RecordingService(empty_snapshot())
+            service.supports_8point_sensitivity = lambda: False
+            shell = _make_shell(service, last_applied_store=store)
+            with patch("zd_app.ui.app_shell.time.sleep"):
+                _capture_widget_state(
+                    lambda: shell._apply_wrapper_profile_snapshot(
+                        "downgraded", snapshot
+                    )
+                )
+            record = store.load()
+
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertIsNone(record.snapshot.sensitivity_left_8point)
+        self.assertEqual(record.snapshot.sensitivity_left, left_3point)
+        self.assertEqual(record.snapshot.sensitivity_right, right_3point)
+        self.assertIsNone(record.snapshot.sensitivity_right_8point)
+
+    def test_record_strips_only_the_downgraded_stick_rider(self) -> None:
+        left_8point = tuple(SensitivityAnchor(i * 10, i * 10) for i in range(8))
+        right_8point = tuple(SensitivityAnchor(i * 10, 100 - i * 10) for i in range(8))
+        snapshot = empty_snapshot(
+            sensitivity_left_8point=left_8point,
+            sensitivity_right_8point=right_8point,
+        )
+        with TemporaryDirectory() as tmp:
+            store = LastAppliedStore(base_dir=tmp)
+            shell = _make_shell(
+                _RecordingService(empty_snapshot()), last_applied_store=store
+            )
+            shell._record_last_applied_safe(
+                "mixed",
+                snapshot,
+                ApplyResult(total_attempted=2, sensitivity_downgrades=("sens_left",)),
+                include_device=False,
+            )
+            record = store.load()
+
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertIsNone(record.snapshot.sensitivity_left_8point)
+        self.assertEqual(record.snapshot.sensitivity_right_8point, right_8point)
 
     def test_storage_failure_never_breaks_the_apply(self) -> None:
         store = _ExplodingStore()

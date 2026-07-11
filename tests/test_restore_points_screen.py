@@ -12,12 +12,14 @@ the tests are fully deterministic and never touch the filesystem.
 
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
+from zd_app import i18n
 from zd_app.services.restore_points import (
     CLAIM_BOUNDARY_PARAGRAPH,
     CLAIM_BOUNDARY_SHORT_UI,
@@ -955,6 +957,28 @@ class InProgressViewTests(unittest.TestCase):
             RestoreResultLabel.VERIFIED,
         )
 
+    def test_execute_restore_pending_consent_refuses_without_calling_service(self) -> None:
+        state = screen.RestorePointsScreenState(
+            view=screen.VIEW_IN_PROGRESS, selected_rp_id="rp_test"
+        )
+        service = _FakeService(valid=[_rp(id="rp_test")])
+        shell = _shell_with(service, screen_state=state)
+        shell._consent_pending_write_allowed_or_refuse = MagicMock(return_value=False)
+
+        screen._execute_restore(shell)
+
+        shell._consent_pending_write_allowed_or_refuse.assert_called_once_with()
+        self.assertEqual(shell.restore_points_screen_state.view, screen.VIEW_CONFIRM)
+        self.assertEqual(
+            shell.restore_points_screen_state.status_text,
+            i18n.t("first_run.pending_write_blocked"),
+        )
+        self.assertEqual(shell.restore_points_screen_state.status_kind, "warn")
+        self.assertEqual(
+            [call for call in service.calls if call[0] == "restore"],
+            [],
+        )
+
     def test_execute_restore_transitions_to_list_on_exception(self) -> None:
         state = screen.RestorePointsScreenState(
             view=screen.VIEW_IN_PROGRESS, selected_rp_id="rp_test"
@@ -986,6 +1010,22 @@ class ResultViewTests(unittest.TestCase):
         self.assertIn("Wrote successfully: 3", all_text)
         self.assertIn("Verified matched: 3", all_text)
         self.assertIn("Verified", all_text)  # result header
+
+    def test_result_view_renders_sensitivity_downgrade_disclosure(self) -> None:
+        from zd_app.i18n import t
+
+        state = screen.RestorePointsScreenState(
+            view=screen.VIEW_RESULT,
+            selected_rp_id="rp_test",
+            result=replace(
+                _result(), sensitivity_downgrades=("sens_left",)
+            ),
+        )
+        service = _FakeService(valid=[_rp(id="rp_test")])
+        shell = _shell_with(service, screen_state=state)
+        with _PatchedScreen(shell) as ps:
+            ps.build()
+        self.assertIn(t("apply.result.sens_8point_downgraded"), " ".join(ps.text_strings()))
 
     def test_result_view_renders_each_label_correctly(self) -> None:
         for label, expected_header in (

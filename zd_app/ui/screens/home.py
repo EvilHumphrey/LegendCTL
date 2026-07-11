@@ -234,7 +234,7 @@ def _connection_card(shell) -> None:
             dpg.add_text(state.product_name)
             metric(
                 t("home.connection.firmware"),
-                shell.device_service.format_firmware_version(),
+                _firmware_status_value(shell),
             )
             metric(
                 t("home.connection.battery"),
@@ -261,7 +261,7 @@ def _profile_card(shell) -> None:
             # zh-CN localization assertions read the value, not the label.
             metric(
                 t("home.profile.active"),
-                _localized_active_config_label(state),
+                _active_profile_status_value(shell),
                 value_tag="home_profile_active",
             )
             # The active value is the controller's on-device profile SLOT by
@@ -316,6 +316,12 @@ def _state_explainer(shell) -> None:
 
 
 def _trust_front_door_card(shell) -> None:
+    # In the rail/wide layout the two-column card is narrower than windowed
+    # (the fixed work column splits ~50/50), so four buttons no longer fit one
+    # row — the 4th clipped mid-label (visual review 2026-07-06). Wrap to 2x2
+    # there; windowed keeps the single row (its height budget is pinned by the
+    # isolated Home reference-height test). Senses the wide state through the
+    # same right_rail predicate the layout itself uses — no new signal.
     with card(fit=True, tag="home_trust_front_door_card"):
         dpg.add_text(t("home.trust_front_door.title"), color=shell.COLORS["muted"], wrap=470)
         dpg.add_spacer(height=4)
@@ -324,6 +330,9 @@ def _trust_front_door_card(shell) -> None:
                 shell,
                 tag_prefix="home_trust_front_door",
                 button_width=135,
+                max_per_row=(
+                    2 if right_rail.screen_wide_state(shell, "home") else None
+                ),
             )
 
 
@@ -764,37 +773,69 @@ def _localized_active_config_label(state) -> str:
 
 
 def _firmware_status_value(shell) -> str:
+    state = shell.device_service.state
     value = shell.device_service.format_firmware_version()
-    if _has_retained_firmware(shell.device_service.state) and not _is_connected(shell):
-        return t("device.value.last_read", value=value)
+    if _has_retained_firmware(state) and not _summary_field_refreshed_this_connection(
+        shell, "firmware"
+    ):
+        value = t("device.value.last_read", value=value)
+    if _has_retained_firmware(state):
+        source_fn = getattr(shell.device_service, "summary_source_label_for", None)
+        source = source_fn("firmware") if callable(source_fn) else t("common.unknown")
+        return t("device.value.with_source", value=value, source=source)
     return value
 
 
 def _firmware_status_color(shell):
-    if _has_retained_firmware(shell.device_service.state) and not _is_connected(shell):
+    if _has_retained_firmware(shell.device_service.state) and not _summary_field_refreshed_this_connection(
+        shell, "firmware"
+    ):
         return shell.COLORS["muted"]
     return None
 
 
 def _active_profile_status_value(shell) -> str:
-    value = _localized_active_config_label(shell.device_service.state)
-    if _has_retained_active_profile(shell.device_service.state) and not _is_connected(
-        shell
+    state = shell.device_service.state
+    value = _localized_active_config_label(state)
+    if _has_retained_active_profile(state) and not _summary_field_refreshed_this_connection(
+        shell, "active_profile"
     ):
-        return t("device.value.last_read", value=value)
+        value = t("device.value.last_read", value=value)
+    if _has_retained_active_profile(state):
+        source_fn = getattr(shell.device_service, "summary_source_label_for", None)
+        source = source_fn("active_profile") if callable(source_fn) else t("common.unknown")
+        return t("device.value.with_source", value=value, source=source)
     return value
 
 
 def _active_profile_status_color(shell):
-    if _has_retained_active_profile(shell.device_service.state) and not _is_connected(
-        shell
-    ):
+    if _has_retained_active_profile(
+        shell.device_service.state
+    ) and not _summary_field_refreshed_this_connection(shell, "active_profile"):
         return shell.COLORS["muted"]
     return None
 
 
 def _is_connected(shell) -> bool:
     return shell.device_service.state.connection_state == "connected"
+
+
+def _summary_field_refreshed_this_connection(shell, field_name: str) -> bool:
+    """Return current-connection freshness, with a safe legacy-test fallback."""
+
+    if not _is_connected(shell):
+        return False
+    checker = getattr(
+        shell.device_service, "summary_field_refreshed_this_connection", None)
+    if callable(checker):
+        refreshed = checker(field_name)
+        if isinstance(refreshed, bool):
+            return refreshed
+    # Older lightweight UI fakes have no freshness seam. Their connected-state
+    # values represented the former "current" test fixture, so preserve that
+    # behavior only for those fakes; the real DeviceService always supplies the
+    # explicit boolean above.
+    return True
 
 
 def _has_retained_firmware(state) -> bool:
