@@ -9,8 +9,8 @@ UI" (never "Verified from device"); the right rail and Home show the source and 
 read)" qualifier until refreshed this connection. Firmware provenance is now labeled in
 compatibility reports, share cards, and diagnostic bundles. The first-run notice is shorter and
 states honestly that live controls write immediately, with a verify-before-accept link. Simplified
-Chinese now localizes the Controller vibration/trigger/lighting choices. An independent adversarial
-review hardened the release: Safe Import creates its restore point before writing and aborts if it
+Chinese now localizes the Controller vibration/trigger/lighting choices. External and internal
+adversarial reviews hardened the release: Safe Import creates its restore point before writing and aborts if it
 can't; other device writes disclose a missing checkpoint; "Last applied" records the curve actually
 sent when 8-point support can't be confirmed; the Trust Self-Check fails closed when its scan can't
 run; and restore points, module records, and data migration are now crash-safe. No new

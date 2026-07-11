@@ -31,9 +31,10 @@ independent adversarial review.
 - **Simplified Chinese: localized settings choices.** The Controller screen's vibration, trigger,
   and lighting choices now render in Chinese for zh-CN users, matching the rest of the interface.
 
-## Trust hardening (independent adversarial review)
+## Trust hardening (adversarial reviews, external and internal)
 
-An independent multi-lens review of this release's changes found and we fixed:
+An independent external review of the public project and an internal multi-lens audit of this
+release's changes found — and we fixed:
 
 - **Restore-point contract made truthful.** Safe Import now creates its checkpoint before it writes
   anything and aborts honestly if it can't; other changes that touch the device disclose when no
