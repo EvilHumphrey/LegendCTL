@@ -28,8 +28,8 @@ configures the controller's supported settings — it is not a firmware updater.
 
 > **First launch shows a SmartScreen prompt — that's expected.** Because the
 > build is currently unsigned, Windows may show "Windows protected your PC" the
-> first time you run it. That's normal for any new unsigned app, not a malware
-> warning — choose **More info → Run anyway**. You can verify the
+> first time you run it. That's expected for any new unsigned app and is not, by
+> itself, a malware verdict — choose **More info → Run anyway**. You can verify the
 > [download's SHA-256](docs/install-windows-and-smartscreen.md) first if you like.
 
 **New here, or searching for something specific?** →
@@ -47,15 +47,15 @@ configures the controller's supported settings — it is not a firmware updater.
 - **Setup.exe:** download `ZDUltimateLegend-v<version>-Setup.exe` from the
   [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest) if
   you want Start Menu and uninstall integration.
-- **winget:** once the manifest is accepted into the Windows Package Manager
-  community repo:
+- **winget (planned — not yet available):** once the manifest is accepted into
+  the Windows Package Manager community repo, this will work:
 
   ```powershell
   winget install EvilHumphrey.LegendCTL
   ```
 
-- **Scoop:** once the bucket is published, add the LegendCTL bucket and run
-  `scoop install legendctl`.
+- **Scoop (planned — not yet available):** once the bucket is published, add
+  the LegendCTL bucket and run `scoop install legendctl`.
 
 For the first-run SmartScreen warning, and for checking the published SHA-256
 before you run anything, see the
@@ -76,8 +76,8 @@ short version is **trust you can verify**:
   [confirm the no-network behavior yourself](docs/verifying-no-network.md) in a
   couple of minutes.
 - **No drivers, no virtual devices, no background service.** Nothing installs a
-  driver or sits running in the background. Close the app and nothing of it is
-  left behind.
+  driver or sits running in the background. Close the app and no process or
+  service of it is left running.
 - **Honest write reporting — no fake success.** A normal Apply reports each
   field's real write outcome and refreshes the on-screen state from the device;
   the Restore, Safe Import, and inline deadzone flows go further and verify by
@@ -87,9 +87,9 @@ short version is **trust you can verify**:
   plays for you. That's a deliberate constraint enforced by tests, not a missing
   feature.
 - **A safety net by default.** Device-touching changes — applying device
-  settings, deadzone tuning — capture a **Restore Point** first, wrapper events
-  are written to an append-only local ledger, and there is always a
-  [Recovery](#recovery--if-your-controller-feels-off) path back.
+  settings, deadzone tuning — capture a **Restore Point** first where one can
+  be taken, wrapper events are written to an append-only local ledger, and
+  there are two [Recovery](#recovery--if-your-controller-feels-off) paths back.
 
 That's the whole pitch: a small, auditable, no-surprises tool for your controller
 — open where closed software is opaque, local by design, and honest about what it
@@ -202,7 +202,7 @@ even without admin rights.
 Download `ZDUltimateLegend-v<version>-Setup.exe` from the [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest).
 
 The installer:
-- Installs to `%ProgramFiles%\ZDUltimateLegend\` (requires admin — you'll see a UAC prompt). Installing under Program Files means only administrators can modify the app files, which prevents tampering / DLL planting.
+- Installs to `%ProgramFiles%\ZDUltimateLegend\` (requires admin — you'll see a UAC prompt). Installing under Program Files means only administrators can modify the app files, which reduces the risk of the app files being modified by non-administrator processes.
 - Adds a Start Menu entry under "ZD Ultimate Legend Wrapper".
 - Registers an uninstaller in Windows Settings → Apps.
 - Optionally adds a desktop shortcut (unchecked by default).
@@ -281,15 +281,15 @@ this tool or any other), there is always a clear way back:
    use its *Restore to default* function, then re-apply your preferred settings.
    This is the vendor's own known-good reset and the most reliable recovery
    path.
-2. **Wrapper Restore Points.** Before risky operations this app captures a
-   Restore Point — a snapshot of the app-readable settings. Open **Restore
+2. **Wrapper Restore Points.** Before risky operations this app attempts to
+   capture a Restore Point — a snapshot of the app-readable settings. Open **Restore
    Points** in the sidebar and restore an earlier one to roll back the settings
    this app can write. Restore Points cover app-supported, app-readable settings
    (they are not a full firmware/factory backup); each point states exactly what
    it captured.
 
 Between the vendor's "Restore to default" and the wrapper's Restore Points, you
-always have an undo.
+have two recovery paths back.
 
 ## Getting help
 
@@ -373,9 +373,9 @@ files also live under `assets/licenses/`.
 
 LegendCTL was built with substantial AI assistance, under human direction and
 review throughout. Much of the reverse-engineering, implementation, test-writing,
-and adversarial code review was done by AI agents — and every change was
-human-reviewed, hardware-tested on a real controller, and shipped by the
-maintainer.
+and adversarial code review was done by AI agents — with all changes
+human-reviewed, hardware-facing changes tested on the documented real controller
+where applicable, and every release shipped by the maintainer.
 
 - **Claude** (Anthropic) — primary development, reverse-engineering research, and
   code review, via Claude Code.

@@ -17,7 +17,10 @@ open-source software.
   SignPath Foundation**, using a certificate issued to this project.
 - We sign **only our own binaries, built from this repository's source.** No
   third-party, vendored, or externally supplied executable is ever signed.
-- Signing is the **last** step of a repeatable, documented build from a tagged commit.
+- Signing (once live) happens **before** the final distributables are packaged,
+  hashed, and attested — so published hashes and attestations always describe
+  the exact bytes users download. The build itself is a repeatable, documented
+  build from a tagged commit.
 
 ## Build & release process
 
@@ -36,14 +39,22 @@ open-source software.
      ```
      This packages the app with PyInstaller into `dist/…/ZD Ultimate Legend.exe`
      plus a distributable ZIP (and an installer `.exe` when Inno Setup is present).
-3. **Verify the build.** The release smoke test (`.\tools\smoke_release.ps1`)
-   and the unit suite are run before a build is considered releasable.
-4. **Publish hashes.** Each release publishes `SHA256SUMS.txt` for every
-   distributed artifact, so users can verify integrity independently of the
-   signature.
-5. **Sign.** The release artifacts are submitted to SignPath for signing as the
-   final step. Only artifacts produced by step 2 from the tagged commit are
-   submitted.
+3. **Sign (future — once SignPath signing is live).** The built executable and
+   installer inputs are submitted to SignPath for signing **before** the final
+   distributables are packaged, because AuthentiCode signing changes a binary's
+   bytes (and a signed inner executable changes the ZIP/installer bytes). The
+   signed-release flow is: build → sign → package the final distributables →
+   smoke-test the final artifacts → hash + attest the final bytes → publish.
+   Only artifacts produced by step 2 from the tagged commit are submitted.
+   Until signing is live this step is skipped, and the flow is: build →
+   smoke-test → hash + attest → publish.
+4. **Verify the build.** The release smoke test (`.\tools\smoke_release.ps1`)
+   and the unit suite are run against the final artifacts before a build is
+   considered releasable.
+5. **Publish hashes.** Each release publishes `SHA256SUMS.txt` computed over
+   the **final published bytes** (after signing, once signing is live), so
+   users can verify integrity independently of the signature — hashes and
+   attestations always describe exactly what users download.
 
 ## Signing scope
 

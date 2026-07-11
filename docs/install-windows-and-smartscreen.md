@@ -45,7 +45,7 @@ Because LegendCTL is unsigned, the honest way to be sure your download is the re
 
 *(In `SHA256SUMS.txt`, a leading `*` on a filename is standard `sha256sum` notation marking binary-mode hashing — it's not part of the filename.)*
 
-This is the same integrity guarantee a signature provides, done in the open — fitting for a tool whose whole point is being honest about what it is.
+A matching hash proves your file is byte-for-byte the one published with that release — an integrity check, done in the open. It doesn't by itself prove *who* published it: for that origin check on v2.5.0+ releases, use the build-provenance verification in section 4. (AuthentiCode code-signing is a separate, still-planned layer — see the [code-signing policy](code-signing-policy.md).)
 
 ## 4. Verify where it was built (build provenance)
 
@@ -96,7 +96,7 @@ gh attestation verify .\ZDUltimateLegend-v<version>-Setup.exe `
 - **Built in public CI, with provenance.** Release binaries are produced by a public GitHub Actions workflow and carry a verifiable build attestation (section 4).
 - **No telemetry, no network calls.** It talks only to your controller over USB/HID; it doesn't phone home.
 - **No drivers, no background service.** It's a plain desktop app; closing it stops it completely.
-- **Standalone.** It doesn't need (or touch) the official ZD app.
+- **Standalone.** It doesn't require, launch, or modify the official ZD app. (One narrow read-only exception: if the official app's Controller Settings window is already open during an explicit device read, LegendCTL may read a few summary labels from it via Windows UI Automation — it never launches or changes that app.)
 
 ## 6. Install via winget (when available)
 

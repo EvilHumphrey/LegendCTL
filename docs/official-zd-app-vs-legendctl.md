@@ -55,7 +55,7 @@ firmware flasher and cannot change firmware.
 | Configure **deadzones, sensitivity, polling, buttons, triggers, vibration, lighting, profiles** on Windows | **LegendCTL** |
 | A **fully-local, open-source, no-telemetry** way to manage settings | **LegendCTL** |
 | **View** live stick output / circularity (any XInput pad) | **LegendCTL** (read-only) |
-| Macros / turbo / rapid-fire / virtual-device remapping | Neither — LegendCTL deliberately omits these |
+| Macros / turbo / rapid-fire / virtual-device remapping | **Not in LegendCTL** — deliberately omitted by design (a design choice, not a tournament/legal guarantee). For the official apps' current capabilities, check ZD's own documentation |
 
 LegendCTL doesn't require the official app. Keep ZD's official tools for firmware/reset workflows; use LegendCTL
 separately for the supported settings above.

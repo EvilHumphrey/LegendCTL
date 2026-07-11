@@ -25,6 +25,11 @@ has no telemetry, drivers, macros, or background service.
 - [FAQ](FAQ.md) — short answers to common questions
 - [Verifying no network access](verifying-no-network.md) — confirm the zero-network behavior yourself
 - [Reviewer / tester kit](REVIEWER-KIT.md)
+- [Technical architecture](ARCHITECTURE.md) — how the app is built and tested
+- [Compatibility matrix](compatibility-matrix.md) — hardware/firmware evidence, honestly graded
+- [What step size actually does](what-step-size-does.md) — a measured, reproducible study
+- [Code-signing policy & build provenance](code-signing-policy.md) — how releases are built, attested, and (in future) signed
+- [Community references & adoption](community-references.md) — the project's real public footprint
 
 ---
 

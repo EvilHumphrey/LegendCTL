@@ -5,6 +5,11 @@ description: "Why unsigned LegendCTL builds may trigger SmartScreen, and how to 
 
 # LegendCTL on Windows: SmartScreen, unsigned builds & verifying the SHA-256
 
+> **Note:** this page predates v2.5.0. The current, maintained guide — including
+> **build-provenance attestation** verification for v2.5.0+ releases — is
+> [install-windows-and-smartscreen.md](install-windows-and-smartscreen.md). The
+> SHA-256 steps below remain valid for all releases.
+
 If Windows showed you a **"Windows protected your PC"** prompt, or you just want to check a download before running it,
 this page is the concrete path. [LegendCTL](https://github.com/EvilHumphrey/LegendCTL) is a free, open-source, fully
 local Windows app for the ZD Ultimate Legend — and the smart move with *any* unsigned utility is to verify rather than

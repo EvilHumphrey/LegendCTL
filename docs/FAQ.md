@@ -10,8 +10,9 @@ or [SUPPORT.md](../SUPPORT.md).
 LegendCTL only writes the controller's *settings* over standard USB-HID — the
 same kinds of values the official app changes. It is **not** a firmware flasher,
 so it can't overwrite firmware. Before risky operations it captures a **Restore
-Point**, wrapper events are recorded to a local append-only ledger, and there
-is always a clear way back (see [Recovery in the README](../README.md#recovery--if-your-controller-feels-off)).
+Point** where one can be taken, wrapper events are recorded to a local
+append-only ledger, and there are two recovery paths back (see
+[Recovery in the README](../README.md#recovery--if-your-controller-feels-off)).
 That said, it writes to hardware and is provided "as is" — see
 [Disclaimer & risk](../README.md#disclaimer--risk). Nothing can promise zero risk
 when touching hardware, but the safety net is real and the writes are honest about
@@ -22,8 +23,9 @@ No. The LegendCTL process makes **zero** network calls — no telemetry, no
 analytics, no auto-update, no "usage data." The only outbound action anywhere in
 the app is the About screen's GitHub links, which hand a URL to your default
 browser; the app itself opens no socket. You don't have to take that on faith:
-open the in-app **Trust Self-Check** (Diagnostics), which scans the *running* build
-for any networking code and confirms no driver or background service, then copies
+open the in-app **Trust Self-Check** (Diagnostics), which scans the shipped code
+for networking and driver/virtual-device imports and shows the evidence it found
+(it inspects the app's own footprint, not system-wide services), then copies
 the result out — or [verify it yourself with Resource Monitor](verifying-no-network.md)
 in a couple of minutes.
 
@@ -35,8 +37,8 @@ test suite, not just promised.
 
 ### Was this built with AI?
 Yes — LegendCTL was built with substantial AI assistance, under human direction
-and review throughout, and every change was human-reviewed and hardware-tested
-before shipping. We say so plainly in the [Acknowledgments](../README.md#acknowledgments) —
+and review throughout: all changes are human-reviewed, and hardware-facing
+changes are tested on a real controller where applicable, before shipping. We say so plainly in the [Acknowledgments](../README.md#acknowledgments) —
 honesty is the whole point of the project. The code is fully open and
 test-enforced precisely so you don't have to trust the process; you can read it.
 
@@ -59,10 +61,13 @@ a sign of malware. Verify the SHA-256 (above), then choose **More info → Run
 anyway**. Full detail under [Distribution safety](../README.md#distribution-safety).
 
 ### My antivirus flagged it — is it a virus?
-Almost certainly a false positive. LegendCTL is packaged with PyInstaller, whose
-self-extracting bundle pattern is a well-known source of heuristic AV false
-positives. You can cross-check the file on [VirusTotal](https://www.virustotal.com/)
-against many engines. If you want zero packaged binaries, build from source.
+Often a false positive for this packaging pattern — but verify rather than
+assume. LegendCTL is packaged with PyInstaller, whose self-extracting bundle
+pattern is a well-known source of heuristic AV false positives. Cross-check the
+file on [VirusTotal](https://www.virustotal.com/) against many engines and
+verify the SHA-256 against the release's `SHA256SUMS.txt`; if a detection
+doesn't resolve on cross-check, don't run the file. If you want zero packaged
+binaries, build from source.
 
 ### Do I need the official ZD app installed?
 No. LegendCTL runs **standalone** — it talks directly to the controller over

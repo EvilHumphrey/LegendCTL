@@ -1,6 +1,6 @@
 ---
-title: "ZD Ultimate Legend Stick Swap Calibration Guide"
-description: "After a stick-module swap, test center, circularity, deadzones, and supported LegendCTL settings on Windows before changing more. No official ZD app required."
+title: "ZD Ultimate Legend Stick Swap: Post-Swap Testing & Settings Guide"
+description: "After a stick-module swap, test center, circularity, deadzones, and supported LegendCTL settings on Windows before changing more. Calibration itself stays with ZD's official tools."
 ---
 
 # ZD Ultimate Legend calibration after a stick-module swap

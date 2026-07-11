@@ -58,7 +58,7 @@ Unrelated but often conflated: "I set 255 and it didn't stick" in the official a
 
 ## Honest scope
 
-Manual sweeps (not a motorized fixture); XInput/game-facing layer (not the internal sensor); a secondary population of small catch-up reports exists near direction changes (it nudges mid-step SFC ~15% finer than jump-size alone predicts); and our logger samples the XInput state at ~1 kHz while the controller's USB polling setting was 8000 Hz — the device's own report-rate behavior above 1 kHz is outside what these captures can see (one reason steps ≤ 50 are under-resolved; an 8 kHz-capable HID/ETW capture could examine it). None of this changes the headline. Raw data and every script are published; verify it yourself.
+Manual sweeps (not a motorized fixture); XInput/game-facing layer (not the internal sensor); a secondary population of small catch-up reports exists near direction changes (it nudges mid-step SFC ~15% finer than jump-size alone predicts); and our logger samples the XInput state at ~1 kHz while the controller's USB polling setting was 8000 Hz — the device's own report-rate behavior above 1 kHz is outside what these captures can see (one reason steps ≤ 50 are under-resolved; an 8 kHz-capable HID/ETW capture could examine it). None of this changes the headline. All scripts and derived results are published, and the raw per-sample captures are available on request (see below); verify it yourself.
 
 ## Verify it yourself
 

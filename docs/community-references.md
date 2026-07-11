@@ -17,11 +17,14 @@ not the maintainer's own posts.
 
 ## Adoption snapshot
 
-Live counts (stars / forks / watchers / clones) are on the
-[repository home](https://github.com/EvilHumphrey/LegendCTL) and its
-[Insights → Traffic](https://github.com/EvilHumphrey/LegendCTL/graphs/traffic)
-page. The project is in its first weeks of public life; adoption is modest and
-growing, and this page is updated as notable milestones occur.
+Live public counts (stars / forks / watchers, plus release download counts via
+the GitHub API) are on the
+[repository home](https://github.com/EvilHumphrey/LegendCTL). View/clone
+traffic lives in a maintainer-only Insights panel that public readers can't
+inspect, so it isn't cited here; any traffic figures shared elsewhere are
+dated, maintainer-reported snapshots. The project is in its first weeks of
+public life; adoption is modest and growing, and this page is updated as
+notable milestones occur.
 
 ## Independent references & discussions
 
