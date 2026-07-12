@@ -5703,8 +5703,15 @@ class AppShell:
         self.refresh_shell()
         return result
 
-    def apply_deadzone_settings(self):
+    def apply_deadzone_settings(
+        self,
+        *,
+        skip_restore_point_capture: bool = False,
+        no_restore_point: bool = False,
+    ):
         if not self._hid_available_or_refuse():
+            return None
+        if not self._consent_pending_write_allowed_or_refuse():
             return None
         if self.settings_service is None:
             message = t("apply.deadzone.unavailable")
@@ -5718,6 +5725,19 @@ class AppShell:
             left_outer=dpg.get_value("deadzone_left_outer_slider"),
             right_outer=dpg.get_value("deadzone_right_outer_slider"),
         )
+        # Trigger model #4 — capture before a manual Device write. One-shot
+        # button, so the gate applies without the live-slider throttle.
+        if not skip_restore_point_capture:
+            allowed, no_restore_point = self._manual_device_write_gate(
+                field_key="deadzones",
+                on_continue=lambda: self.apply_deadzone_settings(
+                    skip_restore_point_capture=True,
+                    no_restore_point=True,
+                ),
+                on_identity_changed=lambda: self.apply_deadzone_settings(),
+            )
+            if not allowed:
+                return None
         result = self.settings_service.set_all_deadzones(deadzones)
         success = _settings_outcome_is_success(result.outcome)
         if success:
@@ -5725,7 +5745,9 @@ class AppShell:
         else:
             message = _make_result_log_entry("apply.deadzone.failed", result)
 
-        self._record_settings_apply_result(success, message)
+        self._record_settings_apply_result(
+            success, message, no_restore_point=no_restore_point
+        )
         self.refresh_shell()
         return result
 

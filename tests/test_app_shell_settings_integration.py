@@ -2349,6 +2349,94 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         )
         shell.device_service.log_event.assert_not_called()
 
+    def test_apply_deadzone_pending_consent_refuses_without_write(self) -> None:
+        settings_service = MagicMock()
+        shell = _make_shell(settings_service)
+        shell._consent_pending_write_allowed_or_refuse = MagicMock(return_value=False)
+
+        with patch("zd_app.ui.app_shell.dpg.get_value") as get_value:
+            result = shell.apply_deadzone_settings()
+
+        self.assertIsNone(result)
+        shell._consent_pending_write_allowed_or_refuse.assert_called_once_with()
+        get_value.assert_not_called()
+        settings_service.set_all_deadzones.assert_not_called()
+        shell.restore_point_service.capture.assert_not_called()
+
+    def test_apply_deadzone_captures_restore_point_before_write(self) -> None:
+        settings_service = MagicMock()
+        expected = StickDeadzones(
+            left_center=5,
+            right_center=10,
+            left_outer=3,
+            right_outer=7,
+        )
+        apply_result = SimpleNamespace(
+            outcome=SetDeadzoneOutcome.OK,
+            error_code=None,
+            payload_hex=build_all_deadzones_payload(expected).hex(),
+        )
+        order: list[str] = []
+        settings_service.set_all_deadzones.side_effect = (
+            lambda deadzones: order.append("write") or apply_result
+        )
+        shell = _make_shell(settings_service)
+        shell.restore_point_service.capture.side_effect = (
+            lambda trigger, **kwargs: order.append("capture")
+            or SimpleNamespace(id="rp_deadzone", title="Deadzone restore point")
+        )
+        values = {
+            "deadzone_left_center_slider": 5,
+            "deadzone_right_center_slider": 10,
+            "deadzone_left_outer_slider": 3,
+            "deadzone_right_outer_slider": 7,
+        }
+
+        with patch("zd_app.ui.app_shell.dpg.get_value", side_effect=values.__getitem__):
+            returned = shell.apply_deadzone_settings()
+
+        self.assertIs(returned, apply_result)
+        self.assertEqual(order, ["capture", "write"])
+        trigger = shell.restore_point_service.capture.call_args.args[0]
+        self.assertEqual(trigger.type, "before_manual_device_setting_write")
+        settings_service.set_all_deadzones.assert_called_once_with(expected)
+
+    def test_apply_deadzone_capture_failure_gates_then_continue_redispatches(self) -> None:
+        settings_service = MagicMock()
+        apply_result = SimpleNamespace(
+            outcome=SetDeadzoneOutcome.OK,
+            error_code=None,
+            payload_hex="",
+        )
+        settings_service.set_all_deadzones.return_value = apply_result
+        shell = _make_shell(settings_service)
+        shell.restore_point_service.capture.return_value = None
+        shell._open_no_restore_point_confirm = MagicMock()
+        values = {
+            "deadzone_left_center_slider": 5,
+            "deadzone_right_center_slider": 10,
+            "deadzone_left_outer_slider": 3,
+            "deadzone_right_outer_slider": 7,
+        }
+
+        with patch("zd_app.ui.app_shell.dpg.get_value", side_effect=values.__getitem__):
+            result = shell.apply_deadzone_settings()
+
+        self.assertIsNone(result)
+        settings_service.set_all_deadzones.assert_not_called()
+        on_continue = shell._open_no_restore_point_confirm.call_args.kwargs["on_continue"]
+
+        with patch("zd_app.ui.app_shell.dpg.get_value", side_effect=values.__getitem__):
+            on_continue()
+
+        settings_service.set_all_deadzones.assert_called_once()
+        success, message = shell.device_service.record_apply_result.call_args.args
+        self.assertTrue(success)
+        self.assertIn(
+            i18n.t("apply.result.no_restore_point_note"),
+            render_log_message(message),
+        )
+
     def test_apply_left_sensitivity_writes_via_settings_service(self) -> None:
         settings_service = MagicMock()
         expected = (
