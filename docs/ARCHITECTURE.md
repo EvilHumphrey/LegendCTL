@@ -1,6 +1,6 @@
 # ZD Ultimate Legend Wrapper — technical architecture
 
-Current as of v2.5.0 (2026-07-04). This is the repo's technical
+Current as of v2.6.0 (2026-07-12). This is the repo's technical
 architecture document.
 
 ## What the app is
