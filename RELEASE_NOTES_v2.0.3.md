@@ -11,13 +11,14 @@ disconnects, and adds an Auto / Player 1–4 override with a live "Active: Playe
 On a multi-pad bench — common on a reviewer's desk — the ZD pad often enumerates as player
 2–4, where the previous slot-0-only tester showed nothing.
 
-Per-zone lighting now applies reliably. The apply path writes each lighting zone, reads it
-back, and retries on a confirmed mismatch, fixing a silent-reject that could drop the
-right-zone color on a profile apply.
+Per-zone lighting writes now attempt read-back verification. The apply path writes each
+lighting zone, reads it back, and retries on a confirmed mismatch, fixing a silent-reject
+that could drop the right-zone color on a profile apply. (An unreadable read-back falls back
+to the write outcome.)
 
-This update adds no new wrapper-written settings: the lighting change makes an existing
-write verify-and-retry, and the XInput change only widens which slot the read-only tester
-reads. Same release discipline: full suite green on Python 3.12 / DearPyGui 2.3.1. A winget
+This update adds no new wrapper-written settings: the lighting change adds read-back
+verify-and-retry to an existing write, and the XInput change only widens which slot the
+read-only tester reads. Same release discipline: full suite green on Python 3.12 / DearPyGui 2.3.1. A winget
 manifest is included under `packaging/winget/` for Windows Package Manager submission.
 
 LegendCTL is a standalone, unofficial configurator for the ZD Ultimate Legend — no official

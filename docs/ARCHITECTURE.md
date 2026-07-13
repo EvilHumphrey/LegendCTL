@@ -18,7 +18,8 @@ reports), no drivers, no virtual devices, no input injection, no game-process ho
 no background service, no automation (no macros/turbo/scripting), no network calls, ​
 honest write reporting (a normal Apply reports each field's write outcome and refreshes
 on-screen state by re-reading; Restore / Safe Import / inline-deadzone writes additionally
-read back and compare per attempted field; back-paddle bindings are write-only), local-only data
+read back and compare each readable field, and profile Apply attempts the same for
+step-size and lighting writes; back-paddle bindings are write-only), local-only data
 (`%APPDATA%\ZDUltimateLegend\`, plain JSON/JSONL).
 
 Enforcement lives in the test suite, not in promises:
@@ -31,12 +32,28 @@ Enforcement lives in the test suite, not in promises:
   values are pinned across every registry that mirrors it.
 - **i18n parity gate** — `set(en) == set(zh-CN)` over entire locale files; no empty
   values.
-- **Honest write reporting** — a normal Apply records each field's write outcome (the
-  write ACK) and then refreshes on-screen state by re-reading the device; it does not
-  compare every applied field for a "verified" result. Apply-then-compare read-back
-  verification (apply, re-read, compare per attempted field) is reserved for Restore,
-  Safe Import, and inline-deadzone writes. Write-only surfaces (back-paddle bindings) are
-  reported as sent, not verified.
+- **Honest write reporting** — every controller write reports its **write outcome**:
+  whether the synchronous `WriteFile` call succeeded for the full report (not a device
+  ACK — the normal write path does not wait for one). A normal Apply then refreshes
+  on-screen state by re-reading the device; it does not compare every applied field for a
+  "verified" result. **Read-back verification** — re-reading a field and comparing it to
+  what was sent — runs in the Restore, Safe Import, and inline-deadzone flows and, inside profile
+  Apply, is *attempted* for step size and lighting zones via read-back-and-retry
+  setters. The three flows differ in reach: Restore compares every field it attempted
+  and uses read provenance to classify write-only or unreadable fields as
+  could-not-verify; Safe Import runs its whole-snapshot compare only when every write
+  reported success (any failed write downgrades the audit to "sent" and skips the
+  compare) and classifies write-only entries as unverifiable, though a readable entry
+  missing from its read-back is reported as a mismatch rather than unverifiable; the
+  inline-deadzone panel confirms the settled value of each change and reports a
+  confirm read it couldn't complete as sent-unverified. Those step-size and lighting setters are best-effort:
+  a confirmed mismatch (a successful read returning a different value) is surfaced as
+  not-committed once the retry budget is exhausted, never as a false success — but a
+  read-back that could not be read at all is not treated as a failed verify and collapses
+  to the plain write outcome, which **this build does not separately disclose**. Every
+  other field in a normal Apply uses a plain setter and is reported by write outcome only.
+  Write-only surfaces (back-paddle bindings) have no read path and are reported as sent,
+  not verified.
 
 ## Package map (`zd_app/`)
 
@@ -49,8 +66,10 @@ Enforcement lives in the test suite, not in promises:
   - `settings_apply_coordinator.py` — apply pipeline with per-field trailer writes
     (the firmware silently rejects some fields inside multi-field bursts; trailers +
     settles + retry-once mitigate the documented quirk family). A normal Apply reports
-    each field's write outcome; apply-then-compare read-back verification lives in the
-    restore/Safe-Import/inline-deadzone paths, not here.
+    each field's write outcome; broad apply-then-compare verification lives in the
+    restore/Safe-Import/inline-deadzone paths, though the coordinator itself attempts
+    read-back verification for step size and lighting zones via verify/retry setters
+    (best-effort — an unreadable read-back collapses to the plain write outcome).
   - `restore_point_service.py` + `storage/restore_point_store.py` — full-state
     capture/restore with provenance-honest reads (`_do_fresh_read` returns snapshot +
     read_success + read_errors), per-entry restore verification, retention pruning,

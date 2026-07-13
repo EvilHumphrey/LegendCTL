@@ -32,11 +32,11 @@ not aspirational promises:
 - **No input injection, no game-process hooking, no automation** (no
   macros/turbo/scripting).
 - **HID-only writes, honestly reported.** Controller settings are written as
-  standard USB/HID feature reports to the controller's onboard memory. A normal
-  Apply reports each field's write outcome and refreshes the on-screen state from
-  the device; Restore Points, Safe Import, and inline-deadzone writes additionally
-  read back and compare the written value, and the write-only back-paddle bindings
-  are reported as sent, not verified.
+  standard USB/HID feature reports to the controller's onboard memory. Every write
+  reports its outcome; the Restore, Safe Import, and inline-deadzone flows verify readable
+  fields by read-back (profile Apply additionally attempts read-back verification for step
+  size and lighting zones), and the write-only back-paddle bindings are reported as sent,
+  not verified.
 
 ## Distribution & signing
 

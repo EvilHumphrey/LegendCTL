@@ -15,8 +15,8 @@ append-only ledger, and there are two recovery paths back (see
 [Recovery in the README](../README.md#recovery--if-your-controller-feels-off)).
 That said, it writes to hardware and is provided "as is" — see
 [Disclaimer & risk](../README.md#disclaimer--risk). Nothing can promise zero risk
-when touching hardware, but the safety net is real and the writes are honest about
-what did and didn't take.
+when touching hardware, but the safety net is real: every write reports its outcome,
+and the verifying paths read the value back and compare it.
 
 ### Does it phone home? Any telemetry or tracking?
 No. The LegendCTL process makes **zero** network calls — no telemetry, no
@@ -100,7 +100,8 @@ incl. 8K polling, and **v1.24**, incl. 8-point sensitivity curves and the latest
 optimized-latency build). The controller
 ships in six variants with different stick modules/firmware; other variants and
 firmware are **best-effort** — the HID protocol may differ. The app is built to
-say so honestly rather than fake a successful write. See the maintained
+report unsupported paths and write-only fields explicitly rather than pretend a
+write succeeded. See the maintained
 [compatibility matrix](compatibility-matrix.md) for the current evidence ledger
 across variants/firmware; if something's off on your unit, please file a
 [compatibility report](https://github.com/EvilHumphrey/LegendCTL/issues/new/choose).

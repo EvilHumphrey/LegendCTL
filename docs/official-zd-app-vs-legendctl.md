@@ -43,8 +43,9 @@ LegendCTL configures the **settings** the controller stores onboard, over standa
 
 It writes those settings as HID feature reports and **reports each field's write outcome**, then refreshes the
 on-screen state by re-reading the device. Restore Points, Safe Import, and inline-deadzone writes additionally **read
-back and compare** the written value; back-paddle bindings are reported as *sent, not verified*. It is **not** a
-firmware flasher and cannot change firmware.
+back and compare** the readable values they wrote, and profile Apply attempts the same for step size and lighting zones;
+back-paddle bindings are reported as *sent, not verified*. It is **not** a firmware flasher and cannot change
+firmware.
 
 ## Which should I use?
 
@@ -73,8 +74,9 @@ LegendCTL is built so you don't have to take its privacy claims on faith — you
 - **No drivers, no virtual devices, no background service, no input injection, no macros.** It only runs while its
   window is open, and it only configures your controller — it never plays it for you.
 - **Honest write reporting.** A normal Apply reports each field's write outcome and refreshes from the device;
-  Restore Points, Safe Import, and inline-deadzone writes additionally read back and compare the value, and
-  back-paddle bindings are reported as sent, not verified.
+  Restore Points, Safe Import, and inline-deadzone writes additionally read back and compare readable values
+  (profile Apply additionally attempts read-back verification for step size and lighting zones), and back-paddle
+  bindings are reported as sent, not verified.
 
 This is a statement about what LegendCTL *is*, not a claim about any other software — closed-source tools simply can't
 be independently audited the same way, which is exactly why LegendCTL keeps everything open and test-enforced.
@@ -90,7 +92,7 @@ be independently audited the same way, which is exactly why LegendCTL keeps ever
 
 LegendCTL was developed and bench-tested on a single ZD Ultimate Legend (known-working firmware **v1.18**, incl. 8K
 polling, and **v1.24**, incl. 8-point sensitivity curves). The controller ships in several variants with different
-stick modules/firmware; others are **best-effort** and the app is built to say so honestly rather than fake a write.
+stick modules/firmware; others are **best-effort** and the app is built to report unsupported paths and write-only fields explicitly rather than pretend a write succeeded.
 See the [FAQ](FAQ.md) and, if something's off on your unit, please file a
 [compatibility report](https://github.com/EvilHumphrey/LegendCTL/issues/new/choose).
 

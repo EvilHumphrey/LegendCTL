@@ -22,13 +22,13 @@ feature — gamepad testers and config apps exist — it's the **posture**:
 - **Fully local** — the process makes zero network calls (no telemetry, no
   analytics, no auto-update). You can prove it in two minutes (below).
 - **Honest writes** — it reports the real outcome of each write and reads values
-  back on the verifying paths, instead of flashing "success" and hoping.
+  back on the verifying paths.
 - **Standalone** — talks straight to the controller; the official ZD app isn't
   required.
 - **A safety net** — Restore Points before risky changes, an append-only local
   event ledger, and a clear Recovery path.
-- **Honest about its limits** — bench-tested on a single unit; it says so, and
-  tells you when a setting isn't verified on your hardware rather than faking it.
+- **Honest about its limits** — bench-tested on a single unit; it says so, and it
+  reports each write-call outcome and reads the value back on the paths that can.
 
 It is **not** a macro/turbo tool, not a virtual-controller driver, and not a
 firmware updater — those are deliberately absent.
@@ -79,8 +79,9 @@ features; the UI and Live Verify open without one.
 - **Commodity:** a stick/circularity *tester*. Plenty of free web tools do that.
   It's a nice gateway, but it's not the reason to pick LegendCTL.
 - **Differentiated:** an **open, local, no-telemetry, auditable** configurator
-  that **verifies its writes** and is **honest about untested hardware**. The
-  deadzone-tied live circularity is the most camera-friendly demo of that.
+  that **reports each write's outcome and reads values back on the verifying
+  paths** — and is **honest about untested hardware**. The deadzone-tied live
+  circularity is the most camera-friendly demo of that.
 
 For context (a category pattern, not a swipe at any one app): closed controller
 and peripheral software commonly bundles telemetry and analytics SDKs.

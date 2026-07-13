@@ -149,9 +149,10 @@ DearPyGui 2.3.1).
   auto-selects the first connected pad and sticks to it, re-scans on disconnect, and adds an
   Auto / Player 1–4 override with a live "Active: Player N" readout — so the ZD pad is found
   even when it enumerates as player 2–4 on a multi-pad bench.
-- **Per-zone lighting applies reliably.** The apply path writes each lighting zone, reads it
-  back, and retries on a confirmed mismatch, fixing a silent-reject that could drop the
-  right-zone color on a profile apply.
+- **Per-zone lighting writes now attempt read-back verification.** The apply path writes each
+  lighting zone, reads it back, and retries on a confirmed mismatch, fixing a silent-reject
+  that could drop the right-zone color on a profile apply. (An unreadable read-back falls
+  back to the write outcome.)
 - **Packaging: winget manifest added** under `packaging/winget/` for Windows Package Manager
   submission.
 
@@ -182,9 +183,10 @@ green on Python 3.12 / DearPyGui 2.3).
   the modal-swap seam, so its Confirm button could be dead after a prior Save+Apply (a
   consequence of DearPyGui's modal-rendering law) and the profile was never deleted. The
   popup now routes through the seam, covered by a live-DearPyGui regression test.
-- **Joystick step-size writes are verified.** Applying a profile that changes the
-  step-size now writes, settles, reads back, and retries on a confirmed mismatch, and
-  reports a real failure instead of silently leaving the device at its floor value.
+- **Joystick step-size writes now attempt read-back verification.** Applying a profile
+  that changes the step-size now writes, settles, reads back, and retries on a confirmed
+  mismatch, reporting a real failure instead of silently leaving the device at its floor
+  value. (An unreadable read-back falls back to the write outcome.)
 - **The "Apply device settings?" confirmation now shows what it will write.** It lists
   the actual current → new device values (step size, polling rate), so applying a profile
   can no longer silently overwrite a step-size you just set; after a step-size change, a
@@ -202,9 +204,10 @@ installer and published SHA-256 checksums.
 
 ### Controller settings
 
-- Full settings surface on the controller's HID feature-report family, verified by
-  read-back wherever the controller exposes the value (the write-only back-paddle
-  bindings are reported as sent, not verified): USB polling rate (250–8000 Hz), 16×16 button bindings,
+- Full settings surface on the controller's HID feature-report family, with read-back
+  verification in the Restore, Safe Import, and inline-deadzone flows and the manual
+  8000 Hz polling-rate confirmation (the write-only back-paddle bindings are reported as
+  sent, not verified): USB polling rate (250–8000 Hz), 16×16 button bindings,
   deadzones, 3-anchor sensitivity curves plus 8-point curves (firmware v1.24+), axis
   inversion, joystick step-size, trigger range/mode/vibration, per-zone lighting,
   per-motor vibration, back-paddle bindings.
@@ -238,8 +241,10 @@ installer and published SHA-256 checksums.
 - Late-connect wiring fix (profile apply / restore points now work when the controller
   connects after launch), restore-point retention pruning wired on every capture,
   batch-read deadline budget, category-registry drift gates, atomic profile saves,
-  honest "verified by read-back where the controller exposes a read path, sent for
-  write-only fields, never by ACKs" semantics.
+  honest "each write's outcome is reported; read-back verification runs in the
+  Restore / Safe Import / inline-deadzone flows and the manual 8000 Hz polling
+  confirmation; write-only fields are sent, not verified; never verified from a write
+  outcome alone" semantics.
 
 ### Known residuals (tracked, none blocking normal use)
 

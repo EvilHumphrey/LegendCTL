@@ -7,10 +7,12 @@ independent adversarial review.
 ## What's new
 
 - **"What we know right now" provenance card (Diagnostics → Guidance).** A live matrix that shows,
-  for each fact about your controller — identity, firmware, active profile, settings, fingerprint,
-  applied changes — whether it was verified from the device, inferred locally, or unknown. It
-  updates in place as you connect and disconnect, and it never claims a device read that didn't
-  happen. A new "What we know now" link on Home and the Diagnostics status strip jumps you to it.
+  for each fact about your controller — identity, firmware, active profile, settings, fingerprint —
+  whether it was verified from the device, inferred locally, or unknown. It updates in place as you
+  connect and disconnect, and it never claims a device read that didn't happen. (The card's
+  "applied changes" row is a static statement of the app's verification *policy* — it is not
+  per-apply evidence and does not track individual Applies.) A new "What we know now" link on Home
+  and the Diagnostics status strip jumps you to it.
 
 - **Firmware and active profile now populate — labeled by source.** When the official ZD app's
   Controller Settings window is already open, LegendCTL can read four summary labels from it via

@@ -78,11 +78,12 @@ short version is **trust you can verify**:
 - **No drivers, no virtual devices, no background service.** Nothing installs a
   driver or sits running in the background. Close the app and no process or
   service of it is left running.
-- **Honest write reporting — no fake success.** A normal Apply reports each
+- **Honest write reporting.** A normal Apply reports each
   field's real write outcome and refreshes the on-screen state from the device;
-  the Restore, Safe Import, and inline deadzone flows go further and verify by
-  reading the value back — so a write that didn't take is surfaced honestly
-  instead of flashing "success."
+  the Restore, Safe Import, and inline deadzone flows go further and verify the
+  readable fields they wrote by reading the values back, and a profile Apply attempts the same
+  for step size and lighting — so a write that the device demonstrably didn't
+  commit is surfaced honestly instead of flashing "success."
 - **No macros, turbo, or automation.** It configures your controller; it never
   plays for you. That's a deliberate constraint enforced by tests, not a missing
   feature.
@@ -109,8 +110,8 @@ Feature-complete for normal use.
 Controller settings (all written as standard HID feature reports; a normal Apply
 reports each field's write outcome and refreshes the on-screen state from the
 device, while the Restore, Safe Import, and inline deadzone flows read back and
-verify the written value — the write-only back-paddle bindings are reported as
-sent, not verified):
+verify the readable values they wrote and a profile Apply attempts the same for step size and
+lighting — the write-only back-paddle bindings are reported as sent, not verified):
 
 - USB polling rate (250–8000 Hz; 8K requires firmware v1.18+)
 - 16×16 button binding matrix, with a Current Bindings display read from the
@@ -141,8 +142,9 @@ Controller lifecycle & trust surfaces:
 - Diagnostic Bundle: operator-triggered, path-sanitized shareable evidence export
 - Trust card at first connect; English + Simplified Chinese UI throughout
 - Live Verify: live XInput stick + per-stick circularity readout, plus inline
-  firmware-deadzone tuning — each deadzone write is read-back-verified and captures
-  a Restore Point first
+  firmware-deadzone tuning — each deadzone change captures a Restore Point first,
+  and its settled value is read back to confirm, with the panel saying so when the
+  confirm read can't be completed
 
 Deliberately absent (constraint architecture, enforced by tests): no drivers, no
 virtual devices, no input injection, no macros/turbo/automation, no background
@@ -165,7 +167,8 @@ Beyond that: LegendCTL is provided **"as is", without warranty of any kind**,
 express or implied, to the maximum extent permitted by applicable law. You
 assume all risk arising from its use. It writes settings to controller hardware
 over USB/HID and reports each field's write outcome; the Restore, Safe Import,
-and inline deadzone flows additionally verify by read-back, and the write-only
+and inline deadzone flows additionally verify readable fields by read-back (and a
+profile Apply attempts the same for step size and lighting), while the write-only
 back-paddle bindings are reported as sent. There is always a **Recovery** path
 (see below), but you are responsible for how you use it.
 
@@ -264,8 +267,8 @@ modules and firmware revisions. Other firmware versions, the other variants, and
 different stick modules are **best-effort**: the HID protocol this app relies on
 may differ, so some settings may read or write differently — or not at all — on
 hardware that wasn't on the bench. The important part is that the app is built to
-**report unsupported or unverified paths explicitly rather than pretend a write
-succeeded** — and there is always the [Recovery](#recovery--if-your-controller-feels-off)
+**report unsupported paths and write-only fields explicitly rather than pretend a
+write succeeded** — and there is always the [Recovery](#recovery--if-your-controller-feels-off)
 path if something looks off. If a setting misbehaves on your unit, please
 [report it](SUPPORT.md) with the requested signature data and logs.
 
@@ -351,8 +354,9 @@ Full technical architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Short
 - `zd_app/protocol/` — stable HID protocol layer (interface enumeration, two-handle
   session helpers, preflight checks). Production code; shipped in the dist.
 - `zd_app/services/` — business logic, zero UI imports: settings transport + apply
-  coordinator (write-then-verify with firmware-quirk trailers), restore points,
-  snapshot differ, health report, wear ledger, module passport, diagnostic bundle.
+  coordinator (per-field write outcomes, firmware-quirk trailers, best-effort read-back
+  verify/retry for step size and lighting zones), restore points, snapshot differ, health
+  report, wear ledger, module passport, diagnostic bundle.
 - `zd_app/storage/` — JSON/JSONL stores with atomic writes: wrapper profiles, app
   settings, restore points, last-applied record, snapshot codec.
 - `zd_app/ui/` — Dear PyGui screens + the AppShell coordinator, including the
