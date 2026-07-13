@@ -42,7 +42,7 @@ Blog posts, written reviews, video reviews, and press.
 
 | Date | Source | Link | Notes |
 | --- | --- | --- | --- |
-| _—_ | _(none logged yet)_ | | |
+| 2026-07-08 | LJ Lee (YouTube, Korean) — "이건 ZD 필수템입니다" (English gloss: "This is a must-have for ZD") | https://www.youtube.com/watch?v=9soiIkE_Ius | Maintainer-initiated, unpaid and unsponsored hands-on coverage: the maintainer invited the creator to try LegendCTL; the creator independently tested it and chose to publish, links the source and release downloads, and positively covers settings and Live Verify. |
 
 ## Institutional / vendor acknowledgement
 
