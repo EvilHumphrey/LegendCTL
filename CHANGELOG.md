@@ -7,17 +7,19 @@ Honesty and robustness point release on top of v2.6.0.
 - **Trust Matrix "Applied changes" is labeled as policy, not evidence.** The row previously showed a
   green "Verified by read-back" chip unconditionally; it now carries a muted "Verification policy"
   chip and states the real, narrow scope. Every write reports its outcome; the Restore, Safe Import
-  and inline-deadzone flows read the value back to confirm it, and a profile Apply does the same for
-  step size and lighting — write-only fields are reported as sent.
+  and settled inline-deadzone flows run a final read-back comparison, and a profile Apply attempts
+  read-back checks for step size and lighting zones only — successful writes to its other fields,
+  including write-only ones, are reported as sent, not verified.
 - **Scoped write-verification wording across the trust surfaces.** The first-connect trust card, the
-  Diagnostics trust panel and the About disclaimer now describe read-back verification with the same
-  honest scope instead of implying every write is verified.
+  Diagnostics trust panel and the About disclaimer now name the specific read-back paths instead of
+  implying every write is verified.
 - **Simplified Chinese: localized support guides.** The Firmware and Windows Stack support guides now
   render in Chinese for zh-CN users.
 - **HID robustness.** Hardened cancellation and recovery of in-flight controller reads so a cancelled
   or stranded read can never be mistaken for a completed one.
 - **Build self-verification.** Release builds carry a recorded manifest of the exact sources scanned
-  at build time, which the in-app Trust Self-Check verifies against the shipped files.
+  at build time, which the in-app Trust Self-Check compares against the shipped non-EXE payload
+  files (the running EXE carries an external-verification pointer instead of a claim).
 
 No new wrapper-written controller settings, no network, nothing uploaded.
 
