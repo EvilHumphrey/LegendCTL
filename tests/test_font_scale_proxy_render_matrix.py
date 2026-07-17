@@ -82,10 +82,22 @@ _EXPECTED_FAILURE_REASONS = {
         "Diagnostics Event Log fixed child path[0, 0, 3, 2, 10] overflows at font_scale_proxy_200/zh-CN/1920x1040 - "
         "pending Diagnostics event-log autosize fix lane."
     ),
+}
+
+# Cells whose finding is BORDERLINE and environment-variant: the same child fits
+# on some rendering stacks and overflows on others (observed: overflows on the
+# local py3.12 gate build, fits on the lane's py3.11 wheel AND on the GitHub CI
+# runner's py3.12 — the strict expectedFailure wrapper turned that CI fit into
+# an unexpected-success suite failure on 2026-07-17).  These cells pass when the
+# child fits and SKIP (recording the finding) when it overflows; a native render
+# hang still fails hard.  A cell belongs here only while its fix lane is
+# pending; a stable always-failing finding belongs in _EXPECTED_FAILURE_REASONS.
+_ENVIRONMENT_VARIANT_SKIP_REASONS = {
     "test_modals_font_scale_proxy_125_zh_CN_1180x760": (
         "first_run_ack_intro_text extends beyond the consent modal horizontally at "
-        "font_scale_proxy_125/zh-CN/1180x760 on the py3.12 gate build (passed on the lane's "
-        "py3.11 wheel - borderline fit) - pending consent-gate text wrap/width fix lane."
+        "font_scale_proxy_125/zh-CN/1180x760 on some rendering stacks (borderline fit; "
+        "overflows on the local py3.12 gate build, fits on the CI runner) - pending "
+        "consent-gate text wrap/width fix lane."
     ),
 }
 
@@ -164,13 +176,27 @@ class FontScaleProxyRenderMatrixTests(unittest.TestCase):
 def _install_cell_methods() -> None:
     for cell in ALL_CELLS:
         reason = _EXPECTED_FAILURE_REASONS.get(cell.wrapper_method)
+        variant_reason = _ENVIRONMENT_VARIANT_SKIP_REASONS.get(cell.wrapper_method)
+        assert not (reason and variant_reason), cell.wrapper_method
 
-        def test_method(self, cell=cell) -> None:
-            self._run_cell(cell)
+        if variant_reason:
+
+            def test_method(self, cell=cell, variant_reason=variant_reason) -> None:
+                try:
+                    self._run_cell(cell)
+                except self.failureException as exc:
+                    if "Native render hang class" in str(exc):
+                        raise
+                    self.skipTest(f"BORDERLINE (environment-variant) finding: {variant_reason}")
+
+        else:
+
+            def test_method(self, cell=cell) -> None:
+                self._run_cell(cell)
 
         test_method.__name__ = cell.wrapper_method
         test_method.__qualname__ = f"{FontScaleProxyRenderMatrixTests.__name__}.{cell.wrapper_method}"
-        test_method.__doc__ = reason
+        test_method.__doc__ = reason or variant_reason
         if reason:
             test_method = unittest.expectedFailure(test_method)
         setattr(FontScaleProxyRenderMatrixTests, cell.wrapper_method, test_method)
