@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import tempfile
 import unittest
@@ -13,6 +14,7 @@ from unittest.mock import patch
 from zd_app import i18n
 from zd_app.services.model_fingerprint import InterfaceInventory, ModelFingerprint
 from zd_app.services import trust_self_check
+from zd_app.services.share_card import build_share_card
 
 
 _LOCALE_DIR = Path("zd_app/i18n/locales")
@@ -495,6 +497,162 @@ Build identity: report what this process can observe.
         self.assertNotIn("serial", (text + markdown).lower())
 
 
+class FrozenTrustManifestWiringTests(unittest.TestCase):
+    def setUp(self) -> None:
+        i18n._loaded.clear()
+        i18n._reverse_en.clear()
+        i18n.set_locale("en")
+
+    def _write_manifest(
+        self,
+        package_root: Path,
+        *,
+        executable: Path,
+        payload: Path,
+    ) -> None:
+        payload_hash = hashlib.sha256(payload.read_bytes()).hexdigest()
+        executable_hash = hashlib.sha256(executable.read_bytes()).hexdigest()
+        document = {
+            "schema": 1,
+            "version": "2.3.1",
+            "build_commit": "abcdef0" + "1" * 33,
+            "build_commit_short": "abcdef0",
+            "build_date": "2026-07-12",
+            "generated_at": "2026-07-12T09:30:00+00:00",
+            "source_scan": {
+                "ruleset": {
+                    "network_roots": list(trust_self_check.NETWORK_IMPORT_ROOTS),
+                    "driver_suffixes": list(trust_self_check.DRIVER_ARTIFACT_SUFFIXES),
+                    "virtual_device_tokens": list(
+                        trust_self_check.VIRTUAL_DEVICE_NAME_TOKENS
+                    ),
+                },
+                "python_file_count": 2,
+                "parse_failures": [],
+                "entry_module_scanned": True,
+                "network_import_findings": [],
+                "browser_handoffs": [
+                    {
+                        "relative_path": "zd_app/ui/about.py",
+                        "line": 12,
+                        "call": "webbrowser.open",
+                    }
+                ],
+                "driver_footprint_findings": [],
+                "source_files": {
+                    "main_zd.py": "0" * 64,
+                    "zd_app/__init__.py": "1" * 64,
+                },
+            },
+            "payload_files": {
+                executable.name: executable_hash,
+                "_internal/payload.dat": payload_hash,
+            },
+        }
+        package_root.mkdir(parents=True, exist_ok=True)
+        (package_root / trust_self_check.TRUST_MANIFEST_FILENAME).write_text(
+            json.dumps(document), encoding="utf-8"
+        )
+
+    def _frozen_layout(self, temporary: str) -> tuple[Path, Path, Path]:
+        dist_root = Path(temporary) / "ZDUltimateLegend"
+        package_root = dist_root / "_internal" / "zd_app"
+        executable = dist_root / "LegendCTL.exe"
+        payload = dist_root / "_internal" / "payload.dat"
+        payload.parent.mkdir(parents=True)
+        executable.write_bytes(b"exe")
+        payload.write_bytes(b"payload")
+        self._write_manifest(package_root, executable=executable, payload=payload)
+        return package_root, executable, payload
+
+    def test_frozen_matching_manifest_uses_recorded_evidence_in_exports(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, patch.object(
+            trust_self_check.app_version, "__build_commit__", "abcdef0"
+        ):
+            package_root, executable, _payload = self._frozen_layout(temporary)
+            result = trust_self_check.build_trust_self_check(
+                package_root=package_root,
+                executable_path=executable,
+                frozen=True,
+                now=_NOW,
+            )
+
+        network = _row(result, "network")
+        self.assertTrue(result.manifest_present)
+        self.assertTrue(result.manifest_valid)
+        self.assertIsNotNone(result.payload_verification)
+        self.assertEqual(result.payload_verification.matched, 1)
+        self.assertEqual(network.claim, "No network: this build imports no networking modules.")
+        self.assertIn("Build-time scan", network.evidence)
+        self.assertIn("webbrowser.open", network.evidence)
+        self.assertEqual(network.boundary, i18n.t("trust_self_check.manifest.boundary"))
+        self.assertIn("Build-recorded EXE SHA-256", result.to_markdown())
+        card = build_share_card(trust_self_check=result, now=_NOW)
+        self.assertIn("Build-time scan", card.to_markdown() + card.to_html())
+
+    def test_skew_and_payload_mismatch_stay_on_unverified_warning_branches(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package_root, executable, payload = self._frozen_layout(temporary)
+            with patch.object(
+                trust_self_check.app_version, "__build_commit__", "different"
+            ):
+                skew = trust_self_check.build_trust_self_check(
+                    package_root=package_root,
+                    executable_path=executable,
+                    frozen=True,
+                    now=_NOW,
+                )
+            self.assertIsNone(skew.payload_verification)
+            self.assertEqual(
+                _row(skew, "network").claim,
+                "Network scan did not run: no networking claim is made for this run.",
+            )
+            self.assertIn("does not match this build", skew.to_text())
+
+            payload.write_bytes(b"corrupted")
+            with patch.object(
+                trust_self_check.app_version, "__build_commit__", "abcdef0"
+            ):
+                mismatch = trust_self_check.build_trust_self_check(
+                    package_root=package_root,
+                    executable_path=executable,
+                    frozen=True,
+                    now=_NOW,
+                )
+            self.assertFalse(mismatch.payload_verification.clean)
+            self.assertEqual(
+                _row(mismatch, "drivers").claim,
+                "Driver/virtual-device scan did not run: no footprint claim is made for this run.",
+            )
+            self.assertIn("do not match the build record", mismatch.to_markdown())
+
+    def test_manifest_loader_is_unreachable_in_dev_and_live_scan_branches(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package_root = Path(temporary) / "zd_app"
+            package_root.mkdir()
+            (package_root / "__init__.py").write_text("", encoding="utf-8")
+            with patch.object(
+                trust_self_check,
+                "load_trust_manifest",
+                side_effect=AssertionError("manifest loader must not run"),
+            ):
+                dev_result = trust_self_check.build_trust_self_check(
+                    package_root=package_root,
+                    frozen=False,
+                    now=_NOW,
+                )
+                frozen_live_result = trust_self_check.build_trust_self_check(
+                    package_root=package_root,
+                    frozen=True,
+                    now=_NOW,
+                )
+
+        self.assertIsNone(dev_result.manifest)
+        self.assertIsNone(frozen_live_result.manifest)
+        self.assertIn("Static scan of zd_app", _row(dev_result, "network").evidence)
+        self.assertIn("Static scan of zd_app", _row(frozen_live_result, "network").evidence)
+
+
 class TrustSelfCheckI18nTests(unittest.TestCase):
     def test_en_zh_cn_have_matching_trust_self_check_keys(self) -> None:
         en = json.loads((_LOCALE_DIR / "en.json").read_text(encoding="utf-8"))
@@ -529,6 +687,45 @@ def _placeholders(value: str) -> list[str]:
             return parts
         parts.append(value[start + 1:end])
         cursor = end + 1
+
+
+_MANIFEST_COPY_PINNED = {
+    "en": {
+        "trust_self_check.manifest.evidence.network_clean": "Build-time scan of {py_count} source files at commit {commit}: no {modules} imports. This session: {matched} of {total} shipped files match the build record.",
+        "trust_self_check.manifest.evidence.drivers_clean": "Build-time scan of {py_count} source files at commit {commit}: no driver/virtual-device artifacts. This session: {matched} of {total} shipped files match the build record.",
+        "trust_self_check.manifest.evidence.payload_warning": "{bad_count} shipped files do not match the build record ({details}).",
+        "trust_self_check.manifest.evidence.extras_note": "{extra_count} files present that the build record does not list.",
+        "trust_self_check.manifest.boundary": "Scan results recorded at build time, not re-run this session. The app cannot verify its own EXE from inside; verify downloads externally against the release attestation and SHA256SUMS.",
+        "trust_self_check.manifest.reason.skew": "the build record does not match this build",
+        "trust_self_check.manifest.reason.invalid": "the build record is unreadable or invalid",
+        "trust_self_check.manifest.exe_recorded": "Build-recorded EXE SHA-256: {hash} (verify from outside the app).",
+    },
+    "zh-CN": {
+        "trust_self_check.manifest.evidence.network_clean": "构建时扫描了 {py_count} 个源文件（提交 {commit}）：未发现 {modules} 导入。本次会话：{matched}/{total} 个打包文件与构建记录一致。",
+        "trust_self_check.manifest.evidence.drivers_clean": "构建时扫描了 {py_count} 个源文件（提交 {commit}）：未发现驱动或虚拟设备痕迹。本次会话：{matched}/{total} 个打包文件与构建记录一致。",
+        "trust_self_check.manifest.evidence.payload_warning": "{bad_count} 个打包文件与构建记录不一致（{details}）。",
+        "trust_self_check.manifest.evidence.extras_note": "存在 {extra_count} 个构建记录中未列出的文件。",
+        "trust_self_check.manifest.boundary": "扫描结果记录于构建时，并非本次会话的实时扫描。应用无法从内部验证自身的 EXE；请通过发布证明（attestation）与 SHA256SUMS 在外部验证下载文件。",
+        "trust_self_check.manifest.reason.skew": "构建记录与当前构建不匹配",
+        "trust_self_check.manifest.reason.invalid": "构建记录无法读取或无效",
+        "trust_self_check.manifest.exe_recorded": "构建记录的 EXE SHA-256：{hash}（请在应用之外验证）。",
+    },
+}
+
+
+class ManifestCopyBytePinTests(unittest.TestCase):
+    """Researcher-authored manifest copy is byte-pinned in BOTH locales."""
+
+    def test_manifest_copy_is_byte_exact_in_both_locales(self) -> None:
+        for locale, pinned in _MANIFEST_COPY_PINNED.items():
+            with (_LOCALE_DIR / f"{locale}.json").open(encoding="utf-8") as handle:
+                data = json.load(handle)
+            for key, expected in pinned.items():
+                self.assertEqual(
+                    data.get(key),
+                    expected,
+                    f"{locale}:{key} drifted from the researcher-pinned copy",
+                )
 
 
 if __name__ == "__main__":

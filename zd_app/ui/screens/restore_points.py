@@ -866,6 +866,12 @@ def _build_result(shell, service, state: RestorePointsScreenState) -> None:
             color=shell.COLORS["warn"],
             wrap=900,
         )
+    if result.unverified_writes:
+        dpg.add_text(
+            t("apply.result.write_unverified"),
+            color=shell.COLORS["warn"],
+            wrap=900,
+        )
 
     if result.fields:
         # Each field contributes one main row, plus an optional indented
@@ -1256,6 +1262,7 @@ def _on_save_result_to_diagnostics(shell) -> None:
         "before_restore_point_id": state.result.before_restore_point_id,
         "completed_at": state.result.completed_at,
         "sensitivity_downgrades": list(state.result.sensitivity_downgrades),
+        "unverified_writes": list(state.result.unverified_writes),
         "fields": [
             {
                 "field_name": outcome.field_name,

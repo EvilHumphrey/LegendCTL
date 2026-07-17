@@ -1027,6 +1027,25 @@ class ResultViewTests(unittest.TestCase):
             ps.build()
         self.assertIn(t("apply.result.sens_8point_downgraded"), " ".join(ps.text_strings()))
 
+    def test_result_view_renders_both_apply_disclosures(self) -> None:
+        state = screen.RestorePointsScreenState(
+            view=screen.VIEW_RESULT,
+            selected_rp_id="rp_test",
+            result=replace(
+                _result(),
+                sensitivity_downgrades=("sens_left",),
+                unverified_writes=("step_size",),
+            ),
+        )
+        service = _FakeService(valid=[_rp(id="rp_test")])
+        shell = _shell_with(service, screen_state=state)
+        with _PatchedScreen(shell) as ps:
+            ps.build()
+
+        rendered = " ".join(ps.text_strings())
+        self.assertIn(i18n.t("apply.result.sens_8point_downgraded"), rendered)
+        self.assertIn(i18n.t("apply.result.write_unverified"), rendered)
+
     def test_result_view_renders_each_label_correctly(self) -> None:
         for label, expected_header in (
             (RestoreResultLabel.VERIFIED, "Verified"),

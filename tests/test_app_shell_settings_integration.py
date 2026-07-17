@@ -463,7 +463,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         self.assertEqual(settings_service.set_zone_lighting.call_count, len(LightingZone))
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Applied profile 'Apex' (29 writes).",
+            "OK: Profile 'Apex' write calls completed (29 writes).",
         )
 
     def test_apply_selected_wrapper_profile_discloses_8point_downgrade_on_success(self) -> None:
@@ -493,7 +493,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         )
         self.assertEqual(
             render_log_message(message),
-            "OK: Applied profile 'Apex' (29 writes).\n"
+            "OK: Profile 'Apex' write calls completed (29 writes).\n"
             "Sensitivity: the 8-point curve could not be confirmed on this controller - "
             "applied the standard 3-point curve instead.",
         )
@@ -530,7 +530,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         self.assertFalse(success)
         self.assertIsInstance(message, ComposedLogEntry)
         rendered = render_log_message(message)
-        self.assertIn("Partial: Applied profile 'Apex'", rendered)
+        self.assertIn("Partial: Profile 'Apex'", rendered)
         self.assertIn(
             "Sensitivity: the 8-point curve could not be confirmed on this controller - "
             "applied the standard 3-point curve instead.",
@@ -558,7 +558,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         self.assertEqual(settings_service.set_back_paddle_binding.call_count, len(MacroSlot))
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Applied profile 'Apex' (37 writes).",
+            "OK: Profile 'Apex' write calls completed (37 writes).",
         )
 
     def test_apply_selected_wrapper_profile_skips_none_categories(self) -> None:
@@ -597,7 +597,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
 
         success, message = shell.device_service.record_apply_result.call_args.args
         self.assertFalse(success)
-        self.assertIn("Partial: Applied profile 'Apex'", message)
+        self.assertIn("Partial: Profile 'Apex'", message)
         self.assertIn("2 failed", message)
         self.assertEqual(shell._last_apply_result.total_attempted, 29)
         self.assertEqual(
@@ -661,9 +661,36 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
 
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Applied profile 'Apex' (29 writes, 1 recovered).",
+            "OK: Profile 'Apex' write calls completed (29 writes, 1 recovered).",
         )
         self.assertEqual(shell._last_apply_result.retry_recoveries, 1)
+
+    def test_profile_apply_keeps_inconclusive_write_disclosure_without_flow_read(self) -> None:
+        settings_service = MagicMock()
+        _ok_profile_write_results(settings_service)
+        settings_service.set_step_size_verified.side_effect = None
+        settings_service.set_step_size_verified.return_value = SimpleNamespace(
+            outcome=SetStepSizeOutcome.OK,
+            error_code=None,
+            verify_inconclusive=True,
+        )
+        store = MagicMock()
+        store.load.return_value = WrapperProfile(name="Apex", snapshot=_full_snapshot())
+        shell = _make_shell(settings_service, store)
+        shell.refresh_from_controller = MagicMock()
+
+        with patch("zd_app.ui.app_shell.dpg.get_value", return_value="Apex"):
+            shell.apply_selected_wrapper_profile()
+
+        success, message = shell.device_service.record_apply_result.call_args.args
+        self.assertTrue(success)
+        self.assertIsInstance(message, ComposedLogEntry)
+        self.assertEqual(shell._last_apply_result.unverified_writes, ("step_size",))
+        self.assertIn("apply.result.write_unverified", message.note_keys)
+        self.assertIn(
+            i18n.t("apply.result.write_unverified"),
+            render_log_message(message),
+        )
 
     def test_apply_selected_wrapper_profile_logs_recent_activity_once(self) -> None:
         settings_service = MagicMock()
@@ -681,7 +708,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         matching_events = [
             event
             for event in shell.device_service.recent_events(10)
-            if "OK: Applied profile 'Apex' (29 writes)." in event
+            if "OK: Profile 'Apex' write calls completed (29 writes)." in event
         ]
         self.assertEqual(len(matching_events), 1)
 
@@ -847,7 +874,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         self.assertTrue(success)
         self.assertIsInstance(message, ComposedLogEntry)
         rendered = render_log_message(message)
-        self.assertIn("Retried 1 failed settings; all applied.", rendered)
+        self.assertIn("Retried 1 failed settings; all write calls succeeded.", rendered)
         self.assertIn("Sensitivity: the 8-point curve could not be confirmed", rendered)
         self.assertIn("Note: no restore point was created before this apply.", rendered)
 
@@ -874,7 +901,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         settings_service.set_all_deadzones.assert_called_once()
         success, message = shell.device_service.record_apply_result.call_args.args
         self.assertFalse(success)
-        self.assertIn("Partial: Applied profile 'Apex'", message)
+        self.assertIn("Partial: Profile 'Apex'", message)
         self.assertEqual(shell._last_apply_result.failed[0].setting_label, "vibration")
         self.assertEqual(shell._last_apply_result.failed[0].error, "boom")
 
@@ -1693,7 +1720,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         settings_service.set_polling_rate.assert_called_once_with(PollingRate.HZ_1000)
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Polling rate 1000Hz applied.",
+            "OK: Polling rate 1000Hz written.",
         )
 
     def test_apply_polling_rate_logs_once_with_real_device_service(self) -> None:
@@ -1714,7 +1741,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
             if "Polling rate 1000Hz" in event
         ]
         self.assertEqual(len(matching), 1)
-        self.assertTrue(matching[0].endswith("OK: Polling rate 1000Hz applied."))
+        self.assertTrue(matching[0].endswith("OK: Polling rate 1000Hz written."))
 
     def test_apply_polling_rate_log_retranslates_on_locale_switch(self) -> None:
         try:
@@ -1732,7 +1759,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
 
             self.assertTrue(
                 shell.device_service.recent_events(1)[0].endswith(
-                    "OK: Polling rate 1000Hz applied."
+                    "OK: Polling rate 1000Hz written."
                 )
             )
             i18n.set_locale("zh-CN")
@@ -1755,7 +1782,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
 
             self.assertEqual(
                 shell.device_service.recent_events(1)[0],
-                "12:00:00  OK: Polling rate 1000Hz applied.",
+                "12:00:00  OK: Polling rate 1000Hz written.",
             )
             i18n.set_locale("zh-CN")
             self.assertIn("轮询率 1000Hz", shell.device_service.recent_events(1)[0])
@@ -1810,6 +1837,35 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
             )
         finally:
             i18n.set_locale("en")
+
+    def test_unverified_write_disclosure_attaches_structured_log_note_key(self) -> None:
+        shell = _make_shell(MagicMock())
+        base = LogEntry(
+            timestamp="12:00:00",
+            key="apply.profile.partial",
+            fmt_args={"name": "Apex", "m": 0, "n": 1, "k": 1},
+        )
+
+        message = shell._with_sensitivity_downgrade_notice(
+            base,
+            ApplyResult(
+                sensitivity_downgrades=("sens_left",),
+                unverified_writes=("step_size",),
+            ),
+        )
+
+        self.assertIsInstance(message, ComposedLogEntry)
+        self.assertEqual(
+            message.note_keys,
+            (
+                "apply.result.sens_8point_downgraded",
+                "apply.result.write_unverified",
+            ),
+        )
+        self.assertIn(
+            i18n.t("apply.result.write_unverified"),
+            render_log_message(message),
+        )
 
     def test_composed_disclosure_active_footer_rerenders_after_locale_switch(self) -> None:
         try:
@@ -1938,7 +1994,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         self.assertEqual(build_vibration_payload(expected).hex(), result.payload_hex)
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Vibration settings applied.",
+            "OK: Vibration settings written.",
         )
 
     def test_apply_vibration_settings_maps_all_mode_labels(self) -> None:
@@ -2061,7 +2117,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
 
         self.assertEqual(
             rendered["settings_v2_status_text"],
-            "OK: Vibration settings applied.",
+            "OK: Vibration settings written.",
         )
         self.assertIsNotNone(shell._apply_status_clear_after)
 
@@ -2137,7 +2193,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         shell = _make_shell(MagicMock())
         shell.last_snapshot_status = "Read OK"
         shell.last_snapshot_ts = 100.0
-        shell._apply_status_text = "OK: Vibration settings applied."
+        shell._apply_status_text = "OK: Vibration settings written."
         shell._apply_status_clear_after = 200.0
         rendered = {}
 
@@ -2152,7 +2208,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
 
         self.assertEqual(
             rendered["settings_v2_status_text"],
-            "OK: Vibration settings applied.",
+            "OK: Vibration settings written.",
         )
 
     def test_render_settings_snapshot_status_proceeds_when_apply_timer_expired(self) -> None:
@@ -2205,7 +2261,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         )
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Left trigger settings applied.",
+            "OK: Left trigger settings written.",
         )
 
     def test_apply_right_trigger_writes_via_settings_service(self) -> None:
@@ -2240,7 +2296,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         )
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Right trigger settings applied.",
+            "OK: Right trigger settings written.",
         )
 
     def test_apply_trigger_unknown_mode_no_write(self) -> None:
@@ -2332,7 +2388,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         )
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Deadzone settings applied.",
+            "OK: Deadzone settings written.",
         )
 
     def test_apply_deadzone_settings_service_none_no_write(self) -> None:
@@ -2472,7 +2528,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         )
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Left sensitivity curve applied.",
+            "OK: Left sensitivity curve written.",
         )
 
     def test_apply_right_sensitivity_writes_via_settings_service(self) -> None:
@@ -2510,7 +2566,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         )
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Right sensitivity curve applied.",
+            "OK: Right sensitivity curve written.",
         )
 
     def test_apply_left_sensitivity_8point_writes_via_settings_service(self) -> None:
@@ -2540,7 +2596,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         settings_service.set_left_stick_sensitivity_curve.assert_not_called()
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Left sensitivity curve (8-pt) applied.",
+            "OK: Left sensitivity curve (8-pt) written.",
         )
 
     def test_apply_right_sensitivity_8point_writes_via_settings_service(self) -> None:
@@ -2568,7 +2624,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         settings_service.set_right_stick_sensitivity_curve.assert_not_called()
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Right sensitivity curve (8-pt) applied.",
+            "OK: Right sensitivity curve (8-pt) written.",
         )
 
     def test_apply_sensitivity_8point_failure_surfaces_log_entry(self) -> None:
@@ -2942,7 +2998,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         )
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Left axis inversion applied.",
+            "OK: Left axis inversion written.",
         )
 
     def test_apply_right_axis_inversion_writes_via_settings_service(self) -> None:
@@ -2972,7 +3028,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         )
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Right axis inversion applied.",
+            "OK: Right axis inversion written.",
         )
 
     def test_apply_axis_inversion_settings_service_none_no_write(self) -> None:
@@ -3024,7 +3080,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         )
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Binding A -> B applied.",
+            "OK: Binding A -> B written.",
         )
 
     def test_apply_back_paddle_binding_writes_via_settings_service(self) -> None:
@@ -3051,7 +3107,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         )
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Back paddle M1 -> A applied.",
+            "OK: Back paddle M1 -> A sent (write-only, not verified).",
         )
 
     def test_apply_back_paddle_binding_unbound(self) -> None:
@@ -3162,7 +3218,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         )
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Lighting zone 'Home' applied.",
+            "OK: Lighting zone 'Home' written.",
         )
 
     def test_apply_lighting_maps_zh_display_labels_to_canonical_values(self) -> None:
@@ -3541,7 +3597,7 @@ class PollingRate8000FirmwareHonestyTests(unittest.TestCase):
         settings_service.set_polling_rate.assert_called_once_with(PollingRate.HZ_8000)
         settings_service.get_polling_rate.assert_called_once_with()
         shell.device_service.record_apply_result.assert_called_once_with(
-            True, "OK: Polling rate 8000Hz applied."
+            True, "OK: Polling rate 8000Hz written."
         )
 
     def test_8000_non_commit_warns_and_reconciles_combo(self) -> None:
@@ -3593,7 +3649,7 @@ class PollingRate8000FirmwareHonestyTests(unittest.TestCase):
 
         self.assertIs(returned, result)
         shell.device_service.record_apply_result.assert_called_once_with(
-            True, "OK: Polling rate 8000Hz applied."
+            True, "OK: Polling rate 8000Hz written."
         )
 
     def test_8000_readback_exception_is_trusted(self) -> None:
@@ -3608,7 +3664,7 @@ class PollingRate8000FirmwareHonestyTests(unittest.TestCase):
 
         self.assertIs(returned, result)
         shell.device_service.record_apply_result.assert_called_once_with(
-            True, "OK: Polling rate 8000Hz applied."
+            True, "OK: Polling rate 8000Hz written."
         )
 
     def test_sub_8000_selection_never_reads_back(self) -> None:
@@ -3624,7 +3680,7 @@ class PollingRate8000FirmwareHonestyTests(unittest.TestCase):
         self.assertIs(returned, result)
         settings_service.get_polling_rate.assert_not_called()
         shell.device_service.record_apply_result.assert_called_once_with(
-            True, "OK: Polling rate 4000Hz applied."
+            True, "OK: Polling rate 4000Hz written."
         )
 
     def test_8000_write_failure_skips_readback(self) -> None:

@@ -54,6 +54,13 @@ READ_RESPONSE_TIMEOUT_MS = 1000
 # HID handle doesn't visibly delay startup beyond ~1.5 seconds. See
 # refresh_from_controller's startup-hang regression for why this exists.
 READ_FILE_TIMEOUT_MS_DEFAULT = 1500
+# After a synchronous ReadFile reaches its caller-side deadline, allow this
+# bounded grace period for CancelIoEx to let the worker return before treating
+# its handle as unsafe to reuse.
+READ_FILE_CANCEL_JOIN_TIMEOUT_MS = 250
+# stop() is allowed to wait only this long for the currently registered reader
+# before it nulls and closes cached handles as the final shutdown escape hatch.
+STOP_READER_REAP_TIMEOUT_S = 0.5
 READ_STALE_RESPONSE_MAX_DISCARDS = 64
 WRITE_RETRY_DELAY_S = 0.05
 DISCONNECT_WIN32_ERRORS = {6, 433, 1167, 1168}
@@ -536,8 +543,8 @@ class WriteOutcome(Enum):
     WRITE_FAILED = "write_failed"
     # The write seam reported OK (WriteFile succeeded) but a post-write read-back
     # showed the device never committed the value -- the firmware silently
-    # rejected the write. Used only by the verify-and-retry setters (step_size)
-    # where a read-back channel exists to detect the silent reject.
+    # rejected the write. Used by the verify-and-retry setters (step size and
+    # lighting zones) where a read-back channel exists to detect the silent reject.
     VERIFY_FAILED = "verify_failed"
 
 
@@ -606,6 +613,7 @@ class SetStepSizeResult:
     bytes_written: Optional[int]
     payload_hex: Optional[str]
     elapsed_ms: int
+    verify_inconclusive: bool = False
 
 
 SensitivityAnchorTuple = tuple[
@@ -709,6 +717,7 @@ class SetLightingResult:
     bytes_written: Optional[int]
     payload_hex: Optional[str]
     elapsed_ms: int
+    verify_inconclusive: bool = False
 
 
 @dataclass
@@ -733,6 +742,42 @@ class SettingsServiceError(RuntimeError):
     def __init__(self, message: str, *, win32_error: int | None = None):
         super().__init__(message)
         self.win32_error = win32_error
+
+
+class StrandedReadTimeout(TimeoutError):
+    """A timed-out ReadFile whose worker could not be confirmed reaped.
+
+    This remains a ``TimeoutError`` so existing callers keep their timeout
+    behavior, while ``_read_response`` can distinguish the unsafe
+    handle-reuse case from a cancellation that was observed to complete.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cancel_succeeded: bool,
+        cancel_error: int | None,
+        reader: threading.Thread,
+    ) -> None:
+        super().__init__(message)
+        self.cancel_succeeded = cancel_succeeded
+        self.cancel_error = cancel_error
+        self.reader = reader
+
+
+def _cancel_io_ex_with_error(kernel32: object, handle: int) -> tuple[bool, int | None]:
+    """Issue broad cancellation and retain the return evidence for callers."""
+
+    try:
+        cancel_succeeded = bool(kernel32.CancelIoEx(handle, None))  # type: ignore[attr-defined]
+    except OSError as exc:
+        return False, getattr(exc, "winerror", None)
+
+    try:
+        return cancel_succeeded, int(kernel32.GetLastError())  # type: ignore[attr-defined]
+    except OSError:
+        return cancel_succeeded, None
 
 
 def _win32_error_from_exception(exc: BaseException) -> int | None:
@@ -929,7 +974,14 @@ def _default_write_file(handle: int, payload: bytes) -> tuple[bool, int, int]:
     return ok, 0 if ok else kernel32.GetLastError(), int(bytes_written.value)
 
 
-def _default_read_file(handle: int, length: int, timeout_ms: int) -> bytes:
+def _default_read_file(
+    handle: int,
+    length: int,
+    timeout_ms: int,
+    *,
+    on_reader_started: Callable[[threading.Thread], bool] | None = None,
+    on_reader_finished: Callable[[threading.Thread], None] | None = None,
+) -> bytes:
     """Read up to ``length`` bytes from a synchronous HID handle with a timeout.
 
     The handle is opened synchronously (no FILE_FLAG_OVERLAPPED), so plain
@@ -949,11 +1001,11 @@ def _default_read_file(handle: int, length: int, timeout_ms: int) -> bytes:
 
     Strategy: run ``kernel32.ReadFile`` on a worker thread; the main thread
     joins with the caller-supplied ``timeout_ms``. If the join times out we
-    call ``kernel32.CancelIoEx(handle, None)`` to unblock the worker, then
-    raise ``TimeoutError``. The worker eventually wakes up and exits (its
-    result is discarded). Subsequent calls into ``_default_read_file`` get
-    a fresh worker; the handle remains usable for retries even after a
-    cancelled read.
+    call ``kernel32.CancelIoEx(handle, None)``, record its BOOL/error evidence,
+    then give the worker a bounded post-cancel join. A confirmed-reaped reader
+    raises plain ``TimeoutError`` and leaves the handle reusable. A failed or
+    unconfirmed cancellation raises ``StrandedReadTimeout`` so the owning
+    service can poison that handle before any retry.
 
     How callers should handle the exception:
         Most callers run via ``_read_response`` which already has its own
@@ -968,7 +1020,9 @@ def _default_read_file(handle: int, length: int, timeout_ms: int) -> bytes:
         either propagate, retry with backoff, or catch + report.
 
     Raises:
-        TimeoutError: device did not respond within ``timeout_ms``.
+        TimeoutError: device did not respond within ``timeout_ms``. A
+            ``StrandedReadTimeout`` subtype means its worker could not be
+            confirmed reaped and the handle must not be reused.
         SettingsServiceError: ReadFile returned an error or a short read.
     """
 
@@ -980,12 +1034,19 @@ def _default_read_file(handle: int, length: int, timeout_ms: int) -> bytes:
     except (OSError, AttributeError) as exc:  # pragma: no cover - non-Windows fallback
         raise SettingsServiceError("ReadFile unavailable") from exc
 
+    # ``buf`` and ``bytes_read`` must remain captured by ``_reader`` for the
+    # worker's entire lifetime. In particular, a stranded reader can outlive
+    # this caller after it raises, so do not move these into shorter-lived state.
     buf = (c.c_ubyte * length)()
     bytes_read = w.DWORD(0)
     result: list[tuple[bool, int]] = []
     error_box: list[BaseException] = []
 
     def _reader() -> None:
+        # Register from the worker immediately before ReadFile so stop() never
+        # observes a blocked reader that has not reached the service registry.
+        if on_reader_started is not None and not on_reader_started(threading.current_thread()):
+            return
         try:
             ok = bool(
                 kernel32.ReadFile(
@@ -999,23 +1060,37 @@ def _default_read_file(handle: int, length: int, timeout_ms: int) -> bytes:
             result.append((ok, 0 if ok else kernel32.GetLastError()))
         except BaseException as exc:  # noqa: BLE001 - re-raised on main thread
             error_box.append(exc)
+        finally:
+            if on_reader_finished is not None:
+                on_reader_finished(threading.current_thread())
 
     reader = threading.Thread(target=_reader, daemon=True, name="hid-read-bounded")
     reader.start()
     reader.join(timeout=timeout_ms / 1000.0)
     if reader.is_alive():
-        # Worker is still blocked inside kernel32.ReadFile. CancelIoEx on the
-        # shared handle unblocks the synchronous I/O; the worker will exit
-        # shortly after and we discard its result.
-        try:
-            kernel32.CancelIoEx(handle, None)
-        except OSError:
-            pass
+        # Worker is still blocked inside kernel32.ReadFile. The broad cancel is
+        # retained for the synchronous handle architecture, but retries earn
+        # handle reuse only after this worker is observed to leave ReadFile.
+        cancel_succeeded, cancel_error = _cancel_io_ex_with_error(kernel32, handle)
+        reader.join(timeout=READ_FILE_CANCEL_JOIN_TIMEOUT_MS / 1000.0)
+        if not cancel_succeeded or reader.is_alive():
+            cancel_text = "TRUE" if cancel_succeeded else "FALSE"
+            raise StrandedReadTimeout(
+                "HID read timed out after "
+                f"{timeout_ms}ms; CancelIoEx returned {cancel_text} "
+                f"(Win32 err {cancel_error}), reader not safely reaped",
+                cancel_succeeded=cancel_succeeded,
+                cancel_error=cancel_error,
+                reader=reader,
+            )
         raise TimeoutError(f"HID read timed out after {timeout_ms}ms")
 
     if error_box:
         raise error_box[0]
-    if not result:  # pragma: no cover - reader thread always populates one of the two
+    if not result:
+        # Reachable when the reader declined registration (its handle
+        # generation was invalidated between dispatch and start) and exited
+        # without issuing I/O; the read fails cleanly and a retry reopens.
         raise SettingsServiceError("ReadFile reader produced no result")
     ok, err = result[0]
     if not ok:
@@ -1586,6 +1661,12 @@ class SettingsService:
         self._read_write_handle: Optional[int] = None
         self._target_path: Optional[str] = None
         self._last_open_error: Optional[int] = None
+        # One lock owns cached-handle swaps and the current synchronous-reader
+        # registry. Never hold it around CreateFileW, ReadFile, WriteFile, or a
+        # join: those operations may block indefinitely on real hardware.
+        self._handle_lock = threading.Lock()
+        self._active_reader: threading.Thread | None = None
+        self._read_write_generation = 0
         # Cached 8-point (cat 0x86) capability verdict for the current HID
         # connection. None = not yet probed; reset whenever handles are
         # dropped (stop / disconnect) so a different controller re-probes.
@@ -1593,11 +1674,120 @@ class SettingsService:
 
     @property
     def target_path(self) -> Optional[str]:
-        return self._target_path
+        with self._handle_lock:
+            return self._target_path
 
     @property
     def is_started(self) -> bool:
-        return self._write_handle is not None or self._read_write_handle is not None
+        with self._handle_lock:
+            return self._write_handle is not None or self._read_write_handle is not None
+
+    def _register_active_reader(
+        self,
+        reader: threading.Thread,
+        handle: int,
+        generation: int | None,
+    ) -> bool:
+        """Record the default reader only while it belongs to this handle generation."""
+
+        if generation is None or not reader.is_alive():
+            return False
+        with self._handle_lock:
+            if (
+                self._read_write_handle == handle
+                and self._read_write_generation == generation
+            ):
+                # Keep the generation on the thread, rather than another service
+                # field, so the registry remains one ref + one counter + one lock.
+                setattr(reader, "_settings_service_generation", generation)
+                self._active_reader = reader
+                return True
+        return False
+
+    def _clear_active_reader(self, reader: threading.Thread) -> None:
+        with self._handle_lock:
+            if self._active_reader is reader:
+                self._active_reader = None
+
+    def _read_generation_for_handle(self, handle: int) -> int | None:
+        with self._handle_lock:
+            if self._read_write_handle != handle:
+                return None
+            return self._read_write_generation
+
+    def _current_reader_for_stop(self) -> tuple[int, threading.Thread] | None:
+        with self._handle_lock:
+            reader = self._active_reader
+            handle = self._read_write_handle
+            if reader is None or handle is None:
+                return None
+            if getattr(reader, "_settings_service_generation", None) != self._read_write_generation:
+                return None
+            return handle, reader
+
+    @staticmethod
+    def _close_handles(handles: list[int], close_handle: Callable[[int], bool]) -> None:
+        for handle in handles:
+            try:
+                close_handle(handle)
+            except Exception:  # pragma: no cover - best-effort cleanup
+                logger.debug("close_handle(%s) raised", handle, exc_info=True)
+
+    def _reap_current_reader_before_stop(self) -> None:
+        current = self._current_reader_for_stop()
+        if current is None:
+            return
+        handle, reader = current
+        if not reader.is_alive():
+            return
+
+        deadline = time.monotonic() + STOP_READER_REAP_TIMEOUT_S
+        try:
+            kernel32 = _Win32.kernel32()
+        except (OSError, AttributeError):  # pragma: no cover - non-Windows fallback
+            logger.warning("SettingsService could not bind CancelIoEx while stopping active reader")
+        else:
+            cancel_succeeded, cancel_error = _cancel_io_ex_with_error(kernel32, handle)
+            logger.debug(
+                "SettingsService stop CancelIoEx(handle=%s) returned %s (Win32 err %s)",
+                handle,
+                cancel_succeeded,
+                cancel_error,
+            )
+
+        remaining_s = max(0.0, deadline - time.monotonic())
+        try:
+            reader.join(timeout=remaining_s)
+        except RuntimeError:  # pragma: no cover - reader registration follows start()
+            logger.debug("SettingsService reader was not joinable during stop", exc_info=True)
+        if reader.is_alive():
+            logger.warning(
+                "SettingsService reader for handle %s survived %.0fms stop reap; closing handle",
+                handle,
+                STOP_READER_REAP_TIMEOUT_S * 1000,
+            )
+
+    def _clear_all_cached_handles_locked(self) -> list[int]:
+        """Null cached handles while holding ``_handle_lock`` and return close work."""
+
+        handles: list[int] = []
+        if self._write_handle is not None:
+            handles.append(self._write_handle)
+        if (
+            self._read_write_handle is not None
+            and self._read_write_handle not in handles
+        ):
+            handles.append(self._read_write_handle)
+        self._write_handle = None
+        self._read_write_handle = None
+        self._target_path = None
+        self._last_open_error = None
+        self._supports_8point = None
+        # Also advance when no handle is cached: an opener that already released
+        # the lock must see stop/invalidation and discard its candidate instead
+        # of resurrecting a field after shutdown.
+        self._read_write_generation += 1
+        return handles
 
     def start(self) -> SetPollingRateOutcome:
         """Open and cache the MI_02 write handle if needed."""
@@ -1605,49 +1795,20 @@ class SettingsService:
         return self._ensure_handle().outcome
 
     def stop(self) -> None:
-        """Close cached MI_02 handles if open."""
+        """Reap a current reader, then null and close cached MI_02 handles."""
 
-        # Capability is per-connection; clear it so the next controller re-probes.
-        self._supports_8point = None
-        if self._write_handle is None and self._read_write_handle is None:
-            self._target_path = None
-            self._last_open_error = None
-            return
-        handles = []
-        if self._write_handle is not None:
-            handles.append(self._write_handle)
-        if (
-            self._read_write_handle is not None
-            and self._read_write_handle not in handles
-        ):
-            handles.append(self._read_write_handle)
-        self._write_handle = None
-        self._read_write_handle = None
-        self._target_path = None
-        self._last_open_error = None
-        for handle in handles:
-            try:
-                self._close_handle(handle)
-            except Exception:  # pragma: no cover - best-effort cleanup
-                logger.debug("close_handle(%s) raised", handle, exc_info=True)
+        # Never close a handle underneath the registered reader when we can
+        # still request cancellation and give it a bounded chance to exit.
+        self._reap_current_reader_before_stop()
+        with self._handle_lock:
+            handles = self._clear_all_cached_handles_locked()
+        self._close_handles(handles, self._close_handle)
 
     def _invalidate_cached_handles(self, *, error_code: int, context: str) -> None:
         # A dropped/disconnected handle means a possibly-different controller on
         # reconnect, so the cached 0x86 verdict must be re-probed.
-        self._supports_8point = None
-        handles = []
-        if self._write_handle is not None:
-            handles.append(self._write_handle)
-        if (
-            self._read_write_handle is not None
-            and self._read_write_handle not in handles
-        ):
-            handles.append(self._read_write_handle)
-
-        self._write_handle = None
-        self._read_write_handle = None
-        self._target_path = None
-        self._last_open_error = None
+        with self._handle_lock:
+            handles = self._clear_all_cached_handles_locked()
 
         logger.info(
             "invalidating SettingsService cached handle(s) after %s "
@@ -1655,11 +1816,32 @@ class SettingsService:
             context,
             error_code,
         )
-        for handle in handles:
-            try:
-                self._close_handle(handle)
-            except Exception:  # pragma: no cover - best-effort cleanup
-                logger.debug("close_handle(%s) raised", handle, exc_info=True)
+        self._close_handles(handles, self._close_handle)
+
+    def _poison_read_write_handle(self, handle: int, *, cancel_error: int | None) -> None:
+        """Drop the timed-out read handle before attempting its final close."""
+
+        with self._handle_lock:
+            if self._read_write_handle != handle:
+                return
+            self._read_write_handle = None
+            # Separate read/write and write-only opens normally produce distinct
+            # handles, but preserve the no-stale-field invariant for injected
+            # fakes (or an unexpected duplicate) too.
+            if self._write_handle == handle:
+                self._write_handle = None
+            if self._write_handle is None:
+                self._target_path = None
+            self._last_open_error = None
+            self._supports_8point = None
+            self._read_write_generation += 1
+
+        logger.warning(
+            "poisoning SettingsService read+write handle after unreaped HID read "
+            "(CancelIoEx Win32 err %s)",
+            cancel_error,
+        )
+        self._close_handles([handle], self._close_handle)
 
     def _write_payload(
         self,
@@ -1709,7 +1891,9 @@ class SettingsService:
         self._sleep(WRITE_RETRY_DELAY_S)
 
         retry_handle = handle
-        if self._write_handle is None:
+        with self._handle_lock:
+            write_handle_missing = self._write_handle is None
+        if write_handle_missing:
             retry_handle_result = self._ensure_handle()
             if (
                 retry_handle_result.outcome != SetPollingRateOutcome.OK
@@ -1843,9 +2027,10 @@ class SettingsService:
         just could not be read. Such an attempt logs a warning and retries; if
         the whole budget is exhausted with ONLY read-back failures (the device
         never once read back a *different* value), the setter DEGRADES to the
-        underlying write's ``OK`` / ``OK_WITH_RETRY`` result so a verified write
-        is never worse than a plain one. ``VERIFY_FAILED`` is reserved for a
-        CONFIRMED mismatch -- a successful read that returned a different value.
+        underlying write's ``OK`` / ``OK_WITH_RETRY`` result with
+        ``verify_inconclusive=True`` so a verified write is never worse than a
+        plain one. ``VERIFY_FAILED`` is reserved for a CONFIRMED mismatch -- a
+        successful read that returned a different value.
 
         Mirrors the read-side retry precedent in ``get_button_binding`` and the
         write-side ``_write_payload_with_retry``: the verify loop only costs a
@@ -1945,7 +2130,7 @@ class SettingsService:
             attempts,
             getattr(last_result.outcome, "name", last_result.outcome),
         )
-        return last_result
+        return replace(last_result, verify_inconclusive=True)
 
     def get_step_size(self) -> Optional[int]:
         """Read the controller's current joystick step-size byte (1-255)."""
@@ -2134,7 +2319,8 @@ class SettingsService:
             written = 0
             retried_any = False
             for payload in payloads:
-                current_handle = self._write_handle or handle_result.handle
+                with self._handle_lock:
+                    current_handle = self._write_handle or handle_result.handle
                 write_result = self._write_payload_with_retry(
                     current_handle,
                     payload,
@@ -2347,8 +2533,10 @@ class SettingsService:
         monotonic) rather than lenient.
         """
 
-        if self._supports_8point is not None:
-            return self._supports_8point
+        with self._handle_lock:
+            cached_support = self._supports_8point
+        if cached_support is not None:
+            return cached_support
         curve = self.get_sensitivity_curve_8point(
             SENSITIVITY_STICK_LEFT,
             timeout_ms=SENSITIVITY_8POINT_PROBE_TIMEOUT_MS,
@@ -2358,8 +2546,11 @@ class SettingsService:
                 SENSITIVITY_STICK_LEFT,
                 timeout_ms=SENSITIVITY_8POINT_PROBE_TIMEOUT_MS,
             )
-        self._supports_8point = curve is not None
-        return self._supports_8point
+        with self._handle_lock:
+            # A concurrent stop/invalidation deliberately clears the cache;
+            # caching this completed probe remains safe for the current fields.
+            self._supports_8point = curve is not None
+            return self._supports_8point
 
     def get_sensitivity_curves(
         self,
@@ -2619,9 +2810,10 @@ class SettingsService:
         succeeded, the read just could not be read. Such an attempt logs a warning
         and retries; if the whole budget is exhausted with ONLY read-back failures
         (never a confirmed wrong value), the setter DEGRADES to the underlying
-        write's ``OK`` / ``OK_WITH_RETRY`` result so a verified write is never
-        worse than a plain one. ``VERIFY_FAILED`` is reserved for a CONFIRMED
-        mismatch -- a successful read that returned a different
+        write's ``OK`` / ``OK_WITH_RETRY`` result with
+        ``verify_inconclusive=True`` so a verified write is never worse than a
+        plain one. ``VERIFY_FAILED`` is reserved for a CONFIRMED mismatch -- a
+        successful read that returned a different
         ``LightingSettings``. Mirrors ``set_step_size_verified`` exactly.
         """
 
@@ -2715,7 +2907,7 @@ class SettingsService:
             attempts,
             getattr(last_result.outcome, "name", last_result.outcome),
         )
-        return last_result
+        return replace(last_result, verify_inconclusive=True)
 
     def get_zone_lighting(self, zone: LightingZone) -> Optional[LightingSettings]:
         """Read one lighting zone from the controller."""
@@ -2871,58 +3063,124 @@ class SettingsService:
         )
 
     def _ensure_handle(self) -> _EnsureHandleResult:
-        if self._write_handle is not None:
-            return _EnsureHandleResult(
-                outcome=SetPollingRateOutcome.OK,
-                handle=self._write_handle,
-                target_path=self._target_path,
-            )
+        with self._handle_lock:
+            if self._write_handle is not None:
+                return _EnsureHandleResult(
+                    outcome=SetPollingRateOutcome.OK,
+                    handle=self._write_handle,
+                    target_path=self._target_path,
+                )
+            generation = self._read_write_generation
 
+        # Enumeration and CreateFileW remain outside the lock: both may block.
         target_path = _choose_mi02_path(self._enumerate_paths())
         if target_path is None:
-            self._target_path = None
-            self._last_open_error = None
+            with self._handle_lock:
+                if self._write_handle is not None:
+                    return _EnsureHandleResult(
+                        outcome=SetPollingRateOutcome.OK,
+                        handle=self._write_handle,
+                        target_path=self._target_path,
+                    )
+                if self._read_write_generation == generation:
+                    self._target_path = None
+                    self._last_open_error = None
             return _EnsureHandleResult(outcome=SetPollingRateOutcome.DEVICE_NOT_FOUND)
 
         handle, err = self._open_write_handle(target_path)
-        self._target_path = target_path
-        if handle is None:
-            self._last_open_error = err
-            return _EnsureHandleResult(
-                outcome=SetPollingRateOutcome.OPEN_FAILED,
-                target_path=target_path,
-                error_code=err,
-            )
-
-        self._write_handle = handle
-        self._last_open_error = None
-        return _EnsureHandleResult(
-            outcome=SetPollingRateOutcome.OK,
-            handle=handle,
-            target_path=target_path,
-        )
+        close_candidate: int | None = None
+        with self._handle_lock:
+            if self._write_handle is not None:
+                if handle is not None and handle != self._write_handle:
+                    close_candidate = handle
+                result = _EnsureHandleResult(
+                    outcome=SetPollingRateOutcome.OK,
+                    handle=self._write_handle,
+                    target_path=self._target_path,
+                )
+            elif self._read_write_generation != generation:
+                # stop()/invalidation won the race while CreateFileW was out of
+                # lock. Discard this raw handle rather than resurrecting a field.
+                close_candidate = handle
+                result = _EnsureHandleResult(outcome=SetPollingRateOutcome.OPEN_FAILED)
+            else:
+                self._target_path = target_path
+                if handle is None:
+                    self._last_open_error = err
+                    result = _EnsureHandleResult(
+                        outcome=SetPollingRateOutcome.OPEN_FAILED,
+                        target_path=target_path,
+                        error_code=err,
+                    )
+                else:
+                    self._write_handle = handle
+                    self._last_open_error = None
+                    result = _EnsureHandleResult(
+                        outcome=SetPollingRateOutcome.OK,
+                        handle=handle,
+                        target_path=target_path,
+                    )
+        if close_candidate is not None:
+            self._close_handles([close_candidate], self._close_handle)
+        return result
 
     def _ensure_read_write_handle(self) -> Optional[int]:
-        if self._read_write_handle is not None:
-            return self._read_write_handle
+        with self._handle_lock:
+            if self._read_write_handle is not None:
+                return self._read_write_handle
+            generation = self._read_write_generation
+            cached_target_path = self._target_path
 
-        target_path = self._target_path or _choose_mi02_path(self._enumerate_paths())
+        # Enumeration and CreateFileW remain outside the lock: both may block.
+        target_path = cached_target_path or _choose_mi02_path(self._enumerate_paths())
         if target_path is None:
-            self._target_path = None
-            self._last_open_error = None
+            with self._handle_lock:
+                if self._read_write_handle is not None:
+                    return self._read_write_handle
+                if self._read_write_generation == generation:
+                    self._target_path = None
+                    self._last_open_error = None
             return None
 
         handle, err = self._open_read_write_handle(target_path)
-        self._target_path = target_path
-        if handle is None:
-            self._last_open_error = err
-            return None
-
-        self._read_write_handle = handle
-        self._last_open_error = None
-        return handle
+        close_candidate: int | None = None
+        with self._handle_lock:
+            if self._read_write_handle is not None:
+                if handle is not None and handle != self._read_write_handle:
+                    close_candidate = handle
+                result = self._read_write_handle
+            elif self._read_write_generation != generation:
+                # stop()/invalidation won while CreateFileW was out of lock.
+                close_candidate = handle
+                result = None
+            else:
+                self._target_path = target_path
+                if handle is None:
+                    self._last_open_error = err
+                    result = None
+                else:
+                    self._read_write_handle = handle
+                    self._last_open_error = None
+                    self._read_write_generation += 1
+                    result = handle
+        if close_candidate is not None:
+            self._close_handles([close_candidate], self._close_handle)
+        return result
 
     def _read_payload(self, handle: int, length: int, timeout_ms: int) -> bytes:
+        if self._read_file is _default_read_file:
+            generation = self._read_generation_for_handle(handle)
+            return _default_read_file(
+                handle,
+                length,
+                timeout_ms,
+                on_reader_started=lambda reader: self._register_active_reader(
+                    reader,
+                    handle,
+                    generation,
+                ),
+                on_reader_finished=self._clear_active_reader,
+            )
         return self._read_file(handle, length, timeout_ms)
 
     def _read_response(
@@ -2977,6 +3235,11 @@ class SettingsService:
                     HID_FEATURE_REPORT_SIZE,
                     remaining_ms,
                 )
+            except StrandedReadTimeout as exc:
+                # Null the cached field before CloseHandle so a retry cannot
+                # start another reader on the same handle while this one lives.
+                self._poison_read_write_handle(handle, cancel_error=exc.cancel_error)
+                raise
             except SettingsServiceError as exc:
                 error_code = _win32_error_from_exception(exc)
                 if _is_disconnect_win32_error(error_code):

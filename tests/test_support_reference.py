@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from zd_app import i18n
 from zd_app.ui import support_reference
 
 
@@ -120,6 +121,102 @@ class SupportReferenceTests(unittest.TestCase):
         self.assertTrue(any("triangle button" in bullet for bullet in guide.bullets))
         self.assertTrue(any("verified gameplay pairing success" in bullet for bullet in guide.bullets))
         self.assertIn("official receiver-firmware/tutorial pattern", guide.evidence_note)
+
+
+class LocalizedGuideTests(unittest.TestCase):
+    """The three Diagnostics-reachable guides are fully localized (I-02).
+
+    Contract: for a guide registered in ``_LOCALIZED_GUIDES``, every surface
+    (title, summary, bullets, evidence note) resolves through i18n in BOTH
+    locales; the EN values are byte-identical to the dataclass strings so the
+    localization layer can never drift from the canonical guide content; and
+    the zh values actually differ from EN (no untranslated pass-through).
+    Unregistered guides keep their dataclass strings on every surface.
+    """
+
+    LOCALIZED_KEYS = ("calibration", "firmware", "windows_component_model")
+
+    def setUp(self) -> None:
+        i18n.set_locale("en")
+
+    def tearDown(self) -> None:
+        i18n.set_locale("en")
+
+    def test_en_localized_surfaces_match_dataclass_byte_exact(self) -> None:
+        # Calibration's EN summary/bullets were deliberately re-curated when it
+        # was first localized (English labels instead of the dataclass's
+        # embedded zh terms), so the byte-exact contract covers the guides
+        # localized from the dataclass verbatim, plus calibration's title,
+        # evidence note, and bullet count.
+        for key in ("firmware", "windows_component_model"):
+            guide = support_reference.get_guide(key)
+            self.assertEqual(support_reference.localized_title(guide), guide.title)
+            self.assertEqual(support_reference.localized_summary(guide), guide.summary)
+            self.assertEqual(
+                support_reference.localized_bullets(guide), tuple(guide.bullets)
+            )
+            self.assertEqual(
+                support_reference.localized_evidence_note(guide), guide.evidence_note
+            )
+        calibration = support_reference.get_guide("calibration")
+        self.assertEqual(
+            support_reference.localized_title(calibration), calibration.title
+        )
+        self.assertEqual(
+            support_reference.localized_evidence_note(calibration),
+            calibration.evidence_note,
+        )
+        self.assertEqual(
+            len(support_reference.localized_bullets(calibration)),
+            len(calibration.bullets),
+        )
+
+    def test_zh_localized_surfaces_are_translated_and_complete(self) -> None:
+        i18n.set_locale("zh-CN")
+        for key in self.LOCALIZED_KEYS:
+            guide = support_reference.get_guide(key)
+            bullets = support_reference.localized_bullets(guide)
+            self.assertEqual(len(bullets), len(guide.bullets), key)
+            self.assertNotEqual(
+                support_reference.localized_summary(guide), guide.summary, key
+            )
+            self.assertNotEqual(
+                support_reference.localized_evidence_note(guide),
+                guide.evidence_note,
+                key,
+            )
+            for index, bullet in enumerate(bullets):
+                self.assertTrue(bullet.strip(), f"{key} bullet {index} empty")
+                self.assertNotEqual(
+                    bullet, guide.bullets[index], f"{key} bullet {index} untranslated"
+                )
+
+    def test_zh_titles_are_translated_except_windows_stack_brand_term(self) -> None:
+        i18n.set_locale("zh-CN")
+        calibration = support_reference.get_guide("calibration")
+        firmware = support_reference.get_guide("firmware")
+        stack = support_reference.get_guide("windows_component_model")
+        self.assertNotEqual(
+            support_reference.localized_title(calibration), calibration.title
+        )
+        self.assertNotEqual(
+            support_reference.localized_title(firmware), firmware.title
+        )
+        # "Windows" stays verbatim by terminology rule; the rest translates.
+        self.assertNotEqual(support_reference.localized_title(stack), stack.title)
+        self.assertIn("Windows", support_reference.localized_title(stack))
+
+    def test_unlocalized_guides_fall_back_to_dataclass_in_zh(self) -> None:
+        i18n.set_locale("zh-CN")
+        guide = support_reference.get_guide("config_slots")
+        self.assertEqual(support_reference.localized_title(guide), guide.title)
+        self.assertEqual(support_reference.localized_summary(guide), guide.summary)
+        self.assertEqual(
+            support_reference.localized_bullets(guide), tuple(guide.bullets)
+        )
+        self.assertEqual(
+            support_reference.localized_evidence_note(guide), guide.evidence_note
+        )
 
 
 if __name__ == "__main__":

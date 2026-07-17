@@ -64,7 +64,7 @@ class LastAppliedRecord:
     profile_name: str
     applied_at: str  # UTC ISO-8601 ``Z`` (see utc_now_iso_z)
     include_device: bool  # device-global fields (polling/step) were part of it
-    failed_fields: tuple[str, ...]  # coordinator setting_labels that did not ACK
+    failed_fields: tuple[str, ...]  # coordinator setting_labels whose write did not succeed
     snapshot: ControllerSnapshot  # as-sent (post filtering and fallback)
 
 

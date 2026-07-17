@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.6.1 — 2026-07-17
+
+Honesty and robustness point release on top of v2.6.0.
+
+- **Trust Matrix "Applied changes" is labeled as policy, not evidence.** The row previously showed a
+  green "Verified by read-back" chip unconditionally; it now carries a muted "Verification policy"
+  chip and states the real, narrow scope. Every write reports its outcome; the Restore, Safe Import
+  and inline-deadzone flows read the value back to confirm it, and a profile Apply does the same for
+  step size and lighting — write-only fields are reported as sent.
+- **Scoped write-verification wording across the trust surfaces.** The first-connect trust card, the
+  Diagnostics trust panel and the About disclaimer now describe read-back verification with the same
+  honest scope instead of implying every write is verified.
+- **Simplified Chinese: localized support guides.** The Firmware and Windows Stack support guides now
+  render in Chinese for zh-CN users.
+- **HID robustness.** Hardened cancellation and recovery of in-flight controller reads so a cancelled
+  or stranded read can never be mistaken for a completed one.
+- **Build self-verification.** Release builds carry a recorded manifest of the exact sources scanned
+  at build time, which the in-app Trust Self-Check verifies against the shipped files.
+
+No new wrapper-written controller settings, no network, nothing uploaded.
+
 ## v2.6.0 — 2026-07-12
 
 Trust + honesty release. New "What we know right now" provenance card (Diagnostics → Guidance)

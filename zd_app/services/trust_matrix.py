@@ -1,11 +1,15 @@
 """Provenance matrix — "What we know right now".
 
 Display-only derivation over the device-state signals the app already holds.
-Each user-visible claim class gets exactly one of three honest provenance
-labels, and a label may only ever DEGRADE downward on ambiguity
+Each EVIDENCE row gets exactly one of three honest provenance labels, and a
+label may only ever DEGRADE downward on ambiguity
 (``verified`` -> ``inferred`` -> ``unknown``) — never upward. No new device
 I/O, no writes, no new fingerprint fields: this module reads primitive signals
 gathered by the caller and maps them to labels + plain-language copy.
+
+The ``applied`` row is NOT an evidence row: it derives from no signal at all,
+so it carries the distinct non-evidence ``POLICY`` class and must never wear an
+evidence chip. See ``POLICY`` and ``_applied_row``.
 
 DPG-free by construction (mirrors ``trust_self_check`` / ``compatibility_report``)
 so the label logic is unit-testable without a UI context.
@@ -25,6 +29,18 @@ INFERRED = "inferred"
 UNKNOWN = "unknown"
 
 PROVENANCE_ORDER = (VERIFIED, INFERRED, UNKNOWN)
+
+# NOT a provenance level, and deliberately NOT in PROVENANCE_ORDER: this is the
+# class for a row that reports a POLICY rather than an observation. It renders
+# muted (see ``diagnostics._provenance_color``), never in the evidence color.
+#
+# A row that derives from no signal cannot be evidence, however honest its
+# wording. An evidence chip in this grid means "we checked", and the other five
+# rows all mean that literally — so a policy row wearing one reads as "we checked
+# this apply" no matter what its copy says. Softening only the chip's WORDS while
+# leaving the provenance (and therefore the green) intact is the exact failure
+# mode this class exists to prevent.
+POLICY = "policy"
 
 # ``summary_sources`` values that populate the firmware / active-profile fields.
 # Only ``SOURCE_PROTOCOL`` is a genuine device verification; ``SOURCE_OFFICIAL``
@@ -87,11 +103,17 @@ class TrustMatrixRow:
     provenance: str
     why: str
     qualifier: str | None = None
-    # Optional row-specific chip label key. The applied row is a static POLICY
-    # row — no device was consulted at render time, so the shared "Verified
-    # from device" chip would overclaim; it carries its own honest chip
-    # instead. ``provenance`` still drives color; only the displayed label is
-    # overridden. Resolve through ``row_label``.
+    # Optional row-specific chip label key, for a row whose provenance CLASS is
+    # right but whose default wording would overclaim. Sole user today: the
+    # firmware row read from the official ZD app's window, which is colored like
+    # INFERRED but must not say "Inferred locally" (see OFFICIAL_APP_LABEL_KEY).
+    # ``provenance`` still drives color; only the displayed label is overridden.
+    # Resolve through ``row_label``.
+    #
+    # The ``applied`` row does NOT use this. It is not an evidence row whose
+    # wording needs softening — it is a different KIND of row, so it carries its
+    # own provenance class (``POLICY``) and takes that class's label normally.
+    # An override here would hide a wrong provenance behind nicer words.
     label_key: str | None = None
 
 
@@ -247,22 +269,32 @@ def _fingerprint_row(signals: TrustMatrixSignals) -> TrustMatrixRow:
 
 
 def _applied_row() -> TrustMatrixRow:
-    # Static, policy-only row (per spec): current state does not carry a
-    # trustworthy per-write "verified read-back vs ACK-only" signal, so rather
-    # than invent one, the row states the DISPLAY RULE that is true by
-    # construction — nothing is ever LABELED verified without a read-back, and
-    # a write acknowledgement alone is NEVER shown as verified. It does NOT
-    # claim every write path performs a read-back (that universal-mechanism
-    # overclaim is the class killed in the public docs' step-size wording).
-    # The chip label is row-specific ("Verified by read-back") because no
-    # device was consulted at render time — "Verified from device" would
-    # itself overclaim here.
+    # Signal-free BY CONSTRUCTION — this row takes no arguments because there is
+    # no per-apply verification signal to take. It cannot see the device, the
+    # connection, or the ApplyResult. It cannot be wrong because it cannot see
+    # anything, and that is exactly why it must not wear an evidence chip: it
+    # states the app's verification SCOPE, so it takes the non-evidence POLICY
+    # class and renders muted.
+    #
+    # DO NOT restore an evidence provenance here without a real signal behind it.
+    # The honest way to make this row green is to give profile Apply the
+    # post-apply read-back sweep that Restore and Safe Import ALREADY perform
+    # (``restore_point_service._unverified_writes_after_final_restore_read``,
+    # ``app_shell._unverified_writes_after_final_safe_import_read``) and derive
+    # the row from the resulting per-field outcome.
+    #
+    # Until that lands, the scope this row describes is narrow and the copy says
+    # so: in a profile Apply only step size and lighting are read back
+    # (``set_step_size_verified`` / ``set_zone_lighting_verified``). Every other
+    # field is a plain setter whose "success" is a WriteFile return, not a device
+    # ACK — and ``ApplyResult.unverified_writes`` can only ever be populated from
+    # those two verified setters, so an EMPTY ``unverified_writes`` means "nothing
+    # we checked came back ambiguous", NOT "everything committed".
     return TrustMatrixRow(
         key="applied",
         claim=t("trust_matrix.row.applied.claim"),
-        provenance=VERIFIED,
+        provenance=POLICY,
         why=t("trust_matrix.row.applied.why"),
-        label_key="trust_matrix.label.applied",
     )
 
 
@@ -293,6 +325,7 @@ def row_label(row: TrustMatrixRow) -> str:
 __all__ = [
     "INFERRED",
     "OFFICIAL_APP_LABEL_KEY",
+    "POLICY",
     "PROVENANCE_ORDER",
     "ROW_KEYS",
     "SOURCE_OFFICIAL",

@@ -86,6 +86,8 @@ try {
 
     Invoke-NativeCommand -Label "PyInstaller" -ScriptBlock { & $python -m PyInstaller --noconfirm pyinstaller_main_zd.spec }
 
+    Invoke-NativeCommand -Label "trust manifest" -ScriptBlock { & $python tools\generate_trust_manifest.py --dist-root dist\ZDUltimateLegend --repo-root . }
+
     $srcDir = Join-Path $repoRoot "dist\ZDUltimateLegend"
     $dstDir = Join-Path $repoRoot "dist\ZDUltimateLegend-v$version"
     if (-not (Test-Path $srcDir)) {

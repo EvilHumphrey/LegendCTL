@@ -205,6 +205,7 @@ class RestoreResult:
     before_restore_point_id: Optional[str]
     completed_at: str   # ISO-8601 UTC
     sensitivity_downgrades: tuple[str, ...] = ()
+    unverified_writes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

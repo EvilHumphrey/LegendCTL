@@ -749,10 +749,17 @@ def _copy_trust_self_check(shell) -> None:
 
 
 def _provenance_color(shell, provenance: str):
+    # "policy" is NOT an evidence class and must never take the "good" (green)
+    # color — it marks a row that states a rule rather than reporting a device
+    # reading (see services.trust_matrix.POLICY). Muted here is deliberate, not
+    # a fallthrough: provenance drives the chip color, so a policy row that
+    # leaked back to an evidence class would render green again even with
+    # perfectly honest wording.
     return {
         "verified": shell.COLORS["good"],
         "inferred": shell.COLORS["warn"],
         "unknown": shell.COLORS["muted"],
+        "policy": shell.COLORS["muted"],
     }.get(provenance, shell.COLORS["muted"])
 
 
@@ -1128,6 +1135,7 @@ def _share_card_result(shell):
         recent_events=device_service.recent_events(8),
         diagnostic_bundle_path=getattr(shell, "_last_diagnostic_bundle_path", None),
         diagnostic_bundle_service=bundle,
+        trust_self_check=_trust_self_check_result(shell),
     )
 
 

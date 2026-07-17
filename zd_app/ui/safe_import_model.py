@@ -163,8 +163,9 @@ class ImportAudit:
     restore_point_name: str | None = None
     aborted_no_restore_point: bool = False
     sensitivity_downgrades: tuple[str, ...] = ()
-    # Post-apply read-back verification detail, filled by the apply flow when
-    # every write was ACKed: "verified" is earned only by a clean read-back
+    unverified_writes: tuple[str, ...] = ()
+    # Post-apply read-back verification detail, filled by the apply flow after
+    # every write reported a successful outcome: "verified" is earned only by a clean read-back
     # comparison (both lists empty); otherwise the result modal renders the
     # "sent" reason from these. ``verify_read_failed`` means the read-back
     # itself raised, so no comparison happened at all.

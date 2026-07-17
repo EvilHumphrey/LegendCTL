@@ -103,6 +103,7 @@ class ApplyResult:
     retry_recoveries: int = 0
     failed: list[ApplyFailure] = field(default_factory=list)
     sensitivity_downgrades: tuple[str, ...] = ()
+    unverified_writes: tuple[str, ...] = ()
     no_restore_point: bool = False
 
 
@@ -133,6 +134,19 @@ def snapshot_as_sent(
 
 def _merge_sensitivity_downgrades(*groups: object) -> tuple[str, ...]:
     """Union supported downgrade labels in deterministic first-seen order."""
+
+    merged: list[str] = []
+    for group in groups:
+        if not isinstance(group, (tuple, list)):
+            continue
+        for label in group:
+            if isinstance(label, str) and label not in merged:
+                merged.append(label)
+    return tuple(merged)
+
+
+def _merge_unverified_writes(*groups: object) -> tuple[str, ...]:
+    """Union unverified-write labels in deterministic first-seen order."""
 
     merged: list[str] = []
     for group in groups:
@@ -425,6 +439,9 @@ class SettingsApplyCoordinator:
             sensitivity_downgrades=_merge_sensitivity_downgrades(
                 getattr(originating_result, "sensitivity_downgrades", ())
             ),
+            unverified_writes=_merge_unverified_writes(
+                getattr(originating_result, "unverified_writes", ())
+            ),
             no_restore_point=bool(
                 getattr(originating_result, "no_restore_point", False)
             ),
@@ -453,6 +470,13 @@ class SettingsApplyCoordinator:
             retry_result.sensitivity_downgrades = _merge_sensitivity_downgrades(
                 retry_result.sensitivity_downgrades,
                 getattr(result, "sensitivity_downgrades", ()),
+            )
+            retry_result.unverified_writes = _merge_unverified_writes(
+                retry_result.unverified_writes,
+                getattr(result, "unverified_writes", ()),
+                (failure.setting_label,)
+                if getattr(result, "verify_inconclusive", False) is True
+                else (),
             )
             retry_result.no_restore_point = (
                 retry_result.no_restore_point
@@ -506,6 +530,11 @@ class SettingsApplyCoordinator:
 
             outcome = getattr(outcome_result, "outcome", None)
             if outcome_is_success(outcome):
+                if getattr(outcome_result, "verify_inconclusive", False) is True:
+                    result.unverified_writes = _merge_unverified_writes(
+                        result.unverified_writes,
+                        (label,),
+                    )
                 result.succeeded += 1
                 if outcome_used_retry(outcome):
                     result.retry_recoveries += 1

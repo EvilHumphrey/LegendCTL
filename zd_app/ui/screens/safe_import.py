@@ -421,6 +421,12 @@ def open_result(shell) -> None:
                     color=shell.COLORS["warn"],
                     wrap=520,
                 )
+            if getattr(audit, "unverified_writes", ()):
+                dpg.add_text(
+                    t("apply.result.write_unverified"),
+                    color=shell.COLORS["warn"],
+                    wrap=520,
+                )
             dpg.add_text(
                 t("safe_import.result.profile_id", id=audit.generated_profile_id),
                 color=shell.COLORS["muted"],

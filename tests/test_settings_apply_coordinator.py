@@ -262,6 +262,30 @@ class CoordinatorRetryTests(unittest.TestCase):
         )
         self.assertTrue(retry_result.no_restore_point)
 
+    def test_retry_records_inconclusive_verified_setter_and_preserves_origin_context(self) -> None:
+        coordinator = SettingsApplyCoordinator(mock.Mock())
+        retry_result = coordinator.retry_failures(
+            [
+                ApplyFailure(
+                    setting_label="step_size",
+                    error="transient",
+                    is_transient=True,
+                    retry_fn=mock.Mock(
+                        return_value=_step_size_result(verify_inconclusive=True)
+                    ),
+                )
+            ],
+            originating_result=ApplyResult(
+                unverified_writes=("lighting_RIGHT_LIGHT",),
+            ),
+        )
+
+        self.assertEqual(retry_result.succeeded, 1)
+        self.assertEqual(
+            retry_result.unverified_writes,
+            ("lighting_RIGHT_LIGHT", "step_size"),
+        )
+
 
 class CoordinatorExceptionPathTests(unittest.TestCase):
     """Cover the setter-exception and listener-exception branches of the apply pipeline.
@@ -474,7 +498,12 @@ class CoordinatorDpgFreeTests(unittest.TestCase):
             )
 
 
-def _step_size_result(outcome: SetStepSizeOutcome = SetStepSizeOutcome.OK, value: int = 131) -> SetStepSizeResult:
+def _step_size_result(
+    outcome: SetStepSizeOutcome = SetStepSizeOutcome.OK,
+    value: int = 131,
+    *,
+    verify_inconclusive: bool = False,
+) -> SetStepSizeResult:
     return SetStepSizeResult(
         outcome=outcome,
         value=value,
@@ -482,6 +511,7 @@ def _step_size_result(outcome: SetStepSizeOutcome = SetStepSizeOutcome.OK, value
         bytes_written=65,
         payload_hex="00",
         elapsed_ms=1,
+        verify_inconclusive=verify_inconclusive,
     )
 
 
@@ -958,6 +988,40 @@ class CoordinatorFieldTrailerTests(unittest.TestCase):
             settings_service.set_zone_lighting_verified.call_count, len(LightingZone)
         )
         settings_service.set_zone_lighting.assert_not_called()
+
+    def test_verified_setter_inconclusive_writes_keep_success_counts_and_disclose_labels(self) -> None:
+        settings_service, coordinator = self._coordinator_with_all_setters_ok(
+            field_trailer_delay_s=0.0,
+            step_size_trailer_delay_s=0.0,
+        )
+        settings_service.set_step_size_verified.return_value = _step_size_result(
+            verify_inconclusive=True,
+        )
+        settings_service.set_zone_lighting_verified.return_value = SetLightingResult(
+            outcome=SetLightingOutcome.OK,
+            zone="right_light",
+            settings=_lighting_delta(),
+            error_code=None,
+            bytes_written=65,
+            payload_hex="00",
+            elapsed_ms=1,
+            verify_inconclusive=True,
+        )
+
+        result = coordinator.apply_snapshot(
+            _empty_snapshot(
+                lighting_zones={LightingZone.RIGHT_LIGHT: _lighting_delta()},
+                step_size=131,
+            )
+        )
+
+        self.assertEqual(result.total_attempted, 2)
+        self.assertEqual(result.succeeded, 2)
+        self.assertEqual(result.failed, [])
+        self.assertEqual(
+            result.unverified_writes,
+            ("lighting_RIGHT_LIGHT", "step_size"),
+        )
 
     def test_lighting_verify_failure_surfaces_as_apply_failure(self) -> None:
         """A VERIFY_FAILED lighting outcome must land as an ApplyFailure row.

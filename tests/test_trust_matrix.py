@@ -8,12 +8,14 @@ guard (retained/cached data must never earn ``verified``).
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from zd_app import i18n
 from zd_app.services import trust_matrix
 from zd_app.services.trust_matrix import (
     INFERRED,
     OFFICIAL_APP_LABEL_KEY,
+    POLICY,
     UNKNOWN,
     VERIFIED,
     TrustMatrixSignals,
@@ -88,11 +90,14 @@ class TrustMatrixDerivationTests(unittest.TestCase):
             trust_matrix.ROW_KEYS,
         )
 
-    def test_all_verified_when_connected_fresh_full_read(self) -> None:
+    def test_all_evidence_rows_verified_when_connected_fresh_full_read(self) -> None:
+        # Every EVIDENCE row goes verified on a live full read. The applied row
+        # is not evidence and never joins them — it derives from no signal, so a
+        # perfect connection cannot make it greener than a policy statement.
         provs = self._provenances(_connected_fresh())
         self.assertEqual(
             provs,
-            [VERIFIED, VERIFIED, VERIFIED, VERIFIED, VERIFIED, VERIFIED],
+            [VERIFIED, VERIFIED, VERIFIED, VERIFIED, VERIFIED, POLICY],
         )
 
     def test_disconnected_retained_degrades_to_inferred(self) -> None:
@@ -113,8 +118,10 @@ class TrustMatrixDerivationTests(unittest.TestCase):
         self.assertEqual(provs[SETTINGS], INFERRED)
         # Fingerprint is verified-or-nothing (cleared on disconnect) -> unknown.
         self.assertEqual(provs[FINGERPRINT], UNKNOWN)
-        # Applied-verification row is a static mechanism statement.
-        self.assertEqual(provs[APPLIED], VERIFIED)
+        # The applied row states a policy, not an observation -> it neither
+        # degrades nor stays green. It used to assert VERIFIED right here, with
+        # no controller attached.
+        self.assertEqual(provs[APPLIED], POLICY)
 
     def test_never_connected_is_all_unknown(self) -> None:
         provs = self._provenances(_signals())
@@ -123,7 +130,10 @@ class TrustMatrixDerivationTests(unittest.TestCase):
         self.assertEqual(provs[PROFILE], UNKNOWN)
         self.assertEqual(provs[SETTINGS], UNKNOWN)
         self.assertEqual(provs[FINGERPRINT], UNKNOWN)
-        self.assertEqual(provs[APPLIED], VERIFIED)
+        # Nothing has EVER been connected. This assertion used to read VERIFIED —
+        # a green "Verified by read-back" chip in a matrix that otherwise
+        # correctly says it knows nothing. That was the bug.
+        self.assertEqual(provs[APPLIED], POLICY)
 
     def test_never_upgrade_guard_retained_settings_are_never_verified(self) -> None:
         # A retained snapshot exists but does NOT belong to the unit connected
@@ -170,34 +180,79 @@ class TrustMatrixDerivationTests(unittest.TestCase):
         self.assertIsNone(row.qualifier)
         self.assertIn("abc123def456", row.why)
 
-    def test_applied_row_disclaims_ack_only_verification(self) -> None:
-        row = build_trust_matrix(_signals())[APPLIED]
-        # Doctrine: a write ACK alone is never presented as verified. The static
-        # copy must say so explicitly, and must state the DISPLAY RULE ("only
-        # marked verified after ... read back") rather than the universal
-        # "every write is read back" mechanism overclaim (overseer honesty fix,
-        # 2026-07-05 — same class as the killed step-size docs wording).
-        self.assertIn("acknowledgement", row.why.lower())
-        self.assertIn("only marked verified", row.why.lower())
-        self.assertNotIn("are confirmed by reading", row.why.lower())
+    def test_applied_row_is_never_an_evidence_row_in_any_signal_state(self) -> None:
+        # ★ THE REGRESSION GUARD. This row returned VERIFIED *unconditionally* —
+        # green before anything was plugged in — because it derives from no
+        # signal at all (``_applied_row`` takes no arguments). It cannot be wrong
+        # because it cannot see anything, which is precisely why it must never
+        # wear an evidence chip. No signal state may make it evidence.
+        for label, signals in (
+            ("never connected", _signals()),
+            ("connected, fresh, full read", _connected_fresh()),
+            ("disconnected with retained data", _signals(data_freshness="stale")),
+        ):
+            with self.subTest(state=label):
+                row = build_trust_matrix(signals)[APPLIED]
+                self.assertEqual(row.provenance, POLICY)
+                self.assertNotIn(row.provenance, trust_matrix.PROVENANCE_ORDER)
+        # POLICY is a KIND, not a confidence level: keeping it out of the degrade
+        # order is what stops it being compared against verified/inferred/unknown.
+        self.assertNotIn(POLICY, trust_matrix.PROVENANCE_ORDER)
 
-    def test_applied_row_chip_is_read_back_not_verified_from_device(self) -> None:
-        # The applied row is a static policy row — no device was consulted at
-        # render time, so its chip must NOT read "Verified from device"; it
-        # carries the row-specific "Verified by read-back" label instead.
+    def test_applied_row_chip_is_the_policy_label_not_an_evidence_chip(self) -> None:
         row = build_trust_matrix(_signals())[APPLIED]
-        self.assertEqual(row.label_key, "trust_matrix.label.applied")
+        # No ``label_key`` override any more: the row's CLASS carries its wording.
+        # The override was how the old code softened the chip's words while
+        # leaving the provenance (and therefore the green color) wrong — nicer
+        # words over the wrong signal. The class fixes both at once.
+        self.assertIsNone(row.label_key)
         label = trust_matrix.row_label(row)
-        self.assertEqual(label, i18n.t("trust_matrix.label.applied"))
-        self.assertNotEqual(label, trust_matrix.provenance_label(VERIFIED))
-        self.assertFalse(label.startswith("["), "missing trust_matrix.label.applied key")
-        # Every other row keeps the shared provenance chip.
+        self.assertEqual(label, i18n.t("trust_matrix.label.policy"))
+        self.assertFalse(label.startswith("["), "missing trust_matrix.label.policy key")
+        for evidence in (VERIFIED, INFERRED, UNKNOWN):
+            self.assertNotEqual(label, trust_matrix.provenance_label(evidence))
+        # Every evidence row still takes the shared provenance chip.
         for other in build_trust_matrix(_connected_fresh())[:APPLIED]:
             self.assertIsNone(other.label_key)
             self.assertEqual(
                 trust_matrix.row_label(other),
                 trust_matrix.provenance_label(other.provenance),
             )
+
+    def test_applied_row_names_the_real_verification_scope(self) -> None:
+        # The old copy asserted a DISPLAY RULE ("applied changes are only marked
+        # verified after the value is read back") — true, but evasive: it told the
+        # user nothing about which of THEIR settings actually got checked, while
+        # sitting under a green chip. The copy must name the real, narrow scope so
+        # it cannot silently re-broaden as the code changes underneath it.
+        why = build_trust_matrix(_signals())[APPLIED].why.lower()
+        self.assertIn("step size", why)
+        self.assertIn("lighting", why)
+        self.assertIn("sent, not verified", why)
+        # A WriteFile return is not a device ACK, and the copy must say so.
+        self.assertIn("not proof", why)
+        # And it must never resurrect the universal-mechanism overclaim (the same
+        # class killed in the public docs' step-size wording).
+        self.assertNotIn("are confirmed by reading", why)
+        self.assertNotIn("every write is read back", why)
+
+    def test_policy_rows_never_render_in_the_evidence_color(self) -> None:
+        # The bug was a COLOR as much as a word: provenance drives the chip color,
+        # so a POLICY row that leaked back to VERIFIED would go green again even
+        # with honest wording. Pin the mapping at the renderer.
+        from zd_app.ui.screens import diagnostics
+
+        shell = SimpleNamespace(
+            COLORS={"good": (0, 255, 0), "warn": (255, 191, 0), "muted": (128, 128, 128)}
+        )
+        self.assertEqual(
+            diagnostics._provenance_color(shell, POLICY),
+            shell.COLORS["muted"],
+        )
+        self.assertNotEqual(
+            diagnostics._provenance_color(shell, POLICY),
+            shell.COLORS["good"],
+        )
 
     # --- Source-aware firmware/profile chips -------------------------------
 

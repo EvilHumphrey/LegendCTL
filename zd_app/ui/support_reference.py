@@ -62,6 +62,29 @@ CALIBRATION_BULLET_KEYS = (
     "support.calibration.bullet.trigger",
     "support.calibration.bullet.motion",
     "support.calibration.bullet.combined",
+    "support.calibration.bullet.home_actions",
+)
+
+FIRMWARE_BULLET_KEYS = (
+    "support.firmware.bullet.target_first",
+    "support.firmware.bullet.bundles_split",
+    "support.firmware.bullet.official_lanes",
+    "support.firmware.bullet.dongle_alias",
+    "support.firmware.bullet.receiver_recovery",
+    "support.firmware.bullet.side_lanes",
+    "support.firmware.bullet.client_match",
+    "support.firmware.bullet.status_labels",
+    "support.firmware.bullet.downloads_fragmented",
+)
+
+WINDOWS_STACK_BULLET_KEYS = (
+    "support.windows_stack.bullet.targets",
+    "support.windows_stack.bullet.bundles_split",
+    "support.windows_stack.bullet.official_apps",
+    "support.windows_stack.bullet.receiver_name",
+    "support.windows_stack.bullet.entry_actions",
+    "support.windows_stack.bullet.side_lanes",
+    "support.windows_stack.bullet.undocumented",
 )
 
 
@@ -239,13 +262,39 @@ def get_guide(key: str) -> SupportGuide:
     return SUPPORT_GUIDES[key]
 
 
+# Guides whose content is fully localized through i18n keys. Guides not
+# listed here fall back to their English dataclass strings on every surface,
+# so a partially-keyed guide can never render a mixed-language modal.
+_LOCALIZED_GUIDES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "calibration": ("support.calibration", CALIBRATION_BULLET_KEYS),
+    "firmware": ("support.firmware", FIRMWARE_BULLET_KEYS),
+    "windows_component_model": ("support.windows_stack", WINDOWS_STACK_BULLET_KEYS),
+}
+
+
+def localized_title(guide: SupportGuide) -> str:
+    entry = _LOCALIZED_GUIDES.get(guide.key)
+    if entry is None:
+        return guide.title
+    return t(f"{entry[0]}.title")
+
+
 def localized_summary(guide: SupportGuide) -> str:
-    if guide.key == "calibration":
-        return t("support.calibration.summary")
-    return guide.summary
+    entry = _LOCALIZED_GUIDES.get(guide.key)
+    if entry is None:
+        return guide.summary
+    return t(f"{entry[0]}.summary")
 
 
 def localized_bullets(guide: SupportGuide) -> tuple[str, ...]:
-    if guide.key == "calibration":
-        return tuple(t(key) for key in CALIBRATION_BULLET_KEYS)
-    return guide.bullets
+    entry = _LOCALIZED_GUIDES.get(guide.key)
+    if entry is None:
+        return guide.bullets
+    return tuple(t(key) for key in entry[1])
+
+
+def localized_evidence_note(guide: SupportGuide) -> str:
+    entry = _LOCALIZED_GUIDES.get(guide.key)
+    if entry is None:
+        return guide.evidence_note
+    return t(f"{entry[0]}.evidence")

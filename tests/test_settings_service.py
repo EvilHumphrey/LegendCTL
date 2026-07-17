@@ -2112,6 +2112,45 @@ class TestSetStepSizeVerified(unittest.TestCase):
         self.assertEqual(result.outcome, SetStepSizeOutcome.VERIFY_FAILED)
         self.assertEqual(result.value, value)
 
+    def test_verify_inconclusive_flag_distinguishes_read_failures_from_confirmation(self) -> None:
+        value = STEP_SIZE_VALUE_DEFAULT
+        cases = (
+            (
+                "read raises",
+                [TimeoutError("HID read timed out after 1000ms")],
+                SetStepSizeOutcome.OK,
+                True,
+            ),
+            (
+                "read returns none",
+                [SettingsServiceError("synthetic read failure")],
+                SetStepSizeOutcome.OK,
+                True,
+            ),
+            (
+                "read confirms",
+                [_make_read_response(category=CATEGORY_STEP_SIZE, value=value)],
+                SetStepSizeOutcome.OK,
+                False,
+            ),
+            (
+                "read mismatches",
+                [_make_read_response(category=CATEGORY_STEP_SIZE, value=STEP_SIZE_VALUE_MIN)],
+                SetStepSizeOutcome.VERIFY_FAILED,
+                False,
+            ),
+        )
+
+        for name, read_results, expected_outcome, expected_inconclusive in cases:
+            with self.subTest(name=name):
+                result = _make_service(_Recorder(read_results=read_results)).set_step_size_verified(
+                    value,
+                    attempts=1,
+                )
+
+                self.assertEqual(result.outcome, expected_outcome)
+                self.assertIs(result.verify_inconclusive, expected_inconclusive)
+
 
 def _lighting_read_response(zone: LightingZone, settings: LightingSettings) -> bytes:
     """Build a cat-0x10 read-response frame ``get_zone_lighting`` decodes.
@@ -2315,6 +2354,45 @@ class TestSetZoneLightingVerified(unittest.TestCase):
             )
 
         self.assertEqual(result.outcome, SetLightingOutcome.VERIFY_FAILED)
+
+    def test_verify_inconclusive_flag_distinguishes_read_failures_from_confirmation(self) -> None:
+        cases = (
+            (
+                "read raises",
+                [TimeoutError("HID read timed out after 1000ms")],
+                SetLightingOutcome.OK,
+                True,
+            ),
+            (
+                "read returns none",
+                [SettingsServiceError("synthetic read failure")],
+                SetLightingOutcome.OK,
+                True,
+            ),
+            (
+                "read confirms",
+                [_lighting_read_response(self._ZONE, self._TARGET)],
+                SetLightingOutcome.OK,
+                False,
+            ),
+            (
+                "read mismatches",
+                [_lighting_read_response(self._ZONE, self._PRIOR)],
+                SetLightingOutcome.VERIFY_FAILED,
+                False,
+            ),
+        )
+
+        for name, read_results, expected_outcome, expected_inconclusive in cases:
+            with self.subTest(name=name):
+                result = _make_service(_Recorder(read_results=read_results)).set_zone_lighting_verified(
+                    self._ZONE,
+                    self._TARGET,
+                    attempts=1,
+                )
+
+                self.assertEqual(result.outcome, expected_outcome)
+                self.assertIs(result.verify_inconclusive, expected_inconclusive)
 
 
 class TestGetVibration(unittest.TestCase):
@@ -5206,3 +5284,415 @@ class TestDefaultReadFileTimeout(unittest.TestCase):
                 ss._default_read_file(handle=0x1234, length=65, timeout_ms=0)
         # The fallback budget of 100ms shows up in the exception message.
         self.assertIn("100ms", str(ctx.exception))
+
+
+class _StrictReadKernel32:
+    """Contract-enforcing fake for the synchronous ReadFile/CancelIoEx seam."""
+
+    def __init__(
+        self,
+        settings_service_module,
+        *,
+        plans: dict[int, list[tuple[str, bytes | None]]],
+        cancel_results: dict[int, bool],
+        cancel_errors: dict[int, int],
+        release_on_cancel: set[int] | None = None,
+    ) -> None:
+        self._ss = settings_service_module
+        self._plans = {handle: list(items) for handle, items in plans.items()}
+        self._cancel_results = dict(cancel_results)
+        self._cancel_errors = dict(cancel_errors)
+        self._release_on_cancel = set(release_on_cancel or set())
+        self.events: list[tuple] = []
+        self.read_handles: list[int] = []
+        self.started = {handle: threading.Event() for handle in plans}
+        self.released = {handle: threading.Event() for handle in plans}
+        self.returned = {handle: threading.Event() for handle in plans}
+        self.live_reads = {handle: 0 for handle in plans}
+        self.max_live_reads = {handle: 0 for handle in plans}
+        self._last_error = 0
+
+    def _copy_response(self, buf, bytes_read_ptr, response: bytes) -> None:
+        if not response:
+            raise AssertionError("successful fake ReadFile needs a non-empty response")
+        self._ss.c.memmove(buf.value, response, len(response))
+        bytes_read = self._ss.c.cast(
+            bytes_read_ptr,
+            self._ss.c.POINTER(self._ss.w.DWORD),
+        )
+        bytes_read[0] = len(response)
+
+    def ReadFile(self, handle, buf, length, bytes_read_ptr, overlapped):
+        if handle not in self._plans:
+            raise AssertionError(f"unexpected ReadFile handle {handle!r}")
+        if not getattr(buf, "value", None):
+            raise AssertionError("ReadFile buffer must be a non-null pointer")
+        if length != HID_FEATURE_REPORT_SIZE or bytes_read_ptr is None or overlapped is not None:
+            raise AssertionError("ReadFile contract geometry changed")
+        if not self._plans[handle]:
+            raise AssertionError(f"ReadFile plan exhausted for handle {handle:#x}")
+
+        kind, response = self._plans[handle].pop(0)
+        self.events.append(("read", handle, kind))
+        self.read_handles.append(handle)
+        self.live_reads[handle] += 1
+        self.max_live_reads[handle] = max(
+            self.max_live_reads[handle],
+            self.live_reads[handle],
+        )
+        try:
+            if kind == "response":
+                if response is None:
+                    raise AssertionError("response plan requires bytes")
+                self._copy_response(buf, bytes_read_ptr, response)
+                return 1
+            if kind != "block":
+                raise AssertionError(f"unknown ReadFile plan {kind!r}")
+
+            self.started[handle].set()
+            if not self.released[handle].wait(timeout=5.0):
+                self._last_error = 1460  # ERROR_TIMEOUT: test-safety ceiling only.
+                return 0
+            if response is not None:
+                self._copy_response(buf, bytes_read_ptr, response)
+                return 1
+            self._last_error = 995  # ERROR_OPERATION_ABORTED
+            return 0
+        finally:
+            self.live_reads[handle] -= 1
+            self.returned[handle].set()
+
+    def CancelIoEx(self, handle, overlapped_ptr):
+        if handle not in self._plans or overlapped_ptr is not None:
+            raise AssertionError("CancelIoEx must target a planned handle with NULL OVERLAPPED")
+        self.events.append(("cancel", handle))
+        self._last_error = self._cancel_errors.get(handle, 0)
+        result = self._cancel_results.get(handle, True)
+        if result and handle in self._release_on_cancel:
+            self.released[handle].set()
+        return int(result)
+
+    def GetLastError(self):
+        self.events.append(("get_last_error", self._last_error))
+        return self._last_error
+
+    def release_all(self) -> None:
+        for released in self.released.values():
+            released.set()
+        for returned in self.returned.values():
+            returned.wait(timeout=1.0)
+
+
+@unittest.skipUnless(sys.platform == "win32", "kernel32 only present on Windows")
+class TestSettingsServiceHidReadCancellation(unittest.TestCase):
+    _FIRST_HANDLE = 0x6161
+    _SECOND_HANDLE = 0x7171
+    _THIRD_HANDLE = 0x8181
+
+    @staticmethod
+    def _query() -> bytes:
+        return build_read_query_payload(CATEGORY_POLLING_RATE, POLLING_RATE_SUBCOMMAND)
+
+    def _make_service(self, kernel, handles: list[int]):
+        opened: list[int] = []
+        closed: list[int] = []
+
+        def enumerate_paths() -> list[str]:
+            return [_FAKE_PATH]
+
+        def open_read_write_handle(path: str) -> tuple[int | None, int]:
+            if path != _FAKE_PATH or not handles:
+                raise AssertionError("unexpected read+write handle open")
+            handle = handles.pop(0)
+            opened.append(handle)
+            kernel.events.append(("open", handle))
+            return handle, 0
+
+        def write_file(handle: int, payload: bytes) -> tuple[bool, int, int]:
+            if handle not in opened:
+                raise AssertionError("read query used a handle that was never opened")
+            if (
+                len(payload) != HID_FEATURE_REPORT_SIZE
+                or payload[1:5] != MAGIC_READ_QUERY_PREFIX
+                or payload[5] != CATEGORY_POLLING_RATE
+            ):
+                raise AssertionError("read query payload contract changed")
+            kernel.events.append(("write", handle))
+            return True, 0, len(payload)
+
+        def close_handle(handle: int) -> bool:
+            if handle not in opened or handle in closed:
+                raise AssertionError(f"duplicate or unknown CloseHandle({handle:#x})")
+            closed.append(handle)
+            kernel.events.append(("close", handle))
+            return True
+
+        service = SettingsService(
+            enumerate_paths=enumerate_paths,
+            open_read_write_handle=open_read_write_handle,
+            write_file=write_file,
+            close_handle=close_handle,
+        )
+        return service, opened, closed
+
+    def _read_once(self, service: SettingsService, *, timeout_ms: int = 15) -> bytes:
+        return service._read_response(
+            self._query(),
+            expected_cat=CATEGORY_POLLING_RATE,
+            timeout_ms=timeout_ms,
+        )
+
+    def test_cancel_false_poisoned_handle_reopens_before_retry(self) -> None:
+        from zd_app.services import settings_service as ss
+
+        kernel = _StrictReadKernel32(
+            ss,
+            plans={
+                self._FIRST_HANDLE: [("block", None)],
+                self._SECOND_HANDLE: [("response", _make_read_response(value=PollingRate.HZ_8000.value))],
+            },
+            cancel_results={self._FIRST_HANDLE: False},
+            cancel_errors={self._FIRST_HANDLE: 1168},
+        )
+        self.addCleanup(kernel.release_all)
+        service, opened, closed = self._make_service(
+            kernel,
+            [self._FIRST_HANDLE, self._SECOND_HANDLE],
+        )
+
+        with mock.patch.object(ss._Win32, "kernel32", return_value=kernel):
+            with self.assertRaises(ss.StrandedReadTimeout) as ctx:
+                self._read_once(service)
+            self.assertFalse(ctx.exception.cancel_succeeded)
+            self.assertEqual(ctx.exception.cancel_error, 1168)
+            self.assertIn(("get_last_error", 1168), kernel.events)
+            self.assertEqual(closed, [self._FIRST_HANDLE])
+
+            response = self._read_once(service)
+
+        self.assertEqual(response[7], PollingRate.HZ_8000.value)
+        self.assertEqual(opened, [self._FIRST_HANDLE, self._SECOND_HANDLE])
+        self.assertEqual(closed, [self._FIRST_HANDLE])
+        self.assertEqual(kernel.read_handles, [self._FIRST_HANDLE, self._SECOND_HANDLE])
+
+    def test_cancel_true_but_unreaped_reader_poisoned_handle_reopens_before_retry(self) -> None:
+        from zd_app.services import settings_service as ss
+
+        kernel = _StrictReadKernel32(
+            ss,
+            plans={
+                self._FIRST_HANDLE: [("block", None)],
+                self._SECOND_HANDLE: [("response", _make_read_response(value=PollingRate.HZ_4000.value))],
+            },
+            cancel_results={self._FIRST_HANDLE: True},
+            cancel_errors={self._FIRST_HANDLE: 0},
+        )
+        self.addCleanup(kernel.release_all)
+        service, opened, closed = self._make_service(
+            kernel,
+            [self._FIRST_HANDLE, self._SECOND_HANDLE],
+        )
+
+        with mock.patch.object(ss._Win32, "kernel32", return_value=kernel):
+            with self.assertRaises(ss.StrandedReadTimeout) as ctx:
+                self._read_once(service)
+            self.assertTrue(ctx.exception.cancel_succeeded)
+            self.assertIn(("get_last_error", 0), kernel.events)
+            self.assertEqual(closed, [self._FIRST_HANDLE])
+
+            response = self._read_once(service)
+
+        self.assertEqual(response[7], PollingRate.HZ_4000.value)
+        self.assertEqual(opened, [self._FIRST_HANDLE, self._SECOND_HANDLE])
+        self.assertEqual(kernel.read_handles, [self._FIRST_HANDLE, self._SECOND_HANDLE])
+
+    def test_confirmed_cancelled_reader_keeps_cached_handle_for_retry(self) -> None:
+        from zd_app.services import settings_service as ss
+
+        kernel = _StrictReadKernel32(
+            ss,
+            plans={
+                self._FIRST_HANDLE: [
+                    ("block", None),
+                    ("response", _make_read_response(value=PollingRate.HZ_2000.value)),
+                ],
+            },
+            cancel_results={self._FIRST_HANDLE: True},
+            cancel_errors={self._FIRST_HANDLE: 0},
+            release_on_cancel={self._FIRST_HANDLE},
+        )
+        service, opened, closed = self._make_service(kernel, [self._FIRST_HANDLE])
+
+        with mock.patch.object(ss._Win32, "kernel32", return_value=kernel):
+            with self.assertRaises(TimeoutError) as ctx:
+                self._read_once(service)
+            self.assertNotIsInstance(ctx.exception, ss.StrandedReadTimeout)
+            response = self._read_once(service)
+
+        self.assertEqual(response[7], PollingRate.HZ_2000.value)
+        self.assertEqual(opened, [self._FIRST_HANDLE])
+        self.assertEqual(closed, [])
+        self.assertEqual(kernel.read_handles, [self._FIRST_HANDLE, self._FIRST_HANDLE])
+
+    def test_two_sequential_stranded_timeouts_isolate_late_old_completion(self) -> None:
+        from zd_app.services import settings_service as ss
+
+        old_response = _make_read_response(value=PollingRate.HZ_2000.value)
+        fresh_response = _make_read_response(value=PollingRate.HZ_8000.value)
+        kernel = _StrictReadKernel32(
+            ss,
+            plans={
+                self._FIRST_HANDLE: [("block", old_response)],
+                self._SECOND_HANDLE: [("block", None)],
+                self._THIRD_HANDLE: [("response", fresh_response)],
+            },
+            cancel_results={self._FIRST_HANDLE: False, self._SECOND_HANDLE: False},
+            cancel_errors={self._FIRST_HANDLE: 1168, self._SECOND_HANDLE: 1168},
+        )
+        self.addCleanup(kernel.release_all)
+        service, opened, closed = self._make_service(
+            kernel,
+            [self._FIRST_HANDLE, self._SECOND_HANDLE, self._THIRD_HANDLE],
+        )
+
+        with mock.patch.object(ss._Win32, "kernel32", return_value=kernel):
+            with self.assertRaises(ss.StrandedReadTimeout):
+                self._read_once(service)
+            with self.assertRaises(ss.StrandedReadTimeout):
+                self._read_once(service)
+
+            self.assertEqual(opened, [self._FIRST_HANDLE, self._SECOND_HANDLE])
+            self.assertEqual(closed, [self._FIRST_HANDLE, self._SECOND_HANDLE])
+            self.assertEqual(kernel.max_live_reads[self._FIRST_HANDLE], 1)
+            self.assertEqual(kernel.max_live_reads[self._SECOND_HANDLE], 1)
+
+            # Deliver a valid response to the old, poisoned worker before the
+            # next read. Its closure-local result must stay discarded; only the
+            # fresh handle's response may satisfy the new request.
+            kernel.released[self._FIRST_HANDLE].set()
+            self.assertTrue(kernel.returned[self._FIRST_HANDLE].wait(timeout=1.0))
+            response = self._read_once(service)
+
+        self.assertEqual(response, fresh_response)
+        self.assertEqual(
+            kernel.read_handles,
+            [self._FIRST_HANDLE, self._SECOND_HANDLE, self._THIRD_HANDLE],
+        )
+
+    def test_stop_cancels_joins_then_closes_an_unreaped_current_reader(self) -> None:
+        from zd_app.services import settings_service as ss
+
+        kernel = _StrictReadKernel32(
+            ss,
+            plans={self._FIRST_HANDLE: [("block", None)]},
+            cancel_results={self._FIRST_HANDLE: True},
+            cancel_errors={self._FIRST_HANDLE: 0},
+        )
+        service, _opened, closed = self._make_service(kernel, [self._FIRST_HANDLE])
+        failures: list[BaseException] = []
+
+        def read_on_worker() -> None:
+            try:
+                self._read_once(service, timeout_ms=5000)
+            except BaseException as exc:  # expected after stop closes the fake handle
+                failures.append(exc)
+
+        caller = threading.Thread(target=read_on_worker, name="test-settings-read")
+        with mock.patch.object(ss._Win32, "kernel32", return_value=kernel):
+            caller.start()
+            self.addCleanup(caller.join, 1.0)
+            self.addCleanup(kernel.release_all)
+            self.assertTrue(kernel.started[self._FIRST_HANDLE].wait(timeout=1.0))
+
+            started = time.perf_counter()
+            service.stop()
+            elapsed_s = time.perf_counter() - started
+
+            self.assertLess(elapsed_s, 1.0)
+            cancel_index = kernel.events.index(("cancel", self._FIRST_HANDLE))
+            close_index = kernel.events.index(("close", self._FIRST_HANDLE))
+            self.assertLess(cancel_index, close_index)
+            self.assertEqual(closed, [self._FIRST_HANDLE])
+            self.assertIsNone(service._read_write_handle)
+
+            kernel.released[self._FIRST_HANDLE].set()
+            caller.join(timeout=1.0)
+
+        self.assertFalse(caller.is_alive())
+        self.assertEqual(len(failures), 1)
+
+    def test_concurrent_stop_and_read_handle_open_discards_open_candidate(self) -> None:
+        open_entered = threading.Event()
+        allow_open_return = threading.Event()
+        closed: list[int] = []
+        candidate = self._FIRST_HANDLE
+
+        def enumerate_paths() -> list[str]:
+            return [_FAKE_PATH]
+
+        def open_read_write_handle(path: str) -> tuple[int | None, int]:
+            if path != _FAKE_PATH:
+                raise AssertionError("unexpected path")
+            open_entered.set()
+            if not allow_open_return.wait(timeout=1.0):
+                raise AssertionError("test failed to release blocked opener")
+            return candidate, 0
+
+        def close_handle(handle: int) -> bool:
+            if handle != candidate or handle in closed:
+                raise AssertionError("candidate must close exactly once")
+            closed.append(handle)
+            return True
+
+        service = SettingsService(
+            enumerate_paths=enumerate_paths,
+            open_read_write_handle=open_read_write_handle,
+            close_handle=close_handle,
+        )
+        result: list[int | None] = []
+        opener = threading.Thread(
+            target=lambda: result.append(service._ensure_read_write_handle()),
+            name="test-read-handle-open",
+        )
+
+        opener.start()
+        self.addCleanup(opener.join, 1.0)
+        self.addCleanup(allow_open_return.set)
+        self.assertTrue(open_entered.wait(timeout=1.0))
+        service.stop()
+        allow_open_return.set()
+        opener.join(timeout=1.0)
+
+        self.assertFalse(opener.is_alive())
+        self.assertEqual(result, [None])
+        self.assertEqual(closed, [candidate])
+        self.assertIsNone(service._read_write_handle)
+        self.assertIsNone(service.target_path)
+
+
+@unittest.skipUnless(sys.platform == "win32", "real Win32 DLL binding")
+class SettingsServiceKernel32RealDllBindingTests(unittest.TestCase):
+    def test_kernel32_read_cancel_exports_have_expected_geometry(self) -> None:
+        from zd_app.services import settings_service as ss
+
+        kernel32 = ss._Win32.kernel32()
+        expected_read_write = [
+            ss.w.HANDLE,
+            ss.c.c_void_p,
+            ss.w.DWORD,
+            ss.c.POINTER(ss.w.DWORD),
+            ss.c.c_void_p,
+        ]
+        for export in ("ReadFile", "WriteFile"):
+            with self.subTest(export=export):
+                function = getattr(kernel32, export)
+                self.assertEqual(function.argtypes, expected_read_write)
+                self.assertEqual(function.restype, ss.w.BOOL)
+
+        self.assertEqual(kernel32.CancelIoEx.argtypes, [ss.w.HANDLE, ss.c.c_void_p])
+        self.assertEqual(kernel32.CancelIoEx.restype, ss.w.BOOL)
+        self.assertEqual(kernel32.CloseHandle.argtypes, [ss.w.HANDLE])
+        self.assertEqual(kernel32.CloseHandle.restype, ss.w.BOOL)
+
+        self.assertFalse(kernel32.CancelIoEx(ss.INVALID_HANDLE_VALUE, None))
+        self.assertEqual(kernel32.GetLastError(), 6)  # ERROR_INVALID_HANDLE

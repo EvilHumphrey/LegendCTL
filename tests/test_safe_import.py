@@ -16,16 +16,20 @@ import dearpygui.dearpygui as dpg
 from tests.r2_shell_test_helpers import make_shell
 from zd_app import i18n
 from zd_app.models import WrapperProfile
-from zd_app.services.settings_apply_coordinator import ApplyFailure
+from zd_app.services.settings_apply_coordinator import ApplyFailure, ApplyResult
 from zd_app.ui import app_shell as app_shell_module
 from zd_app.services.settings_service import (
     ButtonMapping,
     ButtonSlot,
     ControllerSnapshot,
+    LightingMode,
+    LightingSettings,
+    LightingZone,
     MotionMappingMode,
     MotionMappingTarget,
     MotionSettings,
     PollingRate,
+    RgbColor,
     SensitivityAnchor,
     StickDeadzones,
     TriggerMode,
@@ -827,7 +831,7 @@ class ApplyVerifyTests(_DpgTestCase):
     no mismatched and no unverifiable applied fields.
     """
 
-    def _apply_shell(self) -> tuple:
+    def _apply_shell(self, **snapshot_overrides) -> tuple:
         """A scanned shell whose apply stub records the applied snapshot."""
 
         shell = make_shell(settings_service=MagicMock())
@@ -840,7 +844,7 @@ class ApplyVerifyTests(_DpgTestCase):
 
         shell._apply_snapshot_to_controller = MagicMock(side_effect=fake_apply)
         self._full_ui(shell)
-        self._scan(shell, _export_dict())
+        self._scan(shell, _export_dict(**snapshot_overrides))
         return shell, applied
 
     def test_matching_readback_yields_verified(self) -> None:
@@ -905,6 +909,74 @@ class ApplyVerifyTests(_DpgTestCase):
         self.assertEqual(audit.verify_unverifiable, [])
         joined = "\n".join(self._labels(safe_import.RESULT_MODAL))
         self.assertIn(i18n.t("apply.result.sens_8point_downgraded"), joined)
+
+    def test_matching_final_read_supersedes_inconclusive_verified_write(self) -> None:
+        shell, applied = self._apply_shell()
+
+        def fake_apply(snapshot):
+            applied["snapshot"] = snapshot
+            return ApplyResult(
+                unverified_writes=("step_size",),
+            )
+
+        shell._apply_snapshot_to_controller = MagicMock(side_effect=fake_apply)
+        shell.restore_point_service.read_current_state_with_provenance = MagicMock(
+            side_effect=lambda: (applied["snapshot"], {}, {})
+        )
+
+        with patch("zd_app.ui.app_shell.time.sleep"):
+            shell.safe_import_apply(apply_to_controller=True)
+
+        audit = shell._safe_import_result.audit
+        self.assertEqual(audit.unverified_writes, ())
+        self.assertEqual(audit.controller_write, "verified")
+        self.assertTrue(audit.verified)
+        self.assertEqual(audit.verify_mismatched, [])
+        self.assertEqual(audit.verify_unverifiable, [])
+        joined = "\n".join(self._labels(safe_import.RESULT_MODAL))
+        self.assertNotIn(i18n.t("apply.result.write_unverified"), joined)
+
+    def test_final_read_keeps_only_unmatched_lighting_disclosure(self) -> None:
+        lighting = LightingSettings(
+            True,
+            LightingMode.ALWAYS_ON,
+            200,
+            RgbColor(10, 20, 30),
+        )
+        shell, applied = self._apply_shell(
+            lighting_zones={LightingZone.HOME: lighting},
+        )
+
+        def fake_apply(snapshot):
+            applied["snapshot"] = snapshot
+            return ApplyResult(
+                unverified_writes=("step_size", "lighting_HOME"),
+            )
+
+        shell._apply_snapshot_to_controller = MagicMock(side_effect=fake_apply)
+        shell.restore_point_service.read_current_state_with_provenance = MagicMock(
+            side_effect=lambda: (
+                dataclasses.replace(
+                    applied["snapshot"],
+                    lighting_zones={
+                        LightingZone.HOME: dataclasses.replace(lighting, light_on=False),
+                    },
+                ),
+                {},
+                {},
+            )
+        )
+
+        with patch("zd_app.ui.app_shell.time.sleep"):
+            shell.safe_import_apply(apply_to_controller=True)
+
+        audit = shell._safe_import_result.audit
+        self.assertEqual(audit.unverified_writes, ("lighting_HOME",))
+        self.assertEqual(audit.controller_write, "sent")
+        self.assertFalse(audit.verified)
+        self.assertEqual(audit.verify_mismatched, ["lighting_zones[HOME]"])
+        joined = "\n".join(self._labels(safe_import.RESULT_MODAL))
+        self.assertIn(i18n.t("apply.result.write_unverified"), joined)
 
     def test_mismatched_readback_downgrades_to_sent_and_names_field(self) -> None:
         shell, applied = self._apply_shell()

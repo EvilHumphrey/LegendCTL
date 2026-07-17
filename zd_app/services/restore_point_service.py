@@ -718,6 +718,11 @@ class RestorePointService:
             apply_result,
             read_errors,
         )
+        unverified_writes = _unverified_writes_after_final_restore_read(
+            getattr(apply_result, "unverified_writes", ()),
+            field_outcomes,
+            verified_snapshot,
+        )
 
         wrote_succeeded = sum(1 for f in field_outcomes if f.write_succeeded)
         write_failed = sum(1 for f in field_outcomes if not f.write_succeeded)
@@ -744,6 +749,7 @@ class RestorePointService:
             before_restore_point_id=before_id,
             completed_at=completed_at,
             sensitivity_downgrades=apply_result.sensitivity_downgrades,
+            unverified_writes=unverified_writes,
         )
 
         # 6. Persist RestoreAttemptRecord onto the restore point.
@@ -1050,7 +1056,7 @@ def verify_applied_snapshot(
     """Compare a just-applied snapshot against a post-apply device read-back.
 
     The reusable honest-measurement core for "verified" claims outside
-    ``restore()``: WriteFile ACKs do NOT mean the firmware committed (the
+    ``restore()``: WriteFile success does NOT mean the firmware committed (the
     in-burst rejection family documented in
     :mod:`zd_app.services.settings_apply_coordinator`), so a caller that
     applied ``applied`` and re-read the device as ``readback`` calls this to
@@ -1345,6 +1351,27 @@ def _apply_labels_for(name: str, snapshot: ControllerSnapshot) -> list[str]:
             for slot in (snapshot.back_paddle_bindings or {}).keys()
         ]
     return []
+
+
+def _unverified_writes_after_final_restore_read(
+    unverified_writes: Iterable[str],
+    field_outcomes: Iterable[RestoreFieldOutcome],
+    sent_snapshot: ControllerSnapshot,
+) -> tuple[str, ...]:
+    """Drop setter disclosures superseded by a matching final restore read.
+
+    Restore outcomes use snapshot field names. "_apply_labels_for" preserves
+    the existing mapping from those fields to coordinator labels, including one
+    "lighting_ZONE" label per lighting-zone entry.
+    """
+
+    labels_with_final_match = {
+        label
+        for outcome in field_outcomes
+        if outcome.verify_matched is True
+        for label in _apply_labels_for(outcome.field_name, sent_snapshot)
+    }
+    return tuple(label for label in unverified_writes if label not in labels_with_final_match)
 
 
 def _build_restore_preview(

@@ -898,6 +898,63 @@ class RestoreFlowTests(unittest.TestCase):
             self.assertEqual(result.mismatched, 0)
             self.assertGreater(result.attempted, 0)
 
+    def test_restore_final_match_supersedes_inconclusive_step_size_disclosure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = _full_populated_stub()
+            service, _stub, _store = _make_service(tmpdir=tmp, settings_stub=stub)
+            captured = service.capture(_basic_trigger(), device_identity=_identity())
+            assert captured is not None
+
+            original_set_step_size_verified = stub.set_step_size_verified
+
+            def set_step_size_verified_inconclusive(value, attempts=3, settle_s=0.1):
+                result = original_set_step_size_verified(value, attempts, settle_s)
+                result.verify_inconclusive = True
+                return result
+
+            stub.set_step_size_verified = set_step_size_verified_inconclusive
+            result = service.restore(captured.id)
+
+            self.assertEqual(result.unverified_writes, ())
+            self.assertEqual(result.label, RestoreResultLabel.VERIFIED)
+            step_size = next(
+                field for field in result.fields if field.field_name == "step_size"
+            )
+            self.assertIs(step_size.verify_matched, True)
+
+    def test_restore_final_match_supersedes_inconclusive_lighting_disclosure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = _full_populated_stub()
+            service, _stub, _store = _make_service(tmpdir=tmp, settings_stub=stub)
+            captured = service.capture(_basic_trigger(), device_identity=_identity())
+            assert captured is not None
+
+            original_set_zone_lighting_verified = stub.set_zone_lighting_verified
+
+            def set_zone_lighting_verified_inconclusive(
+                zone,
+                settings,
+                attempts=3,
+                settle_s=0.1,
+            ):
+                result = original_set_zone_lighting_verified(
+                    zone,
+                    settings,
+                    attempts,
+                    settle_s,
+                )
+                result.verify_inconclusive = True
+                return result
+
+            stub.set_zone_lighting_verified = set_zone_lighting_verified_inconclusive
+            result = service.restore(captured.id)
+
+            self.assertEqual(result.unverified_writes, ())
+            lighting = next(
+                field for field in result.fields if field.field_name == "lighting_zones"
+            )
+            self.assertIs(lighting.verify_matched, True)
+
     def test_restore_partial_when_one_field_write_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             stub = _full_populated_stub()

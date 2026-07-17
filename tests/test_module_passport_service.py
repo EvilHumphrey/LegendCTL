@@ -482,17 +482,33 @@ class SideValidationTests(BaseServiceTestCase):
         # Defense-in-depth: a directly-constructed passport with a tampered side
         # (the load boundary normally rejects it) must not archive to a path
         # outside the archive dir — _archive_existing validates side first.
-        bad = ModulePassport(
-            side="../../evil",
-            module_id="STOCK",
-            assigned_at_utc="2026-05-26T18:00:00Z",
-            notes="",
-        )
-        with self.assertRaises(ValueError):
-            self.service._archive_existing(bad)
-        # Nothing was written anywhere under (or above) the base dir.
-        self.assertEqual(list(self.base.rglob("*evil*")), [])
-        self.assertEqual(list(self.base.parent.glob("*evil*")), [])
+        #
+        # Use a private, deeply-nested root so an upward path-traversal write
+        # would still land inside our isolated tree, and so the "*evil*" sweep
+        # cannot collide with unrelated files that happen to sit in the shared
+        # system temp dir (e.g. leftover winget "branch-EvilHumphrey.*" files).
+        with tempfile.TemporaryDirectory() as isolated:
+            root = Path(isolated)
+            nested = root / "sandbox" / "nested"
+            nested.mkdir(parents=True)
+            service = ModulePassportService(
+                base_dir=nested / "passports",
+                wear_ledger=WearLedgerService(
+                    base_dir=nested / "ledger", utc_now=self.clock
+                ),
+                utc_now=self.clock,
+            )
+            bad = ModulePassport(
+                side="../../evil",
+                module_id="STOCK",
+                assigned_at_utc="2026-05-26T18:00:00Z",
+                notes="",
+            )
+            with self.assertRaises(ValueError):
+                service._archive_existing(bad)
+            # Nothing was written anywhere in the isolated tree — including the
+            # levels above base_dir that an "../../" traversal could reach.
+            self.assertEqual(list(root.rglob("*evil*")), [])
 
 
 class IsolationTests(BaseServiceTestCase):

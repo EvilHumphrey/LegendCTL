@@ -3022,9 +3022,12 @@ class AppShell:
         message: str | LogEntry | ComposedLogEntry,
         apply_result: ApplyResult,
     ) -> str | LogEntry | ComposedLogEntry:
-        if not getattr(apply_result, "sensitivity_downgrades", ()):
-            return message
-        return _with_log_note_keys(message, "apply.result.sens_8point_downgraded")
+        note_keys = []
+        if getattr(apply_result, "sensitivity_downgrades", ()):
+            note_keys.append("apply.result.sens_8point_downgraded")
+        if getattr(apply_result, "unverified_writes", ()):
+            note_keys.append("apply.result.write_unverified")
+        return _with_log_note_keys(message, *note_keys)
 
     def list_wrapper_profiles(self) -> list[WrapperProfile]:
         try:
@@ -3321,7 +3324,7 @@ class AppShell:
         The retry flow always retries the LAST apply's failures (no profile
         name matching needed), so labels that succeeded on retry can be
         removed from the record's ``failed_fields`` — their recorded values
-        are now ACKed on the device. Labels still failing stay. No record →
+        now have successful write outcomes. Labels still failing stay. No record →
         nothing to update (e.g. the apply predates this feature or recording
         failed). Never raises into the retry job.
         """
@@ -5118,7 +5121,8 @@ class AppShell:
         success = _settings_outcome_is_success(result.outcome)
         if success and rate is PollingRate.HZ_8000:
             # 8000 Hz is the one rate with a firmware-capability cliff: it needs
-            # controller fw v1.18+. On a pre-1.18 device the WriteFile still ACKs,
+            # controller fw v1.18+. On a pre-1.18 device the WriteFile still
+            # succeeds,
             # but the firmware silently keeps its previous (lower) rate. Confirm
             # the commit with ONE read-back — the same get_polling_rate() the
             # hydrate path already uses — fired ONLY on an 8000 Hz selection, so
@@ -5135,7 +5139,8 @@ class AppShell:
                     no_restore_point=no_restore_point,
                 )
             # committed is HZ_8000 (capable device honoured it) or None
-            # (unverifiable — fail safe by trusting the ACK rather than crying
+            # (unverifiable — fail safe by relying on the successful write
+            # outcome rather than crying
             # non-commit on a transient read miss). Either way, fall through to
             # the normal success path below.
         if success:
@@ -5158,8 +5163,9 @@ class AppShell:
         HID read — not the full ~27-round-trip settings batch) and never lets a
         read failure crash the apply: any error or unreadable response yields
         ``None``, which the caller treats as "could not confirm" and falls back
-        to trusting the write ACK. An unverifiable 8K must never masquerade as a
-        non-commit (fail-safe: unknown capability never blocks a capable device).
+        to relying on the successful WriteFile outcome. An unverifiable 8K
+        must never masquerade as a non-commit (fail-safe: unknown capability
+        never blocks a capable device).
         """
 
         try:
@@ -6606,6 +6612,9 @@ class AppShell:
             audit.sensitivity_downgrades = tuple(
                 getattr(apply_result, "sensitivity_downgrades", ())
             )
+            audit.unverified_writes = tuple(
+                getattr(apply_result, "unverified_writes", ())
+            )
             if apply_result.failed:
                 audit.controller_write = "sent"
                 audit.verified = False
@@ -6706,21 +6715,52 @@ class AppShell:
         )
         return rp.title if rp is not None else None
 
+    @staticmethod
+    def _unverified_writes_after_final_safe_import_read(
+        unverified_writes: tuple[str, ...],
+        mismatched: list[str],
+        unverifiable: list[str],
+    ) -> tuple[str, ...]:
+        """Keep setter disclosures only when the final flow read also lacks proof.
+
+        "unverified_writes" uses the apply-coordinator labels, whereas
+        verify_applied_snapshot reports snapshot field names. Step size maps
+        directly; each lighting setter label maps to its specific
+        "lighting_zones[ZONE]" entry. Unknown labels stay disclosed because
+        this flow has no proved mapping for them.
+        """
+
+        final_unverified = set(mismatched) | set(unverifiable)
+        remaining: list[str] = []
+        for label in unverified_writes:
+            if label == "step_size":
+                final_field = "step_size"
+            elif label.startswith("lighting_"):
+                zone_name = label.removeprefix("lighting_")
+                final_field = f"lighting_zones[{zone_name}]"
+            else:
+                remaining.append(label)
+                continue
+            if final_field in final_unverified:
+                remaining.append(label)
+        return tuple(remaining)
+
     def _verify_safe_import_write(
         self,
         snapshot: ControllerSnapshot,
         audit: safe_import_model.ImportAudit,
         apply_result: ApplyResult,
     ) -> None:
-        """Earn ``audit.controller_write = "verified"`` by read-back, never by ACKs.
+        """Earn ``audit.controller_write = "verified"`` by read-back, never by
+        a write outcome alone.
 
-        WriteFile-OK does not mean the firmware committed (the in-burst
+        A successful WriteFile call does not mean the firmware committed (the in-burst
         rejection family documented in settings_apply_coordinator), so after a
-        fully-ACKed Safe Import apply the device is read back and compared
-        against what was applied — the same honesty Restore Points already
-        practices. Anything short of a clean comparison downgrades to "sent"
-        with the reason stashed on the audit; verify is best-effort and must
-        never crash the apply flow.
+        Safe Import apply whose write calls succeeded the device is read back
+        and compared against what was applied — the same honesty Restore Points
+        already practices. Anything short of a clean comparison downgrades to
+        "sent" with the reason stashed on the audit; verify is best-effort and
+        must never crash the apply flow.
         """
 
         audit.verify_mismatched = []
@@ -6752,7 +6792,12 @@ class AppShell:
         )
         audit.verify_mismatched = mismatched
         audit.verify_unverifiable = unverifiable
-        if mismatched or unverifiable:
+        audit.unverified_writes = self._unverified_writes_after_final_safe_import_read(
+            audit.unverified_writes,
+            mismatched,
+            unverifiable,
+        )
+        if mismatched or unverifiable or audit.unverified_writes:
             audit.controller_write = "sent"
             audit.verified = False
         else:
@@ -6764,15 +6809,16 @@ class AppShell:
         if dpg.does_item_exist("support_guide_modal"):
             dpg.delete_item("support_guide_modal")
 
+        guide_title = support_reference.localized_title(guide)
         with dpg.window(
             tag="support_guide_modal",
-            label=guide.title,
+            label=guide_title,
             modal=True,
             width=720,
             height=520,
             no_resize=True,
         ):
-            screen_title(guide.title)
+            screen_title(guide_title)
             dpg.add_text(support_reference.localized_summary(guide), wrap=660)
             dpg.add_spacer(height=8)
             with dpg.child_window(height=340, border=True):
@@ -6780,7 +6826,11 @@ class AppShell:
                     dpg.add_text(f"- {bullet}", wrap=640)
                     dpg.add_spacer(height=4)
             dpg.add_spacer(height=8)
-            dpg.add_text(guide.evidence_note, color=self.COLORS["muted"], wrap=660)
+            dpg.add_text(
+                support_reference.localized_evidence_note(guide),
+                color=self.COLORS["muted"],
+                wrap=660,
+            )
             dpg.add_spacer(height=8)
             dpg.add_button(label=t("support.guide.close"), width=120, callback=lambda: dpg.delete_item("support_guide_modal"))
 

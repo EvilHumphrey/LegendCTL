@@ -939,11 +939,19 @@ class DiagnosticsTrustMatrixTests(unittest.TestCase):
                     i18n.t("trust_matrix.label.unknown"),
                     f"row {index} should be unknown before any device",
                 )
-            # Row 5 (applied) is a static policy row: its chip must be the
-            # row-specific "Verified by read-back", NEVER "Verified from
-            # device" (no device was consulted at render time).
-            self.assertEqual(self._label(5), i18n.t("trust_matrix.label.applied"))
-            self.assertNotEqual(self._label(5), i18n.t("trust_matrix.label.verified"))
+            # Row 5 (applied) is a POLICY row, not an evidence row: it derives
+            # from no signal, so at REAL render time — with no device ever
+            # connected — its chip must read "Verification policy" and must not
+            # be ANY evidence chip. It used to render "Verified by read-back" in
+            # the good/green color right here, in a matrix whose other five rows
+            # correctly said they knew nothing.
+            self.assertEqual(self._label(5), i18n.t("trust_matrix.label.policy"))
+            for evidence in ("verified", "inferred", "unknown"):
+                self.assertNotEqual(
+                    self._label(5),
+                    i18n.t(f"trust_matrix.label.{evidence}"),
+                    f"policy row must not wear the {evidence} chip",
+                )
         finally:
             dpg.destroy_context()
 
