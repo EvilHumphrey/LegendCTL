@@ -2,7 +2,7 @@
 
 Short answers to the common questions, with links to the deeper docs. If your
 question isn't here, check [Discussions](https://github.com/EvilHumphrey/LegendCTL/discussions)
-or [SUPPORT.md](../SUPPORT.md).
+or [SUPPORT.md](https://github.com/EvilHumphrey/LegendCTL/blob/main/.github/SUPPORT.md).
 
 ## Trust & privacy
 
@@ -149,7 +149,7 @@ affiliated with, or endorsed by ZD Gaming. ZD asked the project to carry a short
 disclaimer, which it does verbatim. Trademarks belong to their owners.
 
 ### How do I report a bug or ask a question?
-See [SUPPORT.md](../SUPPORT.md). Reproducible bugs → a **Bug report** Issue;
+See [SUPPORT.md](https://github.com/EvilHumphrey/LegendCTL/blob/main/.github/SUPPORT.md). Reproducible bugs → a **Bug report** Issue;
 questions and "is this expected?" → **Discussions**; hardware that wasn't on the
 bench → a **Compatibility report**. There's no private DM/email support channel —
 keeping it public means the next person finds the answer.

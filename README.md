@@ -172,7 +172,7 @@ profile Apply attempts the same for step size and lighting), while the write-onl
 back-paddle bindings are reported as sent. There is always a **Recovery** path
 (see below), but you are responsible for how you use it.
 
-See [SECURITY.md](SECURITY.md) for the security posture,
+See [SECURITY.md](.github/SECURITY.md) for the security posture,
 [docs/verifying-no-network.md](docs/verifying-no-network.md) to confirm the
 "no network" claim yourself, [NOTICE](NOTICE) for affiliation and third-party
 license details, and the [code-signing policy](docs/code-signing-policy.md) for
@@ -270,7 +270,7 @@ hardware that wasn't on the bench. The important part is that the app is built t
 **report unsupported paths and write-only fields explicitly rather than pretend a
 write succeeded** — and there is always the [Recovery](#recovery--if-your-controller-feels-off)
 path if something looks off. If a setting misbehaves on your unit, please
-[report it](SUPPORT.md) with the requested signature data and logs.
+[report it](.github/SUPPORT.md) with the requested signature data and logs.
 
 See the maintained [compatibility matrix](docs/compatibility-matrix.md) for the
 current evidence ledger and the status taxonomy used for community reports.
@@ -301,7 +301,7 @@ safe? do I need the official app? why the SmartScreen warning? does it phone
 home? will it work on my controller?).
 
 Bug reports and questions are welcome through GitHub. Please read
-[SUPPORT.md](SUPPORT.md) first — it explains what belongs in an **Issue** (a
+[SUPPORT.md](.github/SUPPORT.md) first — it explains what belongs in an **Issue** (a
 reproducible bug, filed with the data the bug-report form asks for) versus a
 **Discussion** (questions and general help), and what this best-effort hobby
 project can and cannot support. There is no private DM or email support

@@ -299,7 +299,7 @@ jobs:
 
     steps:
       - name: Checkout
-        # Needed for RELEASE_NOTES_<tag>.md and gh --verify-tag.
+        # Needed for docs/release-notes/RELEASE_NOTES_<tag>.md and gh --verify-tag.
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Download the built dist from the build job
@@ -369,7 +369,7 @@ jobs:
           # the build job's strict allowlist already validated this tag —
           # this job cannot run unless that guard passed.
           $tag = $env:REF_NAME
-          $notes = "RELEASE_NOTES_$tag.md"
+          $notes = "docs/release-notes/RELEASE_NOTES_$tag.md"
           if (-not (Test-Path -LiteralPath $notes)) {
             throw "Missing $notes — a release ships with real, written notes or not at all."
           }

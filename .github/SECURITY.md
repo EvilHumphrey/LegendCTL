@@ -11,14 +11,14 @@ import-boundary test (`tests/test_import_boundary.py`): it fails the build if an
 shipped module imports a network or injection library, or anything outside the
 app's own packages plus DearPyGui (no-telemetry and no-auto-update follow from
 having no network access). See also
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), "Constraint architecture." These are
+[docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md), "Constraint architecture." These are
 not aspirational promises:
 
 - **Local-only.** All data (settings, wrapper profiles, restore points, wear
   ledger, logs) lives under `%APPDATA%\ZDUltimateLegend\` as plain JSON/JSONL.
 - **No network calls.** The app never connects to the internet — no accounts,
   no remote config, no analytics endpoints. You can confirm this yourself with
-  TCPView — see [docs/verifying-no-network.md](docs/verifying-no-network.md). The
+  TCPView — see [docs/verifying-no-network.md](../docs/verifying-no-network.md). The
   one deliberate exception is the About screen's GitHub links, which hand a URL
   to your **default browser** (a separate process) on click; the app process
   itself still opens no socket and has no network stack or telemetry.
@@ -44,7 +44,7 @@ The released executable is currently **unsigned** (no Authenticode code-signing
 certificate). Distribution is manual: builds are published with their
 `SHA256SUMS.txt` so you can verify integrity before running. Code-signing via
 the SignPath Foundation OSS program is planned — see
-[docs/code-signing-policy.md](docs/code-signing-policy.md). See the README's
+[docs/code-signing-policy.md](../docs/code-signing-policy.md). See the README's
 "Distribution safety" section for what to expect from SmartScreen and antivirus,
 and how to verify the hash.
 

@@ -1,7 +1,7 @@
 # Verifying LegendCTL makes no network connections
 
 LegendCTL claims to be **local-only**: no accounts, no telemetry, no remote
-config, no auto-update — see [SECURITY.md](../SECURITY.md). That claim is
+config, no auto-update — see [SECURITY.md](https://github.com/EvilHumphrey/LegendCTL/blob/main/.github/SECURITY.md). That claim is
 testable, and you don't have to take our word for it. This page shows how to
 confirm it yourself with
 [TCPView](https://learn.microsoft.com/sysinternals/downloads/tcpview), a free

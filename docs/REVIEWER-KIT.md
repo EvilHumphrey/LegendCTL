@@ -99,7 +99,7 @@ LegendCTL's pitch is the inverse, and it's verifiable rather than asserted.
   [Acknowledgments](../README.md#acknowledgments); the code is open and
   test-enforced so the claims are checkable.
 - **Solo, best-effort hobby project** — no support contract; see
-  [SUPPORT.md](../SUPPORT.md).
+  [SUPPORT.md](https://github.com/EvilHumphrey/LegendCTL/blob/main/.github/SUPPORT.md).
 
 ## Assets
 

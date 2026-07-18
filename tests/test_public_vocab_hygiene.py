@@ -2,8 +2,8 @@
 
 Asserts that the user-facing surface — ``zd_app/**/*.py``, the locale JSON
 (``zd_app/i18n/locales/*.json``), ``tools/**/*.py``, ``docs/**/*.md``,
-``.github/`` templates, and the top-level ``CHANGELOG.md`` / ``README.md`` /
-``SECURITY.md`` / ``SUPPORT.md`` — carries no internal-process or
+``.github/`` templates (``SECURITY.md`` / ``SUPPORT.md`` live there), and the
+top-level ``CHANGELOG.md`` / ``README.md`` — carries no internal-process or
 reverse-engineering vocabulary: review-finding tags ("Bug 1", "item N3",
 "polish 2 N1"), parked-feature / release-arc shorthand, dated review/timeline
 references, RE-provenance phrasing ("vendor-app trace", "research replay"),
@@ -75,8 +75,9 @@ def _shipped_files() -> list[Path]:
     # Public-facing docs + the GitHub issue/PR templates.
     files += _rglob("docs", "*.md")
     files += _rglob(".github", "*.md", "*.yml", "*.yaml")
-    # Named top-level docs.
-    for name in ("CHANGELOG.md", "README.md", "SECURITY.md", "SUPPORT.md"):
+    # Named top-level docs. (SECURITY.md and SUPPORT.md live under .github/ and
+    # are already covered by the .github glob above.)
+    for name in ("CHANGELOG.md", "README.md"):
         path = _ROOT / name
         if path.exists():
             files.append(path)
