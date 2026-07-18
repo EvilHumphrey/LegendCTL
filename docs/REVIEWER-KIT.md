@@ -104,10 +104,11 @@ LegendCTL's pitch is the inverse, and it's verifiable rather than asserted.
 ## Assets
 
 - **Demo GIF** (in-repo): [docs/media/legendctl-liveverify-demo.gif](media/legendctl-liveverify-demo.gif)
-- **Screenshots:**
+- **Screenshots** (fresh v2.6.1 captures):
+  - Overview / Home — ![Overview](media/v261-01_home.png)
+  - Trust Matrix — per-row value provenance, with the muted "Verification policy" chip on the applied-changes row — ![Trust Matrix](media/v261-06_trust_matrix.png)
+  - Sticks — deadzones and sensitivity-curve editors — ![Sticks and sensitivity](media/v261-03_sticks_sensitivity.png)
   - Live Verify — live XInput view (the demo GIF above shows a full circularity sweep) — ![Live Verify](media/screenshot-live-verify-circularity.png)
-  - Sensitivity-curve editor — ![Sensitivity curves](media/screenshot-sensitivity-curves.png)
-  - Overview / Home — ![Overview](media/screenshot-overview.png)
 - More screens (dual-stick Live Verify, controller settings, diagnostics) are in
   [docs/media/](media/). Need a specific shot, a higher-res capture, or a short
   clip of a particular flow? Open a Discussion and it's easy to provide.
