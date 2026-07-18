@@ -66,7 +66,7 @@ separately for the supported settings above.
 LegendCTL is built so you don't have to take its privacy claims on faith — you can check them:
 
 - **Open source (MIT).** The full source is on [GitHub](https://github.com/EvilHumphrey/LegendCTL); you can read it
-  or [build it yourself](../README.md#build-from-source). The "deliberately absent" constraints below are enforced by
+  or [build it yourself](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md#build-from-source). The "deliberately absent" constraints below are enforced by
   the test suite, not just promised.
 - **Zero network calls — verifiable.** The LegendCTL process makes no network connections: no telemetry, no analytics,
   no auto-update. You can confirm it in a couple of minutes with the built-in check in
@@ -101,7 +101,7 @@ See the [FAQ](FAQ.md) and, if something's off on your unit, please file a
 - [Deadzone & circularity tuning guide](zd-ultimate-legend-deadzone-circularity.md) — reduce unwanted input; read the live circularity view
 - [Calibration after a stick-module swap](zd-ultimate-legend-stick-swap-calibration.md) — what to test and adjust after hardware changes
 - [SmartScreen, unsigned builds & verifying the SHA-256](install-windows-and-smartscreen.md) — install-trust checks
-- [README](../README.md) — overview, download, Quick Start · [FAQ](FAQ.md) · [Verifying no network access](verifying-no-network.md)
+- [README](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md) — overview, download, Quick Start · [FAQ](FAQ.md) · [Verifying no network access](verifying-no-network.md)
 
 ---
 

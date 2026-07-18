@@ -96,7 +96,7 @@ LegendCTL's pitch is the inverse, and it's verifiable rather than asserted.
 - **Unsigned** today (SmartScreen warning expected; signing is planned via the
   SignPath Foundation OSS program once eligible).
 - **AI-assisted**, human-directed and reviewed — disclosed in the
-  [Acknowledgments](../README.md#acknowledgments); the code is open and
+  [Acknowledgments](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md#acknowledgments); the code is open and
   test-enforced so the claims are checkable.
 - **Solo, best-effort hobby project** — no support contract; see
   [SUPPORT.md](https://github.com/EvilHumphrey/LegendCTL/blob/main/.github/SUPPORT.md).

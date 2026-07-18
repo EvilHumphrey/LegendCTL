@@ -75,14 +75,14 @@ Most likely a **false positive** — but verify rather than assume. LegendCTL is
 self-extracting bundle pattern is a well-known source of heuristic AV false positives; confirm the SHA-256 (above) and,
 if anything still looks off, don't run it. You can cross-check the file on
 [VirusTotal](https://www.virustotal.com/) against many engines (note: VirusTotal submissions are shared with the
-security community). If you'd rather run **zero** packaged binaries, [build from source](../README.md#build-from-source).
+security community). If you'd rather run **zero** packaged binaries, [build from source](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md#build-from-source).
 
 ## Open-source checks: source, release, and local-only docs
 
 Beyond the hash, you can verify the project's claims directly:
 
 - **Read the source** — it's all on [GitHub](https://github.com/EvilHumphrey/LegendCTL), MIT licensed.
-- **Build it yourself** — see [Build from source](../README.md#build-from-source).
+- **Build it yourself** — see [Build from source](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md#build-from-source).
 - **The "deliberately absent" constraints** (no network, no input injection, …) are enforced by the test suite, not
   just promised.
 
@@ -116,4 +116,4 @@ looks like tampering, or a normal issue for a plain mismatch. Include where you 
 - [Official ZD app vs LegendCTL: which tool to use](official-zd-app-vs-legendctl.md)
 - [Verifying no network access](verifying-no-network.md)
 - [FAQ](FAQ.md) — "is it safe?", "why unsigned?", "what does it install?"
-- [README](../README.md) — download and release notes
+- [README](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md) — download and release notes

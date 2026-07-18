@@ -13,53 +13,33 @@
 
 LegendCTL is a free, open-source Windows app for reading and applying ZD Ultimate
 Legend controller settings. It runs **standalone** — it talks directly to the
-controller over USB-HID, so the official ZD app is **not required** to use it. (Firmware
-updates use ZD's **separate** official firmware tool — not the config app, and not
-LegendCTL.) It is
+controller over USB-HID, so the official ZD app is **not required** to use it. It is
 lightweight, fully local, and preserves your configuration across sessions. It
 configures the controller's supported settings — it is not a firmware updater.
+(Firmware updates use ZD's **separate** official firmware tool — not the config
+app, and not LegendCTL.)
 
 > **Independent third-party project. Not developed by, affiliated with, or
 > endorsed by ZD Gaming.** "ZD Gaming" and "ZD Ultimate Legend" are used only
 > to identify the controller this tool is compatible with; all trademarks are
 > the property of their respective owners.
 
-[**⬇ Download the latest release**](https://github.com/EvilHumphrey/LegendCTL/releases/latest) — Windows 10/11, portable ZIP or installer.
+[**⬇ Download the latest release**](https://github.com/EvilHumphrey/LegendCTL/releases/latest) — Windows 10/11, portable ZIP or installer. First launch will likely show a SmartScreen prompt — [here's why, and how to verify your download](docs/install-windows-and-smartscreen.md).
 
-> **First launch shows a SmartScreen prompt — that's expected.** Because the
-> build is currently unsigned, Windows may show "Windows protected your PC" the
-> first time you run it. That's expected for any new unsigned app and is not, by
-> itself, a malware verdict — choose **More info → Run anyway**. You can verify the
-> [download's SHA-256](docs/install-windows-and-smartscreen.md) first if you like.
+## A look at it
 
-**New here, or searching for something specific?** →
-[Official ZD app vs LegendCTL](docs/official-zd-app-vs-legendctl.md) ·
-[Deadzone & circularity tuning](docs/zd-ultimate-legend-deadzone-circularity.md) ·
-[Calibration after a stick-module swap](docs/zd-ultimate-legend-stick-swap-calibration.md) ·
-[SmartScreen & verifying your download](docs/install-windows-and-smartscreen.md) ·
-[FAQ](docs/FAQ.md)
+<p align="center">
+  <img src="docs/media/v261-01_home.png" alt="LegendCTL Home screen — device and profile status, a 'don't take our word for it' trust card, and recent activity" width="100%">
+</p>
 
-## Install
+<p align="center">
+  <img src="docs/media/v261-06_trust_matrix.png" alt="LegendCTL Trust Matrix — each row states where its value came from, with a muted 'Verification policy' chip on the applied-changes row" width="49%">
+  <img src="docs/media/v261-03_sticks_sensitivity.png" alt="LegendCTL stick settings — deadzones and sensitivity-curve editors" width="49%">
+</p>
 
-- **Portable ZIP (recommended):** download `ZDUltimateLegend-v<version>-windows.zip`
-  from the [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest),
-  unzip it anywhere, and run `ZD Ultimate Legend.exe`.
-- **Setup.exe:** download `ZDUltimateLegend-v<version>-Setup.exe` from the
-  [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest) if
-  you want Start Menu and uninstall integration.
-- **winget (planned — not yet available):** once the manifest is accepted into
-  the Windows Package Manager community repo, this will work:
+**Live Verify** reads both sticks straight from XInput. Start a stick test and sweep — each stick's trace fills its circle, sweep-coverage climbs, and the per-stick circularity settles to a percentage, so you can see how round your sticks really are and catch a flat spot or off-center rest. Everything runs locally; no network, no telemetry.
 
-  ```powershell
-  winget install EvilHumphrey.LegendCTL
-  ```
-
-- **Scoop (planned — not yet available):** once the bucket is published, add
-  the LegendCTL bucket and run `scoop install legendctl`.
-
-For the first-run SmartScreen warning, and for checking the published SHA-256
-before you run anything, see the
-[Windows install guide](docs/install-windows-and-smartscreen.md).
+![LegendCTL Live Verify: sweeping both analog sticks while each stick's circularity readout traces its real XInput output and settles to a percentage.](docs/media/legendctl-liveverify-demo.gif)
 
 ## Why LegendCTL?
 
@@ -96,12 +76,95 @@ That's the whole pitch: a small, auditable, no-surprises tool for your controlle
 — open where closed software is opaque, local by design, and honest about what it
 can and can't do.
 
-## Demo and screenshots
+## Install
 
-![LegendCTL Live Verify: sweeping both analog sticks while each stick's circularity readout traces its real XInput output and settles to a percentage.](docs/media/legendctl-liveverify-demo.gif)
+**Two ways to get it, both shipping the exact same wrapper executable** — the
+portable ZIP is the simplest and needs no admin rights; the installer adds
+Start-Menu/uninstaller integration. In the file names below, `<version>` is the
+release number shown on the [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest) page.
 
-**Live Verify** reads both sticks straight from XInput. Start a stick test and sweep — each stick's trace fills its circle, sweep-coverage climbs, and the per-stick circularity settles to a percentage, so you can see how round your sticks really are and catch a flat spot or off-center rest. Everything runs locally; no network, no telemetry.
+- **Portable ZIP (recommended).** Download `ZDUltimateLegend-v<version>-windows.zip`
+  from the [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest),
+  extract anywhere, and run `ZD Ultimate Legend.exe`. No admin, no UAC prompt, no
+  installer; uninstall by deleting the folder. Settings persist in
+  `%APPDATA%\ZDUltimateLegend\` regardless of where the folder lives — so it runs
+  from anywhere, including a thumb drive.
+- **Installer.** Download `ZDUltimateLegend-v<version>-Setup.exe` from the same
+  release. It installs to `%ProgramFiles%\ZDUltimateLegend\` (requires admin — a
+  UAC prompt; installing under Program Files means only administrators can modify
+  the app files), adds a Start Menu entry under "ZD Ultimate Legend Wrapper",
+  registers an uninstaller in Windows Settings → Apps, and optionally adds a
+  desktop shortcut (unchecked by default). The only difference from the ZIP is the
+  install/uninstall machinery; the wrapper itself is identical.
+- **winget / Scoop (planned).** A [Windows Package Manager submission](https://github.com/microsoft/winget-pkgs/pull/402609)
+  is awaiting review/merge in `microsoft/winget-pkgs`; once accepted,
+  `winget install EvilHumphrey.LegendCTL` will work. A Scoop bucket is also planned.
 
+> **A note on names.** The project is named **LegendCTL**, but the application
+> window, Start Menu entry, and executable still carry the legacy name *ZD
+> Ultimate Legend Wrapper* / `ZD Ultimate Legend.exe` — it is the same program,
+> and the download files keep those legacy names too.
+
+### First-run SmartScreen, and verifying your download
+
+Because the build is currently **unsigned** (no Authenticode certificate — see the
+[code-signing policy](docs/code-signing-policy.md) for the SignPath Foundation plan),
+a couple of things are expected and normal on first launch:
+
+- **SmartScreen warning.** The first time you run it, Windows SmartScreen will
+  likely show a "Windows protected your PC" / "unrecognized app" prompt.
+  SmartScreen weighs code signing and download reputation, so the exact behavior
+  can vary (and enterprise policy can change it) — the prompt is not in itself a
+  sign of malware. If you trust the source and have verified the hash (below),
+  choose **More info → Run anyway**.
+- **Verify the published SHA-256.** Every release publishes `SHA256SUMS.txt`,
+  which lists the hash of each downloadable artifact (the `-windows.zip` and the
+  `-Setup.exe`). Confirm your download matches before extracting/running:
+
+  ```powershell
+  Get-FileHash ".\ZDUltimateLegend-v<version>-windows.zip" -Algorithm SHA256
+  ```
+
+  Compare the output against the matching value in `SHA256SUMS.txt`.
+- **Antivirus false positives.** PyInstaller-packaged apps (this is one) are a
+  well-known source of heuristic AV false-positives, because the self-extracting
+  bundle pattern resembles some packers. If your AV flags the build, you can
+  cross-check it on [virustotal.com](https://www.virustotal.com/) against many engines.
+
+The full walkthrough, with screenshots, is in the
+[Windows install guide](docs/install-windows-and-smartscreen.md).
+
+## Disclaimer & risk
+
+ZD Gaming asked that this project carry the following disclaimer, which it
+reproduces verbatim:
+
+> This software is not developed or endorsed by ZD Gaming. Use at your own risk, and any controller issue caused by using this tool is not covered under the official warranty.
+
+Beyond that: LegendCTL is provided **"as is", without warranty of any kind**,
+express or implied, to the maximum extent permitted by applicable law. You
+assume all risk arising from its use. It writes settings to controller hardware
+over USB/HID and reports each field's write outcome; the Restore, Safe Import,
+and inline deadzone flows additionally verify readable fields by read-back (and a
+profile Apply attempts the same for step size and lighting), while the write-only
+back-paddle bindings are reported as sent. There is always a **Recovery** path
+(see below), but you are responsible for how you use it.
+
+See [SECURITY.md](.github/SECURITY.md) for the security posture,
+[docs/verifying-no-network.md](docs/verifying-no-network.md) to confirm the
+"no network" claim yourself, [NOTICE](NOTICE) for affiliation and third-party
+license details, and the [code-signing policy](docs/code-signing-policy.md) for
+how releases are (will be) signed.
+
+## Quick start
+
+1. Plug a ZD Ultimate Legend controller into a USB port.
+2. Launch `ZD Ultimate Legend.exe` (Start Menu shortcut after an installer install,
+   or by extracting the ZIP and double-clicking). On first launch you may see the
+   [SmartScreen prompt](#first-run-smartscreen-and-verifying-your-download) — verify
+   your download and trust the source first, then choose **More info → Run anyway**.
+3. The app auto-reads current controller state on connect.
+4. Adjust settings via the sidebar tabs; click Apply per-tab or in the footer to write.
 
 ## Features
 
@@ -156,104 +219,6 @@ behavior yourself in a couple of minutes — see
 Profile sharing ("Safe Import") exists in the codebase but is dev-gated and parked —
 the Import button is hidden unless the Developer toggle is enabled.
 
-## Disclaimer & risk
-
-ZD Gaming asked that this project carry the following disclaimer, which it
-reproduces verbatim:
-
-> This software is not developed or endorsed by ZD Gaming. Use at your own risk, and any controller issue caused by using this tool is not covered under the official warranty.
-
-Beyond that: LegendCTL is provided **"as is", without warranty of any kind**,
-express or implied, to the maximum extent permitted by applicable law. You
-assume all risk arising from its use. It writes settings to controller hardware
-over USB/HID and reports each field's write outcome; the Restore, Safe Import,
-and inline deadzone flows additionally verify readable fields by read-back (and a
-profile Apply attempts the same for step size and lighting), while the write-only
-back-paddle bindings are reported as sent. There is always a **Recovery** path
-(see below), but you are responsible for how you use it.
-
-See [SECURITY.md](.github/SECURITY.md) for the security posture,
-[docs/verifying-no-network.md](docs/verifying-no-network.md) to confirm the
-"no network" claim yourself, [NOTICE](NOTICE) for affiliation and third-party
-license details, and the [code-signing policy](docs/code-signing-policy.md) for
-how releases are (will be) signed.
-
-## Download
-
-Two ways to get it — the **portable ZIP is the simplest** and needs no admin
-rights; the installer adds Start-Menu/uninstaller integration if you prefer it.
-Both ship the exact same wrapper executable. (In the download names below,
-`<version>` is just the release number shown on the [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest) page.)
-
-> **A note on names.** The project is named **LegendCTL**, but the application
-> window, Start Menu entry, and executable still carry the legacy name *ZD
-> Ultimate Legend Wrapper* / `ZD Ultimate Legend.exe` — it is the same program,
-> and the download files below keep those legacy names too.
-
-### Portable ZIP (recommended)
-
-Download `ZDUltimateLegend-v<version>-windows.zip` from the [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest).
-
-Extract anywhere and run `ZD Ultimate Legend.exe` — no admin, no UAC prompt, no
-installer, and you uninstall by deleting the folder. Settings persist in
-`%APPDATA%\ZDUltimateLegend\` regardless of where the wrapper folder lives. This
-is the low-friction way to try it: run it from anywhere, including a thumb drive,
-even without admin rights.
-
-### Installer
-
-Download `ZDUltimateLegend-v<version>-Setup.exe` from the [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest).
-
-The installer:
-- Installs to `%ProgramFiles%\ZDUltimateLegend\` (requires admin — you'll see a UAC prompt). Installing under Program Files means only administrators can modify the app files, which reduces the risk of the app files being modified by non-administrator processes.
-- Adds a Start Menu entry under "ZD Ultimate Legend Wrapper".
-- Registers an uninstaller in Windows Settings → Apps.
-- Optionally adds a desktop shortcut (unchecked by default).
-
-The only difference between the two is the surrounding install/uninstall
-machinery; the wrapper itself is identical.
-
-### Distribution safety
-
-Releases will be code-signed through the [SignPath Foundation](https://signpath.org)
-free certificate program for open-source projects — see the
-[code-signing policy](docs/code-signing-policy.md). Until that is in place, the
-released executable is **unsigned** (no Authenticode code-signing certificate),
-so a couple of things are expected and normal:
-
-- **SmartScreen warning.** The first time you run it, Windows SmartScreen will
-  likely show a "Windows protected your PC" / "unrecognized app" prompt. That
-  is what Windows shows for any unsigned app — it is not in itself a sign of
-  malware. If you trust the source and have verified the hash (below), choose
-  **More info → Run anyway**.
-- **Verify the published SHA-256.** Every release publishes `SHA256SUMS.txt`,
-  which lists the hash of each downloadable artifact (the `-windows.zip` and the
-  `-Setup.exe`). Confirm your download matches before extracting/running:
-
-  ```powershell
-  Get-FileHash ".\ZDUltimateLegend-v<version>-windows.zip" -Algorithm SHA256
-  ```
-
-  Compare the output against the matching value in `SHA256SUMS.txt`.
-- **Antivirus false positives.** PyInstaller-packaged apps (this is one) are a
-  well-known source of heuristic antivirus false-positives, because the
-  self-extracting bundle pattern resembles some packers. If your AV flags the
-  build, you can upload it to [virustotal.com](https://www.virustotal.com/) to
-  cross-check it against many engines.
-
-## Quick start (released build)
-
-1. Plug a ZD Ultimate Legend controller into a USB port.
-2. Launch `ZD Ultimate Legend.exe` (from the Start Menu shortcut after an
-   installer install, or by extracting the portable ZIP and double-clicking).
-   **On first launch,** because the build is currently unsigned, Windows
-   SmartScreen may show "Windows protected your PC." That's normal for any new
-   unsigned app and not a sign of malware — click **More info → Run anyway**
-   (you can verify the
-   [download's SHA-256](docs/install-windows-and-smartscreen.md) first if you like).
-3. The app auto-reads current controller state on connect.
-4. Adjust settings via the sidebar tabs; click Apply per-tab or in the footer to write.
-
 ## Will it work on my controller?
 
 **If you have a ZD Ultimate Legend, the core settings very likely work.** The app
@@ -282,8 +247,7 @@ this tool or any other), there is always a clear way back:
 
 1. **Official ZD app → "Restore to default".** Open the official ZD Gaming app,
    use its *Restore to default* function, then re-apply your preferred settings.
-   This is the vendor's own known-good reset and the most reliable recovery
-   path.
+   This is the vendor's own known-good reset and the most reliable recovery path.
 2. **Wrapper Restore Points.** Before risky operations this app attempts to
    capture a Restore Point — a snapshot of the app-readable settings. Open **Restore
    Points** in the sidebar and restore an earlier one to roll back the settings
@@ -325,10 +289,9 @@ python -m venv .venv-zd
 ```
 
 `pythonw` (no console window) is preferred over `python` for normal use. If the
-window doesn't appear, re-run with `python` (not `pythonw`) to see startup errors
-in the console.
+window doesn't appear, re-run with `python` to see startup errors in the console.
 
-## Build a release
+**Build a release:**
 
 ```powershell
 .\tools\build_release.ps1
@@ -336,12 +299,11 @@ in the console.
 ```
 
 Output: `dist/ZDUltimateLegend-v<version>/ZD Ultimate Legend.exe` plus a
-windows zip ready for distribution. If [Inno Setup 6](https://jrsoftware.org/isdl.php)
-is installed (`C:\Program Files (x86)\Inno Setup 6\ISCC.exe`), an installer
-`.exe` is also produced. The build script falls back gracefully when Inno
-isn't installed — only the ZIP is produced in that case.
+distributable ZIP. If [Inno Setup 6](https://jrsoftware.org/isdl.php) is installed
+(`C:\Program Files (x86)\Inno Setup 6\ISCC.exe`), an installer `.exe` is produced
+too; the build falls back to ZIP-only when Inno isn't present.
 
-## Run the test suite
+**Run the test suite:**
 
 ```powershell
 .venv-zd\Scripts\python -m unittest discover tests -p "test_*.py"
@@ -383,8 +345,9 @@ where applicable, and every release shipped by the maintainer.
 
 - **Claude** (Anthropic) — primary development, reverse-engineering research, and
   code review, via Claude Code.
-- **Codex** (OpenAI) — independent second-perspective review and escalation.
-- **GPT-5.5 (via Hermes)** — cross-model review and strategy.
+- **Codex / GPT-5.6** (OpenAI) — implementation lanes, independent
+  second-perspective review, and adversarial release gates.
+- **GPT-5.6 / GPT-5.5 (via Hermes)** — cross-model review, localization, and strategy.
 
 This project's posture is honesty by design, so it says that plainly.
 

@@ -74,4 +74,4 @@ Keeping a clean "known-good" profile before experimenting is the cheapest insura
 - [Deadzone & circularity tuning guide](zd-ultimate-legend-deadzone-circularity.md)
 - [Official ZD app vs LegendCTL: which tool to use](official-zd-app-vs-legendctl.md) — tool boundaries
 - [FAQ](FAQ.md) — firmware and support boundaries
-- [README](../README.md) — download and release notes
+- [README](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md) — download and release notes

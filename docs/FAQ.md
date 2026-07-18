@@ -12,9 +12,9 @@ same kinds of values the official app changes. It is **not** a firmware flasher,
 so it can't overwrite firmware. Before risky operations it captures a **Restore
 Point** where one can be taken, wrapper events are recorded to a local
 append-only ledger, and there are two recovery paths back (see
-[Recovery in the README](../README.md#recovery--if-your-controller-feels-off)).
+[Recovery in the README](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md#recovery--if-your-controller-feels-off)).
 That said, it writes to hardware and is provided "as is" — see
-[Disclaimer & risk](../README.md#disclaimer--risk). Nothing can promise zero risk
+[Disclaimer & risk](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md#disclaimer--risk). Nothing can promise zero risk
 when touching hardware, but the safety net is real: every write reports its outcome,
 and the verifying paths read the value back and compare it.
 
@@ -31,14 +31,14 @@ in a couple of minutes.
 
 ### Is it open source? Can I read/build it myself?
 Yes — MIT licensed, the full source is on GitHub, and the README has a
-[Build from source](../README.md#build-from-source) section. The "deliberately
+[Build from source](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md#build-from-source) section. The "deliberately
 absent" constraints (no drivers, no network, no macros, …) are enforced by the
 test suite, not just promised.
 
 ### Was this built with AI?
 Yes — LegendCTL was built with substantial AI assistance, under human direction
 and review throughout: all changes are human-reviewed, and hardware-facing
-changes are tested on a real controller where applicable, before shipping. We say so plainly in the [Acknowledgments](../README.md#acknowledgments) —
+changes are tested on a real controller where applicable, before shipping. We say so plainly in the [Acknowledgments](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md#acknowledgments) —
 honesty is the whole point of the project. The code is fully open and
 test-enforced precisely so you don't have to trust the process; you can read it.
 
@@ -58,7 +58,7 @@ is planned once the project is eligible — see the
 Because the build is currently **unsigned**. That prompt is what Windows shows for
 *any* new unsigned app until it builds download reputation — it is not, by itself,
 a sign of malware. Verify the SHA-256 (above), then choose **More info → Run
-anyway**. Full detail under [Distribution safety](../README.md#distribution-safety).
+anyway**. Full detail under [Distribution safety](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md#distribution-safety).
 
 ### My antivirus flagged it — is it a virus?
 Often a false positive for this packaging pattern — but verify rather than
@@ -125,7 +125,7 @@ LegendCTL — LegendCTL itself is not a firmware updater.
 Polling rate, the button-binding matrix, stick deadzones / sensitivity curves /
 axis inversion / step-size, trigger range & modes, lighting, vibration, and
 back-paddle bindings, plus wrapper profiles and Restore Points. The full list is
-in the README [Features](../README.md#features) section.
+in the README [Features](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md#features) section.
 
 ### Does it have macros, turbo, or rapid-fire?
 No — and that's deliberate. Macros / turbo / automation / input injection / a
