@@ -64,6 +64,15 @@ from zd_app.services.settings_apply_coordinator import (
     result_is_transient as _settings_result_is_transient,
     snapshot_as_sent,
 )
+from zd_app.services.write_verification import (
+    SENSITIVITY_8POINT_RIDERS,
+    all_unverified_outcomes,
+    attempted_fields_as_sent,
+    attempted_fields_from_snapshot,
+    build_field_outcomes,
+    fresh_read,
+    summarize_field_outcomes,
+)
 from zd_app.services.settings_service import (
     AxisInversion,
     BackPaddleBinding,
@@ -123,6 +132,7 @@ from zd_app.ui.safe_import_model import (
     without_device_settings,
 )
 from zd_app.ui.components import (
+    card,
     register_card_theme,
     register_destructive_theme,
     register_table_theme,
@@ -729,24 +739,29 @@ def _make_log_entry(key: str, **fmt_args) -> LogEntry:
 def _with_log_note_keys(
     message: str | LogEntry | ComposedLogEntry,
     *note_keys: str,
+    note_entries: tuple[LogEntry, ...] = (),
 ) -> str | LogEntry | ComposedLogEntry:
-    """Append localized note keys without rendering the base message early."""
+    """Append lazy localized notes without rendering the base message early."""
 
     additions = tuple(key for key in note_keys if key)
-    if not additions:
+    structured_additions = tuple(entry for entry in note_entries if entry)
+    if not additions and not structured_additions:
         return message
     if isinstance(message, ComposedLogEntry):
         base = message.base
         existing = message.note_keys
+        existing_note_entries = message.note_entries
         timestamp = message.timestamp
     else:
         base = message
         existing = ()
+        existing_note_entries = ()
         timestamp = message.timestamp if isinstance(message, LogEntry) else time.strftime("%H:%M:%S")
     return ComposedLogEntry(
         base=base,
         note_keys=tuple(dict.fromkeys((*existing, *additions))),
         timestamp=timestamp,
+        note_entries=(*existing_note_entries, *structured_additions),
     )
 
 
@@ -769,6 +784,18 @@ def _deadzone_verify_status_key(readback, written: "StickDeadzones") -> str:
 def _translate_or_raw(key: str, raw: str) -> str:
     translated = t(key)
     return raw if translated == f"[{key}]" else translated
+
+
+_PROFILE_APPLY_READBACK_8POINT_HOSTS = dict(SENSITIVITY_8POINT_RIDERS)
+
+
+def _profile_apply_readback_field_label(field_name: str) -> str:
+    """Return the readable label for a profile-Apply read-back field."""
+
+    host_name = _PROFILE_APPLY_READBACK_8POINT_HOSTS.get(field_name)
+    if host_name is not None:
+        return f"{_translate_or_raw(f'field.label.{host_name}', host_name)} (8-point)"
+    return _translate_or_raw(f"field.label.{field_name}", field_name)
 
 
 def _format_apply_failure_row(failure: "ApplyFailure") -> str:
@@ -1064,6 +1091,7 @@ class AppShell:
         hid_executor: Callable[..., None] | None = None,
         last_applied_store: LastAppliedStore | None = None,
         xinput_poll_service: "XInputPollService | None" = None,
+        profile_apply_readback_verification_enabled: bool = True,
     ):
         self.device_service = device_service
         self.profile_service = profile_service
@@ -1072,6 +1100,12 @@ class AppShell:
         self.preflight_service = preflight_service or PreflightService()
         self.settings_service = settings_service
         self._apply_coordinator = SettingsApplyCoordinator(settings_service)
+        # Phase 1 seam: no user-facing setting. Tests and future operational
+        # controls can disable the post-profile-Apply read-only sweep without
+        # changing the coordinator's write burst.
+        self._profile_apply_readback_verification_enabled = (
+            profile_apply_readback_verification_enabled
+        )
         # Wear ledger — optional; when None the per-event ledger.append calls
         # below become no-ops. main_zd.py wires a real one; tests can pass an
         # in-memory or temp-dir-backed service to assert event recording.
@@ -1708,6 +1742,13 @@ class AppShell:
                 dpg.add_spacer(width=SPACE_LG)
                 dpg.add_button(tag="footer_read_button", label=t("footer.read"), width=FOOTER_BUTTON_WIDTH, callback=lambda: self.refresh_from_controller())
                 dpg.add_spacer(width=SPACE_LG)
+                dpg.add_button(
+                    tag="footer_apply_readback_details_button",
+                    label=t("apply.readback.details_action"),
+                    callback=lambda *_args: self._open_profile_apply_readback_details_modal(),
+                    show=self._has_profile_apply_readback_verification(),
+                )
+                dpg.add_spacer(width=SPACE_MD)
                 # The live status readout ("Ready.", apply/read results) is the
                 # footer's primary dynamic signal — render it at text.primary so
                 # it stays legible against the bar (wayfinding refinement;
@@ -3023,11 +3064,44 @@ class AppShell:
         apply_result: ApplyResult,
     ) -> str | LogEntry | ComposedLogEntry:
         note_keys = []
+        note_entries: list[LogEntry] = []
         if getattr(apply_result, "sensitivity_downgrades", ()):
             note_keys.append("apply.result.sens_8point_downgraded")
-        if getattr(apply_result, "unverified_writes", ()):
-            note_keys.append("apply.result.write_unverified")
-        return _with_log_note_keys(message, *note_keys)
+        verification = getattr(apply_result, "readback_verification", None)
+        if verification is None:
+            if getattr(apply_result, "unverified_writes", ()):
+                note_keys.append("apply.result.write_unverified")
+        elif verification.mismatched > 0:
+            note_entries.append(
+                _make_log_entry(
+                    "apply.result.readback_mismatch",
+                    n=verification.mismatched,
+                )
+            )
+        elif verification.could_not_verify > 0:
+            note_entries.append(
+                _make_log_entry(
+                    "apply.result.readback_unconfirmed",
+                    n=verification.could_not_verify,
+                )
+            )
+        elif verification.verified_matched > 0 and verification.write_failed == 0:
+            # Only claim "all readable changes were confirmed" when at least one
+            # field was actually confirmed AND no write failed. verified_matched
+            # deliberately counts a write-failed field whose read-back matches
+            # (pre-existing value == requested value is real evidence for the
+            # details view), so without the write_failed gate an all-writes-failed
+            # Apply could read back coincidentally-matching values and emit the
+            # all-verified note right after the partial-failure result. Any write
+            # failure suppresses this note; the partial-apply path carries the
+            # disclosure. (The synthesized whole-sweep-failure path lands here
+            # with verified_matched=0 and is silent for the same reason.)
+            note_entries.append(_make_log_entry("apply.result.readback_all_verified"))
+        return _with_log_note_keys(
+            message,
+            *note_keys,
+            note_entries=tuple(note_entries),
+        )
 
     def list_wrapper_profiles(self) -> list[WrapperProfile]:
         try:
@@ -3706,6 +3780,12 @@ class AppShell:
 
         def job() -> ApplyResult:
             apply_result = self._apply_snapshot_to_controller(snapshot)
+            if not self._attach_profile_apply_readback_verification(
+                snapshot, apply_result
+            ):
+                # Preserve the prior quiet interval when the optional sweep is
+                # disabled or there is no live SettingsService to read.
+                time.sleep(POST_APPLY_READ_SETTLE_S)
             # Phase 2: persist what was actually sent (best-effort, never
             # affects the apply). ``snapshot`` is post device-field filtering;
             # any 8-point rider the coordinator downgraded is stripped by the
@@ -3727,12 +3807,6 @@ class AppShell:
                 },
             )
 
-            # Firmware wants a quiet interval after a write burst before the
-            # next feature-report read batch (same rationale as the apply
-            # coordinator's per-field trailers) — without it the first
-            # post-apply read can hit a transient HID timeout (hardware,
-            # 2026-06-10).
-            time.sleep(POST_APPLY_READ_SETTLE_S)
             # The post-apply read is itself a jobbed flow: inline under the
             # sync default, inline-on-this-worker when threaded (its DPG
             # hydration on_done drains on the render thread either way).
@@ -3744,6 +3818,7 @@ class AppShell:
                 raise outcome  # today's path has no catch at this level
             apply_result: ApplyResult = outcome
             self._last_apply_result = apply_result
+            self._sync_profile_apply_readback_details_action()
             if not apply_result.failed:
                 if apply_result.retry_recoveries:
                     message = _make_log_entry(
@@ -3778,7 +3853,7 @@ class AppShell:
                     message,
                     no_restore_point=no_restore_point,
                 )
-                self._show_apply_failure_modal(apply_result)
+                self._open_profile_apply_readback_details_modal(apply_result)
 
         self._run_hid_job(job, on_done)
 
@@ -3889,6 +3964,94 @@ class AppShell:
             snapshot,
             on_back_paddle_apply=self._remember_back_paddle_binding,
         )
+
+    def _attach_profile_apply_readback_verification(
+        self,
+        snapshot: ControllerSnapshot,
+        apply_result: ApplyResult,
+    ) -> bool:
+        """Attach a best-effort, zero-write post-profile-Apply verification.
+
+        This deliberately lives outside ``SettingsApplyCoordinator.apply_snapshot``:
+        Restore and Safe Import use that write burst and already own their final
+        reads.  A verifier failure does NOT leave ``readback_verification`` as
+        ``None`` (which would let the footer show a clean "write calls completed"
+        result, hide Verification Details, and disclose nothing) — it synthesizes
+        a summary marking every attempted field could-not-verify, so a
+        whole-sweep failure can never present as a caveat-free success. The write
+        result itself is preserved exactly as the pre-verification flow did.
+
+        The sweep-DISABLED path is intentionally different: it returns early
+        without touching ``readback_verification`` (staying ``None`` → legacy
+        footer fallback). Disabled means the read-back feature is off and the app
+        makes no read-back claim; a FAILURE means the feature is on but could not
+        complete, which must disclose. (Disabled is not reached in production —
+        the constructor defaults it True; only tests turn it off.)
+        """
+
+        if (
+            not self._profile_apply_readback_verification_enabled
+            or self.settings_service is None
+        ):
+            return False
+        try:
+            # Reuse the established quiet interval before the existing
+            # post-apply refresh. The shared fresh reader only calls get_*;
+            # it cannot send another controller write.
+            time.sleep(POST_APPLY_READ_SETTLE_S)
+            readback, _read_success, read_errors = fresh_read(self.settings_service)
+            sent_snapshot = snapshot_as_sent(snapshot, apply_result)
+            attempted_fields = attempted_fields_as_sent(
+                attempted_fields_from_snapshot(snapshot), sent_snapshot
+            )
+            outcomes = build_field_outcomes(
+                attempted_fields,
+                sent_snapshot,
+                readback,
+                apply_result,
+                read_errors,
+            )
+            apply_result.readback_verification = summarize_field_outcomes(outcomes)
+        except Exception:  # noqa: BLE001 - verification must never break Apply
+            logger.warning(
+                "profile apply: post-apply read-back verification failed; "
+                "reporting every attempted field as could-not-verify",
+                exc_info=True,
+            )
+            self._attach_all_unverified_readback(snapshot, apply_result)
+        return True
+
+    def _attach_all_unverified_readback(
+        self,
+        snapshot: ControllerSnapshot,
+        apply_result: ApplyResult,
+    ) -> None:
+        """Synthesize a could-not-verify summary after a whole-sweep failure.
+
+        Marks every field the Apply attempted as could-not-verify so the
+        three-valued footer disclosure fires and Verification Details stays
+        reachable — the sweep failing must not silently read as success. Itself
+        best-effort: if even this synthesis raises, leave the bare write result
+        rather than break Apply (the last-resort None case, logged loudly).
+        """
+
+        try:
+            sent_snapshot = snapshot_as_sent(snapshot, apply_result)
+            attempted_fields = attempted_fields_as_sent(
+                attempted_fields_from_snapshot(snapshot), sent_snapshot
+            )
+            outcomes = all_unverified_outcomes(
+                attempted_fields,
+                sent_snapshot,
+                apply_result,
+                reason="post-apply read-back sweep failed",
+            )
+            apply_result.readback_verification = summarize_field_outcomes(outcomes)
+        except Exception:  # noqa: BLE001 - the fallback itself must never break Apply
+            logger.exception(
+                "profile apply: could-not-verify synthesis failed; "
+                "retaining bare write result"
+            )
 
     def _show_crash_review_modal_if_any(self) -> None:
         """Surface unread crash reports from prior runs in a modal dialog.
@@ -4180,41 +4343,96 @@ class AppShell:
         return True
 
     def _show_apply_failure_modal(self, apply_result: ApplyResult) -> None:
-        if not self._dpg_context_ready or not apply_result.failed:
+        verification = getattr(apply_result, "readback_verification", None)
+        if (
+            not self._dpg_context_ready
+            or (not apply_result.failed and verification is None)
+        ):
             return
         if dpg.does_item_exist("apply_failure_modal"):
             dpg.delete_item("apply_failure_modal")
 
+        # Preserve the pre-Phase-2 Safe Import and no-sweep failure modal byte
+        # for byte: this shared entry point is still called directly there.
+        if verification is None:
+            with dpg.window(
+                tag="apply_failure_modal",
+                label=t("apply.partial_failure_title"),
+                modal=True,
+                no_close=False,
+                no_resize=True,
+                width=520,
+                height=300,
+            ):
+                subtitle = t("apply.partial_failure_subtitle").format(
+                    count=len(apply_result.failed),
+                )
+                dpg.add_text(subtitle, wrap=480)
+                dpg.add_spacer(height=8)
+                with dpg.child_window(height=150, border=True):
+                    for failure in apply_result.failed:
+                        dpg.add_text(
+                            f"- {_format_apply_failure_row(failure)}",
+                            wrap=460,
+                        )
+                dpg.add_spacer(height=8)
+                with dpg.group(horizontal=True):
+                    dpg.add_button(
+                        label=t("apply.retry_failed_button"),
+                        width=150,
+                        callback=lambda *args: self._retry_failed_settings(
+                            list(apply_result.failed),
+                            originating_result=apply_result,
+                        ),
+                    )
+                    dpg.add_button(
+                        label=t("apply.dismiss_button"),
+                        width=110,
+                        callback=lambda *args: dpg.delete_item(
+                            "apply_failure_modal",
+                        ),
+                    )
+            return
+
         with dpg.window(
             tag="apply_failure_modal",
-            label=t("apply.partial_failure_title"),
+            label=(
+                t("apply.partial_failure_title")
+                if apply_result.failed
+                else t("apply.readback.details_action")
+            ),
             modal=True,
             no_close=False,
             no_resize=True,
-            width=520,
-            height=300,
+            width=720,
+            height=680,
         ):
-            subtitle = t("apply.partial_failure_subtitle").format(
-                count=len(apply_result.failed),
-            )
-            dpg.add_text(subtitle, wrap=480)
-            dpg.add_spacer(height=8)
-            with dpg.child_window(height=150, border=True):
-                for failure in apply_result.failed:
-                    dpg.add_text(
-                        f"- {_format_apply_failure_row(failure)}",
-                        wrap=460,
-                    )
-            dpg.add_spacer(height=8)
-            with dpg.group(horizontal=True):
-                dpg.add_button(
-                    label=t("apply.retry_failed_button"),
-                    width=150,
-                    callback=lambda *args: self._retry_failed_settings(
-                        list(apply_result.failed),
-                        originating_result=apply_result,
-                    ),
+            if apply_result.failed:
+                subtitle = t("apply.partial_failure_subtitle").format(
+                    count=len(apply_result.failed),
                 )
+                dpg.add_text(subtitle, wrap=680)
+                dpg.add_spacer(height=8)
+                with dpg.child_window(height=150, border=True):
+                    for failure in apply_result.failed:
+                        dpg.add_text(
+                            f"- {_format_apply_failure_row(failure)}",
+                            wrap=660,
+                        )
+                dpg.add_spacer(height=SPACE_MD)
+
+            self._render_profile_apply_readback_details(verification)
+            dpg.add_spacer(height=SPACE_MD)
+            with dpg.group(horizontal=True):
+                if apply_result.failed:
+                    dpg.add_button(
+                        label=t("apply.retry_failed_button"),
+                        width=150,
+                        callback=lambda *args: self._retry_failed_settings(
+                            list(apply_result.failed),
+                            originating_result=apply_result,
+                        ),
+                    )
                 dpg.add_button(
                     label=t("apply.dismiss_button"),
                     width=110,
@@ -4222,6 +4440,114 @@ class AppShell:
                         "apply_failure_modal",
                     ),
                 )
+
+    def _has_profile_apply_readback_verification(self) -> bool:
+        return getattr(self._last_apply_result, "readback_verification", None) is not None
+
+    def _sync_profile_apply_readback_details_action(self) -> None:
+        if not self._dpg_context_ready:
+            return
+        self._set_widget_shown(
+            "footer_apply_readback_details_button",
+            self._has_profile_apply_readback_verification(),
+        )
+
+    def _open_profile_apply_readback_details_modal(
+        self,
+        apply_result: ApplyResult | None = None,
+    ) -> None:
+        """Open profile Apply failures and read-back details through the modal seam."""
+
+        apply_result = apply_result or self._last_apply_result
+        if apply_result is None:
+            return
+        if not apply_result.failed and getattr(apply_result, "readback_verification", None) is None:
+            return
+        # There is no modal to render in headless/synchronous test paths. Keep
+        # their direct callback contract while live DPG uses the frame-gap seam.
+        if not self._dpg_context_ready:
+            self._show_apply_failure_modal(apply_result)
+            return
+        self._defer_modal_swap(
+            lambda: self._show_apply_failure_modal(apply_result),
+            delete_tags=("apply_failure_modal",),
+            key="profile_apply_details",
+        )
+
+    def _render_profile_apply_readback_details(self, verification) -> None:
+        """Render the Phase-1 per-field sweep with Restore's result idioms."""
+
+        with dpg.child_window(border=True, auto_resize_y=True, autosize_y=False):
+            dpg.add_text(
+                t("restore_points.result.counts.attempted", n=verification.attempted)
+            )
+            dpg.add_text(
+                t(
+                    "restore_points.result.counts.wrote_succeeded",
+                    n=verification.wrote_succeeded,
+                )
+            )
+            dpg.add_text(
+                t("restore_points.result.counts.write_failed", n=verification.write_failed)
+            )
+            dpg.add_text(
+                t(
+                    "restore_points.result.counts.verified_matched",
+                    n=verification.verified_matched,
+                )
+            )
+            dpg.add_text(
+                t(
+                    "restore_points.result.counts.could_not_verify",
+                    n=verification.could_not_verify,
+                )
+            )
+            dpg.add_text(
+                t("restore_points.result.counts.mismatched", n=verification.mismatched)
+            )
+
+        dpg.add_spacer(height=SPACE_MD)
+        dpg.add_text(
+            t("apply.readback.detail_note"),
+            color=self.COLORS["muted"],
+            wrap=680,
+        )
+        if not verification.fields:
+            return
+
+        dpg.add_spacer(height=SPACE_MD)
+        with card(fit=True):
+            dpg.add_text(
+                t("restore_points.result.field_details"),
+                color=self.COLORS["text"],
+            )
+            for outcome in verification.fields:
+                write_marker = "ok" if outcome.write_succeeded else "FAIL"
+                if outcome.verify_matched is True:
+                    verify_marker = "matched"
+                elif outcome.verify_matched is False:
+                    verify_marker = "mismatch"
+                else:
+                    verify_marker = "unverified"
+                row = (
+                    f"  {_profile_apply_readback_field_label(outcome.field_name)}: "
+                    f"write={write_marker} verify={verify_marker}"
+                )
+                if outcome.write_error:
+                    row += f"  ({outcome.write_error})"
+                if outcome.verify_matched is None and outcome.verify_note:
+                    row += f"  ({outcome.verify_note})"
+                dpg.add_text(row, color=self.COLORS["muted"])
+                if (
+                    outcome.verify_matched is False
+                    and outcome.expected_value is not None
+                    and outcome.observed_value is not None
+                ):
+                    dpg.add_text(
+                        f"      expected: {outcome.expected_value}, "
+                        f"observed: {outcome.observed_value}",
+                        color=self.COLORS["muted"],
+                    )
 
     def _retry_failed_settings(
         self,
@@ -4279,6 +4605,7 @@ class AppShell:
             retry_result: ApplyResult = outcome
             completed.append(retry_result)
             self._last_apply_result = retry_result
+            self._sync_profile_apply_readback_details_action()
             if retry_result.failed:
                 message = _make_log_entry(
                     "apply.retry.partial",
@@ -6655,6 +6982,10 @@ class AppShell:
             "safe_import.result.saved_as", name=name
         )
         if apply_to_controller and self._last_apply_result is not None:
+            # Safe Import does not attach the profile-Apply sweep. Hide only the
+            # new footer action so it cannot point at a previous profile run;
+            # its established result/modal behavior stays below unchanged.
+            self._sync_profile_apply_readback_details_action()
             message = self._with_sensitivity_downgrade_notice(
                 message, self._last_apply_result
             )

@@ -43,13 +43,24 @@ def _add_font_with_ranges(
     size: int,
     label: str,
     *range_hints: Callable[[], int],
+    force_ranges: bool = False,
 ) -> Optional[int]:
     if not path.exists():
         logger.warning("CJK font missing: %s (%s)", label, path)
         return None
     try:
         font_id = dpg.add_font(str(path), size)
-        if _needs_explicit_cjk_range():
+        # ``force_ranges`` registers the glyph ranges regardless of DPG version.
+        # Measured on dpg 2.2 (2026-07-18 ko wiring): WITHOUT an explicit range
+        # hint, Hangul renders as the fallback/tofu box (get_text_size for a
+        # Hangul string equals a same-length private-use control), and WITH the
+        # Korean range hint it rasterizes at real advances. The
+        # ``_needs_explicit_cjk_range`` gate (skip on dpg>=2) assumes 2.x
+        # auto-loads CJK, which holds only on ImGui-1.92+ dynamic-atlas builds;
+        # forcing the range makes Korean render deterministically on every
+        # dpg 2.x. The zh-CN path is deliberately left on the gate (proven on
+        # the release-pinned dpg; forcing it too is tracked as later hardening).
+        if force_ranges or _needs_explicit_cjk_range():
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 for range_hint in range_hints:
@@ -73,7 +84,11 @@ def _add_font_with_cjk(path: Path, size: int, label: str) -> Optional[int]:
 
 
 def _add_font_with_korean(path: Path, size: int, label: str) -> Optional[int]:
-    return _add_font_with_ranges(path, size, label, lambda: dpg.mvFontRangeHint_Korean)
+    # force_ranges: Korean must render on every dpg 2.x, not only where 2.x
+    # auto-loads CJK glyphs (see _add_font_with_ranges).
+    return _add_font_with_ranges(
+        path, size, label, lambda: dpg.mvFontRangeHint_Korean, force_ranges=True
+    )
 
 
 def _record_font(key: tuple[str, str], font_id: Optional[int]) -> None:

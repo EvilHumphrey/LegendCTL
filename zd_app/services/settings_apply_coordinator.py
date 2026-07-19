@@ -20,6 +20,7 @@ from zd_app.services.settings_service import (
     MacroSlot,
     SettingsService,
 )
+from zd_app.services.write_verification import ApplyReadbackVerification
 
 
 logger = logging.getLogger(__name__)
@@ -104,6 +105,10 @@ class ApplyResult:
     failed: list[ApplyFailure] = field(default_factory=list)
     sensitivity_downgrades: tuple[str, ...] = ()
     unverified_writes: tuple[str, ...] = ()
+    # Profile Apply attaches this best-effort, post-burst read-only result.  It
+    # remains None when no sweep completed, so existing write-only callers keep
+    # their current result semantics.
+    readback_verification: ApplyReadbackVerification | None = None
     no_restore_point: bool = False
 
 

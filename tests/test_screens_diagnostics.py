@@ -816,6 +816,37 @@ class DiagnosticsTabPersistenceHelpersTests(unittest.TestCase):
         finally:
             dpg.destroy_context()
 
+    def test_tag_to_id_resolves_real_integer_item_id(self) -> None:
+        # Real Dear PyGui hands the tab_bar callback the selected tab's INTEGER
+        # item id as app_data, not the "diag_tab_*" alias string the tests
+        # above inject. Before the fix, str(<int id>) never matched the
+        # "diag_tab_" prefix and every real selection fell through to the
+        # "status" default, silently resetting the persisted tab (the v2.6.1
+        # consent-gate "How to verify this" lands on Status bug). Resolve a
+        # REAL int id from a REAL built tab to guard the integer-app_data path
+        # a mocked string invocation cannot exercise.
+        i18n.set_locale("en")
+        settings = AppSettings(developer_panels_visible=False)
+        shell = make_shell(settings_service=MagicMock(), settings=settings)
+        dpg.create_context()
+        try:
+            _build_in_fresh_context(shell)
+            for tab_id in ("guidance", "actions", "status"):
+                int_id = dpg.get_alias_id(f"diag_tab_{tab_id}")
+                self.assertIsInstance(int_id, int)
+                self.assertNotEqual(int_id, 0)
+                self.assertEqual(
+                    diagnostics._diag_tab_tag_to_id(int_id),
+                    tab_id,
+                    f"integer item id for diag_tab_{tab_id} misresolved",
+                )
+            # And through the persistence callback itself.
+            guidance_id = dpg.get_alias_id("diag_tab_guidance")
+            diagnostics._remember_active_tab(shell, guidance_id)
+            self.assertEqual(shell.diagnostics_active_tab, "guidance")
+        finally:
+            dpg.destroy_context()
+
 
 class DiagnosticsDeveloperCardFitTests(unittest.TestCase):
     """Phase-2: Developer-tab cards fit their content (auto_resize_y) so they
@@ -1453,6 +1484,67 @@ class DiagnosticsFrontDoorScrollIsolatedTests(unittest.TestCase):
                     continue
                 self.fail(
                     "Isolated front-door scroll test did not report unittest OK.\n"
+                    f"Return code: {result.returncode}\n"
+                    f"Command: {sys.executable} -m unittest {test_id}\n\n"
+                    f"Child output:\n{output}"
+                )
+
+
+class DiagnosticsTabPersistenceIsolatedTests(unittest.TestCase):
+    """Real-render gate for active-tab persistence under REAL DPG.
+
+    The tab_bar callback's app_data is the selected tab's INTEGER item id
+    under real Dear PyGui, but the mocked suite injects the alias STRING — so
+    ``_diag_tab_tag_to_id`` matched only the string form and every real
+    selection fell through to the ``status`` default, silently resetting the
+    persisted tab. That surfaced as the forced first-run consent-gate "How to
+    verify this" link landing on Status instead of Guidance (v2.6.1 CU smoke).
+    The isolated child drives the REAL integer-app_data callback across
+    rendered frames and gates that the selection survives a rebuild. One
+    subprocess per method — a second DPG context in one process hits the known
+    teardown segfault."""
+
+    _METHODS = (
+        "test_trust_surface_selection_survives_rebuild",
+        "test_real_user_tab_selection_persists_across_rebuild",
+    )
+
+    def test_isolated_real_render_tab_persistence(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        for method in self._METHODS:
+            with self.subTest(method=method):
+                test_id = (
+                    "tests.isolated_diagnostics_tab_persistence."
+                    f"IsolatedDiagnosticsTabPersistenceTest.{method}"
+                )
+                try:
+                    result = subprocess.run(
+                        [sys.executable, "-m", "unittest", test_id],
+                        cwd=repo_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    output_parts: list[str] = []
+                    for part in (exc.stdout, exc.stderr):
+                        if isinstance(part, bytes):
+                            output_parts.append(part.decode(errors="replace"))
+                        elif part:
+                            output_parts.append(part)
+                    self.fail(
+                        "Isolated tab-persistence child hung (native render "
+                        "hang class).\n\nChild output before timeout:\n"
+                        + "\n".join(output_parts)
+                    )
+
+                output = "\n".join(
+                    part for part in (result.stdout, result.stderr) if part
+                )
+                if any(line.strip() == "OK" for line in output.splitlines()):
+                    continue
+                self.fail(
+                    "Isolated tab-persistence test did not report unittest OK.\n"
                     f"Return code: {result.returncode}\n"
                     f"Command: {sys.executable} -m unittest {test_id}\n\n"
                     f"Child output:\n{output}"

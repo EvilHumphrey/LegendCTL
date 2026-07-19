@@ -68,7 +68,17 @@ def is_vmware_workstation_running(
 
 
 def _default_write_warning(msg: str) -> None:
-    sys.stderr.write(msg)
+    # PyInstaller --windowed builds (production) set sys.stderr to None, so a
+    # bare sys.stderr.write() raises AttributeError and — since this runs during
+    # startup before any except — crashes the app before the window ever opens.
+    # When a console stream exists, keep the original behaviour (single write);
+    # when it doesn't, fall back to the rotating file log (the production triage
+    # surface) instead of crashing.
+    stream = sys.stderr
+    if stream is not None:
+        stream.write(msg)
+    else:
+        logger.warning("%s", msg.rstrip())
 
 
 def warn_if_vmware_usb_redirect_active(

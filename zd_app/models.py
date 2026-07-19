@@ -437,6 +437,9 @@ def _normalize_language_code(value: str | None) -> str:
         "Chinese (Simplified)": "zh-CN",
         "简体中文": "zh-CN",
         "zh": "zh-CN",
+        "Korean": "ko",
+        "한국어": "ko",
+        "ko-KR": "ko",
     }.get(value, "en")
 
 

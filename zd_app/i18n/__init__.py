@@ -10,7 +10,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_LOCALES = ("en", "zh-CN")
+SUPPORTED_LOCALES = ("en", "zh-CN", "ko")
 DEFAULT_LOCALE = "en"
 
 _current_locale = DEFAULT_LOCALE
@@ -116,6 +116,50 @@ _REVIEWED_AMBIGUOUS: dict[str, frozenset[str]] = {
         {
             "ui.always_on_d50f042b",
             "controller.choice.lighting_mode.always_on",
+        }
+    ),
+    # NOTE: The Phase-2 profile-Apply field-label literals (Deadzones, Left/Right
+    # trigger, Left/Right stick axis inversion, Left/Right stick sensitivity,
+    # Polling rate, Vibration) were allowlisted here ONLY while field.label.* held
+    # English zh-CN placeholders. The v2.6.2 zh native-review round (2026-07-18) gave
+    # those keys real zh translations that MATCH their sibling contexts (and ko
+    # already matched), so each literal is now genuinely unambiguous and the guard
+    # stays silent on its own. The allowlist entries were removed so a future
+    # drift re-arms the ambiguity warning instead of being suppressed.
+    # ko context-different duplicates (2026-07-18 ko wiring). The same English
+    # literal carries slightly context-varied ko translations across these
+    # keys (zh unified them; ko renders task/label/register-appropriate
+    # variants). All are passed by key, never raw to translate_literal.
+    "Actions": frozenset(
+        {
+            "controller.profiles.col_actions",
+            "diagnostics.tab.actions",
+            "restore_points.list.col.actions",
+            "ui.actions_c3cd636a",
+        }
+    ),
+    "Device vs Profile": frozenset(
+        {
+            "device_vs_profile.title",
+            "nav.device_vs_profile",
+        }
+    ),
+    "Generated": frozenset(
+        {
+            "compat_report.generated_label",
+            "trust_self_check.generated_label",
+        }
+    ),
+    "No diagnostics events yet.": frozenset(
+        {
+            "diagnostics.event_log.empty",
+            "ui.no_diagnostics_events_yet_3957ece8",
+        }
+    ),
+    "This file contained unsupported automation fields. They were blocked and will not be saved or written to the controller.": frozenset(
+        {
+            "badge.automation_blocked.tooltip",
+            "safe_import.categories.automation_hint",
         }
     ),
 }

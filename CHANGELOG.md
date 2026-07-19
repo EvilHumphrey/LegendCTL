@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.6.2 — 2026-07-19
+
+Verification and localization release on top of v2.6.1.
+
+- **Profile Apply now checks every readable value it writes by read-back.** Apply runs the same post-apply read-back sweep
+  as Restore and Safe Import: every readable value it writes is read back and compared against
+  what was sent, with a per-field "Verification details" view and a three-state result line
+  (all confirmed / N couldn't be verified / mismatch reported as fact). Write-only fields are
+  reported as sent, not verified. A verification pass that fails now reports every written field
+  as could-not-verify instead of presenting an unqualified success; failed writes are never
+  counted as "written but unconfirmed", and "all changes confirmed" requires zero write failures.
+- **Trust wording widened to match, in every shipped language.** The first-connect trust card,
+  About disclaimer, Diagnostics trust panel and Trust Matrix "Applied changes" row now state the
+  full read-back scope consistently (v2.6.1 named the narrower step-size-and-lighting scope,
+  which was accurate then).
+  The "Applied changes" row remains a "Verification policy" statement, not per-apply evidence.
+  The new Apply verification strings are fully localized in Simplified Chinese and passed the
+  v2.6.2 zh-CN key, placeholder, and honesty gates.
+- **Korean (한국어) UI.** Full interface localization — 1,931 strings; core terminology confirmed by a
+  native Korean reviewer (a bounded glossary review, not of all strings); trust-critical strings
+  byte-pinned like zh-CN; and explicit Hangul glyph-range
+  registration guarded by a real-render regression test.
+- **Fixed: startup crash with a VMware VM active** — windowed builds crashed writing the VMware
+  USB-passthrough notice to a console stream that doesn't exist in windowed builds.
+- **Fixed: Diagnostics tab selection silently reset to Status** on the next refresh (also the
+  cause of the first-run "How to verify this" link landing on the wrong tab). Real tab selections
+  are now recorded correctly, with a real-rendering regression test.
+
+No new wrapper-written controller settings, no network, nothing uploaded.
+
 ## v2.6.1 — 2026-07-17
 
 Honesty and robustness point release on top of v2.6.0.

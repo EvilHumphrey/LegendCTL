@@ -35,24 +35,32 @@ import secrets
 import time
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Mapping, Optional
+from typing import Callable, Iterable, Mapping, Optional
 
 from zd_app.services.restore_field_formatting import format_field_value
 from zd_app.services.settings_apply_coordinator import (
-    ApplyResult,
     SettingsApplyCoordinator,
     snapshot_as_sent,
+)
+from zd_app.services.write_verification import (
+    WRITE_ONLY_FIELDS as _PREVIEW_EXCLUDED_FIELDS,
+    SENSITIVITY_8POINT_RIDERS as _SENSITIVITY_8POINT_RIDERS,
+    apply_labels_for as _apply_labels_for,
+    attempted_fields_as_sent as _attempted_fields_as_sent,
+    build_field_outcomes as _build_field_outcomes,
+    fresh_read,
+    label_for_restore_result as _label_for,
+    mismatched_collection_entries as _mismatched_collection_entries,
+    readback_differs as _readback_differs,
+    unverified_writes_after_final_read as _unverified_writes_after_final_restore_read,
 )
 from zd_app.services.wear_ledger import WearLedgerService
 from zd_app.services.wear_ledger.models import RP_CAPTURE, RP_DELETE, RP_RESTORE
 from zd_app.services.settings_service import (
-    SENSITIVITY_STICK_LEFT,
-    SENSITIVITY_STICK_RIGHT,
     ButtonSlot,
     ControllerSnapshot,
     LightingZone,
     MacroSlot,
-    SensitivityAnchorTuple8,
     SettingsService,
 )
 from zd_app.storage.restore_point_models import (
@@ -66,13 +74,11 @@ from zd_app.storage.restore_point_models import (
     IdentityConfidence,
     RestoreAttemptRecord,
     RestoreFieldDelta,
-    RestoreFieldOutcome,
     RestorePoint,
     RestorePointCoverage,
     RestorePointTrigger,
     RestorePreview,
     RestoreResult,
-    RestoreResultLabel,
     SkippedFile,
 )
 from zd_app.storage.restore_point_store import RestorePointStore
@@ -112,52 +118,6 @@ _COLLECTION_FIELDS: tuple[tuple[str, CoverageCategory, bool, int], ...] = (
     ("back_paddle_bindings", CoverageCategory.LAYOUT, True, len(MacroSlot)),
     ("lighting_zones", CoverageCategory.COSMETIC, True, len(LightingZone)),
 )
-
-_COLLECTION_FIELD_NAMES: frozenset[str] = frozenset(
-    name for name, _category, _writable, _expected in _COLLECTION_FIELDS
-)
-
-
-# 8-point (cat 0x86) sensitivity curves from 1.2.9 / fw-1.24 controllers. Each
-# entry maps the 8-point snapshot field to its 3-point "host" field. These are
-# deliberately NOT in _SCALAR_FIELDS: the 8-point curve is a richer encoding of
-# the SAME left/right-stick-sensitivity setting (the apply coordinator even
-# shares the host's ``sens_left`` / ``sens_right`` write label), not a new
-# setting. Folding them onto the host means:
-#   * Coverage is unchanged — no per-stick 8-point coverage row, so a legacy
-#     controller (8-point None) sees zero new "not captured" noise and
-#     ``total_supported_count`` stays stable for every device.
-#   * Restore mirrors :class:`SettingsApplyCoordinator`: when the capture
-#     recorded an 8-point curve for a stick whose host sensitivity is
-#     restore-eligible, the rider initially REPLACES the host in the attempted
-#     set. After the coordinator returns, a recorded downgrade converts that
-#     attempted field back to the 3-point host, matching the path actually
-#     written. The host's 3-point value always travels in the filtered snapshot
-#     as the coordinator's per-stick fallback.
-# Capability gating is implicit and safe: a stick only carries a non-None rider
-# value on a device that passed the cat-0x86 probe at capture time, so the rider
-# loop is a no-op on legacy hardware.
-_SENSITIVITY_8POINT_RIDERS: tuple[tuple[str, str], ...] = (
-    ("sensitivity_left_8point", "sensitivity_left"),
-    ("sensitivity_right_8point", "sensitivity_right"),
-)
-
-
-# Fields excluded from :meth:`RestorePointService.compute_restore_preview` even
-# when they are otherwise writable + captured. ``back_paddle_bindings`` is a
-# write-only HID surface — the device has no read path so the preview would
-# always render it as "unreadable" with no diagnostic value. Restore() still
-# writes back_paddles if the RP captured them; the preview just declines to
-# guess at the diff.
-_PREVIEW_EXCLUDED_FIELDS: frozenset[str] = frozenset({"back_paddle_bindings"})
-
-
-# read_errors marker for a getter skipped because the fresh-read batch budget
-# ran out. The "skipped:" prefix matters: the coverage map and the
-# Device-vs-Profile screen distinguish "unreadable" from "legitimately absent"
-# via read_errors, and a budget skip is an UNREADABLE, not an absence.
-_BATCH_BUDGET_SKIP_ERROR = "skipped: batch read budget exhausted"
-
 
 def _utc_now_iso() -> str:
     """ISO-8601 UTC timestamp with ``Z`` suffix to match the documented JSON shape."""
@@ -403,231 +363,15 @@ class RestorePointService:
     def _do_fresh_read(
         self,
     ) -> tuple[ControllerSnapshot, dict[str, object], dict[str, str]]:
-        """Call each ``settings_service.get_*`` and record per-field outcomes.
+        """Delegate the shared fresh-read implementation with Restore's seam."""
 
-        Returns ``(snapshot, read_success_map, read_errors)`` where
-        ``read_success_map`` records what was read successfully (scalar
-        fields: ``bool``; collection fields: ``set`` of captured sub-keys),
-        and ``read_errors`` maps snapshot field names to a short
-        ``"<ExceptionType>: <message>"`` string when the underlying
-        ``settings_service.get_*`` call raised. This lets the restore-verify
-        path surface the actual read failure ("HID read timed out after
-        967ms") on the result page instead of a generic
-        "read-back did not return a value".
-
-        The whole batch shares one wall-clock budget
-        (``batch_read_budget_s`` constructor keyword; 0 or negative disables
-        it), mirroring ``SettingsService.get_all_settings``. Once the deadline
-        passes, every remaining getter is skipped: its snapshot field stays
-        ``None`` (collection read_success sets stay partial/empty) and
-        ``read_errors[field]`` records :data:`_BATCH_BUDGET_SKIP_ERROR` so
-        consumers see an *unreadable* field, never a legitimately absent one.
-        """
-
-        service = self._settings_service
-        read_errors: dict[str, str] = {}
-
-        budget_s = self._batch_read_budget_s
-        deadline = (self._clock() + budget_s) if budget_s > 0 else None
-        issued = 0
-        skipped = 0
-        exhausted = False
-
-        def _within_budget() -> bool:
-            # One guard per getter call. Once the deadline passes, stay
-            # exhausted without consulting the clock again so the whole tail
-            # of the batch is skipped uniformly.
-            nonlocal issued, skipped, exhausted
-            if not exhausted and deadline is not None and self._clock() >= deadline:
-                exhausted = True
-            if exhausted:
-                skipped += 1
-                return False
-            issued += 1
-            return True
-
-        def _mark_skipped(*field_names: str) -> None:
-            # setdefault: a real per-field error recorded earlier in the batch
-            # (possible for collection fields) is more diagnostic than the
-            # generic skip marker — first error wins, like the existing
-            # "not in read_errors" guards below.
-            for field_name in field_names:
-                read_errors.setdefault(field_name, _BATCH_BUDGET_SKIP_ERROR)
-
-        def _budget_call(fn, name: str, *field_names: str):
-            """One scalar getter under the batch budget.
-
-            Skipped: returns ``None`` and marks every impacted snapshot field.
-            Issued: plain ``_safe_call`` with the existing error bookkeeping
-            (multi-key fields like axis inversion mirror the error to every
-            impacted key).
-            """
-
-            if not _within_budget():
-                _mark_skipped(*field_names)
-                return None
-            value, err = _safe_call(fn, name)
-            if err:
-                for field_name in field_names:
-                    read_errors[field_name] = err
-            return value
-
-        polling_rate = _budget_call(
-            service.get_polling_rate, "get_polling_rate", "polling_rate"
+        return fresh_read(
+            self._settings_service,
+            batch_read_budget_s=self._batch_read_budget_s,
+            clock=self._clock,
+            log=logger,
+            log_prefix="restore-point",
         )
-        vibration = _budget_call(service.get_vibration, "get_vibration", "vibration")
-        deadzones = _budget_call(service.get_deadzones, "get_deadzones", "deadzones")
-        # One getter covers both _left and _right; mirror the error/skip.
-        axis_inv = _budget_call(
-            service.get_axis_inversion,
-            "get_axis_inversion",
-            "axis_inversion_left",
-            "axis_inversion_right",
-        )
-        sens = _budget_call(
-            service.get_sensitivity_curves,
-            "get_sensitivity_curves",
-            "sensitivity_left",
-            "sensitivity_right",
-        )
-        # 8-point (cat 0x86) curves ride alongside the 3-point fields on capable
-        # 1.2.9 / fw-1.24 devices — mirror SettingsService.get_all_settings:
-        # probe capability once (cached on the service), and only then issue the
-        # two per-stick reads. A legacy device answers the probe False and pays
-        # nothing more — no per-stick reads, no read_errors entries, no coverage
-        # impact (the curves fold onto the 3-point sensitivity host; see
-        # _SENSITIVITY_8POINT_RIDERS). The fresh-read pass owns this read instead
-        # of delegating to get_all_settings so per-field error tracking is kept
-        # and the cached-snapshot fallback path stays untouched.
-        sens_left_8point: Optional[SensitivityAnchorTuple8] = None
-        sens_right_8point: Optional[SensitivityAnchorTuple8] = None
-        if _within_budget():
-            # Wrapped in a lambda (not a bare attribute reference) so a settings
-            # service that predates the cat-0x86 API surfaces a caught read failure
-            # → not-capable, honoring this method's "never abort on one bad field"
-            # contract instead of letting an AttributeError escape capture.
-            supports_8point, _ = _safe_call(
-                lambda: service.supports_8point_sensitivity(),
-                "supports_8point_sensitivity",
-            )
-            if supports_8point:
-                sens_left_8point = _budget_call(
-                    lambda: service.get_sensitivity_curve_8point(
-                        SENSITIVITY_STICK_LEFT
-                    ),
-                    "get_sensitivity_curve_8point(LEFT)",
-                    "sensitivity_left_8point",
-                )
-                sens_right_8point = _budget_call(
-                    lambda: service.get_sensitivity_curve_8point(
-                        SENSITIVITY_STICK_RIGHT
-                    ),
-                    "get_sensitivity_curve_8point(RIGHT)",
-                    "sensitivity_right_8point",
-                )
-        else:
-            # Probe skipped → capability unknown. Unlike a not-capable verdict
-            # (riders legitimately absent, no entries), an unanswered probe
-            # means the riders are UNREAD — mark both so the diff/coverage
-            # surfaces never mistake the gap for a legacy device.
-            _mark_skipped("sensitivity_left_8point", "sensitivity_right_8point")
-        trig = _budget_call(
-            service.get_trigger_settings,
-            "get_trigger_settings",
-            "trigger_left",
-            "trigger_right",
-        )
-        motion = _budget_call(
-            service.get_motion_settings, "get_motion_settings", "motion_settings"
-        )
-        step_size = _budget_call(service.get_step_size, "get_step_size", "step_size")
-
-        bindings: dict[ButtonSlot, object] = {}
-        for slot in ButtonSlot:
-            if not _within_budget():
-                _mark_skipped("button_bindings")
-                continue
-            mapping, err = _safe_call(
-                lambda slot=slot: service.get_button_binding(slot),
-                f"get_button_binding({slot.name})",
-            )
-            if mapping is not None:
-                bindings[slot] = mapping
-            elif err and "button_bindings" not in read_errors:
-                read_errors["button_bindings"] = err
-
-        lighting: dict[LightingZone, object] = {}
-        for zone in LightingZone:
-            if not _within_budget():
-                _mark_skipped("lighting_zones")
-                continue
-            zone_settings, err = _safe_call(
-                lambda zone=zone: service.get_zone_lighting(zone),
-                f"get_zone_lighting({zone.name})",
-            )
-            if zone_settings is not None:
-                lighting[zone] = zone_settings
-            elif err and "lighting_zones" not in read_errors:
-                read_errors["lighting_zones"] = err
-
-        if _within_budget():
-            back_paddles, err = _safe_call(
-                service.get_all_back_paddle_bindings,
-                "get_all_back_paddle_bindings",
-            )
-            if back_paddles is None:
-                back_paddles = {}
-            if err:
-                read_errors["back_paddle_bindings"] = err
-        else:
-            back_paddles = {}
-            _mark_skipped("back_paddle_bindings")
-
-        if skipped:
-            logger.warning(
-                "restore-point fresh read: batch read budget (%.1fs) exhausted "
-                "after %d of %d reads; skipped fields recorded in read_errors",
-                budget_s,
-                issued,
-                issued + skipped,
-            )
-
-        snapshot = ControllerSnapshot(
-            polling_rate=polling_rate,
-            vibration=vibration,
-            deadzones=deadzones,
-            axis_inversion_left=(axis_inv[0] if axis_inv else None),
-            axis_inversion_right=(axis_inv[1] if axis_inv else None),
-            sensitivity_left=(sens[0] if sens else None),
-            sensitivity_right=(sens[1] if sens else None),
-            trigger_left=(trig[0] if trig else None),
-            trigger_right=(trig[1] if trig else None),
-            button_bindings=bindings,  # type: ignore[arg-type]
-            lighting_zones=lighting,  # type: ignore[arg-type]
-            motion_settings=motion,
-            back_paddle_bindings=back_paddles,
-            step_size=step_size,
-            sensitivity_left_8point=sens_left_8point,
-            sensitivity_right_8point=sens_right_8point,
-        )
-
-        read_success: dict[str, object] = {
-            "polling_rate": polling_rate is not None,
-            "step_size": step_size is not None,
-            "vibration": vibration is not None,
-            "deadzones": deadzones is not None,
-            "axis_inversion_left": axis_inv is not None,
-            "axis_inversion_right": axis_inv is not None,
-            "sensitivity_left": sens is not None,
-            "sensitivity_right": sens is not None,
-            "trigger_left": trig is not None,
-            "trigger_right": trig is not None,
-            "motion_settings": motion is not None,
-            "button_bindings": set(bindings.keys()),
-            "back_paddle_bindings": set(back_paddles.keys()),
-            "lighting_zones": set(lighting.keys()),
-        }
-        return snapshot, read_success, read_errors
 
     # -- restore -------------------------------------------------------------
 
@@ -826,26 +570,6 @@ class RestorePointService:
 # ---------------------------------------------------------------------------
 
 
-def _safe_call(fn, name: str) -> tuple[Any, Optional[str]]:
-    """Invoke ``fn``; on any exception, log + return ``(None, error_text)``.
-
-    ``settings_service.get_*`` already catches :class:`SettingsServiceError`
-    internally and returns ``None``, but a bare-metal HID failure
-    (``TimeoutError``, ``OSError``) can still escape — and the capture pass
-    must never abort because of one bad field.
-
-    Returns a ``(value, error_text)`` tuple. ``error_text`` is a short
-    ``"<ExceptionType>: <message>"`` string when the call raised, else
-    ``None``. ``value`` is the call's return value (or ``None`` on raise).
-    """
-
-    try:
-        return fn(), None
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("restore-point fresh read failed in %s: %s", name, exc)
-        return None, f"{type(exc).__name__}: {exc}"
-
-
 def _any_read_succeeded(read_success: Mapping[str, object]) -> bool:
     for value in read_success.values():
         if isinstance(value, bool):
@@ -1035,20 +759,6 @@ def _filter_snapshot_for_restore(
     return filtered, attempted
 
 
-def _attempted_fields_as_sent(
-    attempted_fields: list[str],
-    sent_snapshot: ControllerSnapshot,
-) -> list[str]:
-    """Replace downgraded rider names with their 3-point hosts for verify."""
-
-    hosts_by_rider = {
-        rider_name: host_name
-        for rider_name, host_name in _SENSITIVITY_8POINT_RIDERS
-        if getattr(sent_snapshot, rider_name) is None
-    }
-    return [hosts_by_rider.get(name, name) for name in attempted_fields]
-
-
 def verify_applied_snapshot(
     applied: ControllerSnapshot,
     readback: ControllerSnapshot,
@@ -1126,252 +836,6 @@ def verify_applied_snapshot(
                 mismatched.append(entry_name)
 
     return mismatched, unverifiable
-
-
-def _readback_differs(field_name: str, applied_value: object, read_value: object) -> bool:
-    """Exact inequality with a string-compare fallback for an ``__eq__`` that
-    raises (mirrors ``_values_differ`` in :mod:`zd_app.services.snapshot_diff`)."""
-
-    try:
-        return applied_value != read_value
-    except Exception:  # noqa: BLE001 - defensive: any value whose __eq__ raises
-        return format_field_value(field_name, applied_value) != format_field_value(
-            field_name, read_value
-        )
-
-
-def _mismatched_collection_entries(
-    name: str,
-    applied_entries: Mapping[Any, Any],
-    read_entries: Mapping[Any, Any],
-) -> list[tuple[Any, Any, Any]]:
-    """Per-entry comparison core for collection fields, shared by
-    :func:`verify_applied_snapshot` and :func:`_build_field_outcomes`.
-
-    Walks the APPLIED entries only — extra readback entries are ignored
-    (reading back the device's full slot set after applying two bindings is
-    success, not mismatch). Returns one ``(key, applied_value, read_value)``
-    tuple per differing entry; ``read_value`` ``None`` means the readback is
-    missing that entry.
-    """
-
-    mismatches: list[tuple[Any, Any, Any]] = []
-    for key, applied_value in applied_entries.items():
-        read_value = read_entries.get(key)
-        if read_value is None or _readback_differs(
-            f"{name}[{key.name}]", applied_value, read_value
-        ):
-            mismatches.append((key, applied_value, read_value))
-    return mismatches
-
-
-def _verify_collection_outcome(
-    name: str,
-    applied_entries: Mapping[Any, Any],
-    read_entries: Mapping[Any, Any],
-    read_errors: Mapping[str, str],
-) -> tuple[Optional[bool], Optional[str], Optional[str], Optional[str]]:
-    """Restore-verify verdict for one collection field.
-
-    Compares per APPLIED entry (the :func:`_mismatched_collection_entries`
-    core) instead of whole-dict equality: a restore point whose capture
-    recorded only some bindings/zones must not report MISMATCH just because
-    the readback enumerates the device's full set (the new
-    batch read budget makes partial captures more likely). Write-only
-    ``back_paddle_bindings`` keeps could-not-verify semantics, as does a
-    READABLE collection whose readback came back entirely empty (the
-    whole-collection read failed — ``read_errors`` carries why when known).
-
-    Returns ``(verify_matched, verify_note, expected_str, observed_str)``;
-    the strings render only the differing entries, not the whole dict.
-    """
-
-    if name in _PREVIEW_EXCLUDED_FIELDS or not read_entries:
-        read_err = read_errors.get(name)
-        if read_err:
-            return None, f"verify-read failed: {read_err}", None, None
-        return None, "read-back did not return a value", None, None
-    mismatches = _mismatched_collection_entries(name, applied_entries, read_entries)
-    if not mismatches:
-        return True, None, None, None
-    expected_str = ", ".join(
-        f"{key.name}={format_field_value(f'{name}[{key.name}]', applied_value)}"
-        for key, applied_value, _read_value in mismatches
-    )
-    observed_str = ", ".join(
-        f"{key.name}={format_field_value(f'{name}[{key.name}]', read_value)}"
-        for key, _applied_value, read_value in mismatches
-    )
-    return False, "read-back value differs from expected", expected_str, observed_str
-
-
-def _build_field_outcomes(
-    attempted_fields: list[str],
-    expected_snapshot: ControllerSnapshot,
-    readback: ControllerSnapshot,
-    apply_result: ApplyResult,
-    read_errors: Mapping[str, str],
-) -> list[RestoreFieldOutcome]:
-    """Map ``attempted_fields`` to per-field write + verify outcomes.
-
-    Write success comes from :class:`ApplyResult.failed`: any failure with a
-    matching ``setting_label`` flips ``write_succeeded`` to False. Verify
-    success comes from comparing ``expected_snapshot[name]`` vs
-    ``readback[name]``: missing read-back -> ``verify_matched=None``;
-    mismatch -> False; match -> True. Collection fields compare per APPLIED
-    entry (see :func:`_verify_collection_outcome`), so a partial capture
-    that restored cleanly is MATCHED even though the readback enumerates
-    the device's full slot/zone set.
-
-    On mismatch, ``expected_value`` and ``observed_value`` carry
-    ``str()``-formatted versions of the captured snapshot value and the
-    post-write read-back value, so the result page can show the actual
-    numbers inline (avoids the problem local testing surfaced, where the user had to
-    click through to the Sticks tab + Read just to see what step_size was
-    actually on the device). On could-not-verify (read raised), ``verify_note``
-    carries the underlying exception text from :func:`_do_fresh_read` instead
-    of a generic "read-back did not return a value" — so a HID timeout shows
-    "verify-read failed: TimeoutError: HID read timed out after 967ms"
-    instead of forcing the user to grep zd_wrapper.log.
-    """
-
-    failures_by_label = {failure.setting_label: failure for failure in apply_result.failed}
-
-    outcomes: list[RestoreFieldOutcome] = []
-    for name in attempted_fields:
-        labels = _apply_labels_for(name, expected_snapshot)
-        write_succeeded = True
-        write_error: Optional[str] = None
-        for label in labels:
-            failure = failures_by_label.get(label)
-            if failure is not None:
-                write_succeeded = False
-                write_error = failure.error
-                break
-
-        expected_value = getattr(expected_snapshot, name)
-        read_value = getattr(readback, name)
-        expected_str: Optional[str] = None
-        observed_str: Optional[str] = None
-        verify_matched: Optional[bool]
-        verify_note: Optional[str]
-        if name in _COLLECTION_FIELD_NAMES:
-            # Collections verify per APPLIED entry (shared core with
-            # verify_applied_snapshot) — see _verify_collection_outcome.
-            (
-                verify_matched,
-                verify_note,
-                expected_str,
-                observed_str,
-            ) = _verify_collection_outcome(
-                name, expected_value or {}, read_value or {}, read_errors
-            )
-        elif read_value is None:
-            verify_matched = None
-            read_err = read_errors.get(name)
-            if read_err:
-                verify_note = f"verify-read failed: {read_err}"
-            else:
-                verify_note = "read-back did not return a value"
-        else:
-            try:
-                verify_matched = read_value == expected_value
-            except Exception:  # noqa: BLE001
-                verify_matched = None
-                verify_note = "read-back value could not be compared"
-            else:
-                if verify_matched:
-                    verify_note = None
-                else:
-                    verify_note = "read-back value differs from expected"
-                    expected_str = format_field_value(name, expected_value)
-                    observed_str = format_field_value(name, read_value)
-
-        outcomes.append(
-            RestoreFieldOutcome(
-                field_name=name,
-                write_succeeded=write_succeeded,
-                write_error=write_error,
-                verify_matched=verify_matched,
-                verify_note=verify_note,
-                expected_value=expected_str,
-                observed_value=observed_str,
-            )
-        )
-    return outcomes
-
-
-def _apply_labels_for(name: str, snapshot: ControllerSnapshot) -> list[str]:
-    """Map a snapshot field name to the apply-coordinator setting labels.
-
-    See ``SettingsApplyCoordinator.apply_snapshot`` for the label vocabulary.
-    A collection field expands to one label per sub-entry so a single failed
-    binding flips that field's write status.
-    """
-
-    if name == "polling_rate":
-        return ["polling"]
-    if name == "step_size":
-        return ["step_size"]
-    if name == "vibration":
-        return ["vibration"]
-    if name == "deadzones":
-        return ["deadzones"]
-    if name == "axis_inversion_left":
-        return ["axis_inv_left"]
-    if name == "axis_inversion_right":
-        return ["axis_inv_right"]
-    if name == "sensitivity_left":
-        return ["sens_left"]
-    if name == "sensitivity_right":
-        return ["sens_right"]
-    # 8-point riders share the host stick's coordinator label: the apply path
-    # writes 0x86 under the same ``sens_left`` / ``sens_right`` setting label, so
-    # a write failure on that stick flips the rider's outcome exactly as it would
-    # the 3-point host's.
-    if name == "sensitivity_left_8point":
-        return ["sens_left"]
-    if name == "sensitivity_right_8point":
-        return ["sens_right"]
-    if name == "trigger_left":
-        return ["trigger_left"]
-    if name == "trigger_right":
-        return ["trigger_right"]
-    if name == "button_bindings":
-        return [
-            f"binding_{slot.name}" for slot in (snapshot.button_bindings or {}).keys()
-        ]
-    if name == "lighting_zones":
-        return [
-            f"lighting_{zone.name}" for zone in (snapshot.lighting_zones or {}).keys()
-        ]
-    if name == "back_paddle_bindings":
-        return [
-            f"back_paddle_{slot.name}"
-            for slot in (snapshot.back_paddle_bindings or {}).keys()
-        ]
-    return []
-
-
-def _unverified_writes_after_final_restore_read(
-    unverified_writes: Iterable[str],
-    field_outcomes: Iterable[RestoreFieldOutcome],
-    sent_snapshot: ControllerSnapshot,
-) -> tuple[str, ...]:
-    """Drop setter disclosures superseded by a matching final restore read.
-
-    Restore outcomes use snapshot field names. "_apply_labels_for" preserves
-    the existing mapping from those fields to coordinator labels, including one
-    "lighting_ZONE" label per lighting-zone entry.
-    """
-
-    labels_with_final_match = {
-        label
-        for outcome in field_outcomes
-        if outcome.verify_matched is True
-        for label in _apply_labels_for(outcome.field_name, sent_snapshot)
-    }
-    return tuple(label for label in unverified_writes if label not in labels_with_final_match)
 
 
 def _build_restore_preview(
@@ -1528,22 +992,6 @@ def _collection_field_delta(
         target_value=target_str,
         note=None,
     )
-
-
-def _label_for(
-    *, attempted: int, write_failed: int, mismatched: int, could_not_verify: int
-) -> RestoreResultLabel:
-    if attempted == 0:
-        return RestoreResultLabel.RESTORE_FAILED
-    if write_failed >= attempted:
-        return RestoreResultLabel.RESTORE_FAILED
-    if write_failed > 0:
-        return RestoreResultLabel.PARTIALLY_RESTORED
-    if mismatched > 0:
-        return RestoreResultLabel.MISMATCH_AFTER_RESTORE
-    if could_not_verify > 0:
-        return RestoreResultLabel.RESTORED_WITH_WARNINGS
-    return RestoreResultLabel.VERIFIED
 
 
 def _default_title(trigger: RestorePointTrigger, moment: datetime) -> str:

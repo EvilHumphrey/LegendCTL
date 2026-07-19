@@ -84,7 +84,7 @@ class TestSettingsScreen(unittest.TestCase):
         shell, _bind_item_font, _font_for, add_combo = self._build_with_patches(font_id=4242)
 
         language_combo = add_combo.call_args_list[0].kwargs
-        self.assertEqual(language_combo["items"], ["English", "简体中文"])
+        self.assertEqual(language_combo["items"], ["English", "简体中文", "한국어"])
         self.assertEqual(language_combo["default_value"], "English")
 
         language_combo["callback"]("language_combo", "简体中文")

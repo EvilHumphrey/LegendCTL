@@ -1,6 +1,6 @@
 # ZD Ultimate Legend Wrapper — technical architecture
 
-Current as of v2.6.0 (2026-07-12). This is the repo's technical
+Current as of v2.6.2 (2026-07-19). This is the repo's technical
 architecture document.
 
 ## What the app is
@@ -113,7 +113,7 @@ injected fakes for tests). Version constants: `zd_app/version.py`.
 
 ## Test architecture
 
-~3,032 unittest tests (v2.6.0). Services are tested headlessly; screens are tested
+~3,134 unittest tests (v2.6.2). Services are tested headlessly; screens are tested
 against a patched DearPyGui that records widget calls (no real rendering — which is why
 real-DPG behaviors like the modal law are additionally pinned by the manual bench tool
 in `tools/`). Suite conventions: system Python 3.12 with `dearpygui` installed (the

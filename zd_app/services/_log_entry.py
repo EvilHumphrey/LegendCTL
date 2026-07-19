@@ -39,7 +39,7 @@ class LogEntry:
 
 @dataclass(frozen=True)
 class ComposedLogEntry:
-    """One lazy base message plus zero or more localized note keys.
+    """One lazy base message plus localized note keys or structured note entries.
 
     ``timestamp`` is carried independently so a legacy raw-string base can
     still become one timestamped Recent Activity event. A structured base
@@ -49,6 +49,10 @@ class ComposedLogEntry:
     base: str | LogEntry
     note_keys: tuple[str, ...] = ()
     timestamp: str = ""
+    # Keep count-bearing notes structured too, so a later locale render can
+    # apply their format arguments instead of freezing translated text early.
+    # This stays after ``timestamp`` to preserve the original positional shape.
+    note_entries: tuple[LogEntry, ...] = ()
 
 
 def render_log_entry(entry: str | LogEntry | ComposedLogEntry) -> str:
@@ -71,6 +75,7 @@ def render_log_message(entry: str | LogEntry | ComposedLogEntry) -> str:
     if isinstance(entry, ComposedLogEntry):
         parts = [render_log_message(entry.base)]
         parts.extend(t(key) for key in entry.note_keys)
+        parts.extend(render_log_message(note) for note in entry.note_entries)
         return "\n".join(part for part in parts if part)
     return t(entry.key, **_render_log_fmt_args(entry.fmt_args))
 

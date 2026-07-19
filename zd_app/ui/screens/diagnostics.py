@@ -230,8 +230,32 @@ def _diag_tab_id_to_tag(tab_id: str) -> str:
     return "diag_tab_status"
 
 
+def _diag_tab_tag_text(tab_tag) -> str:
+    """Normalize a tab_bar value to its ``diag_tab_*`` alias string.
+
+    Dear PyGui hands the tab_bar callback the *integer item id* of the
+    selected tab as its ``app_data`` — NOT the string alias. ``str(<int id>)``
+    never starts with ``diag_tab_``, so without resolving the id back to its
+    alias every REAL tab selection fell through to the ``status`` default in
+    :func:`_diag_tab_tag_to_id`: ``diagnostics_active_tab`` was silently reset
+    to ``status`` on the next selection, so the persisted tab did not survive
+    a rebuild and the consent-gate "How to verify this" link landed on Status
+    instead of Guidance (v2.6.1 CU smoke). The suite injected the alias STRING
+    directly, which passed straight through and masked the integer-id path —
+    hence the REAL-render regression gate. String tags pass through untouched.
+    """
+
+    if isinstance(tab_tag, str):
+        return tab_tag
+    try:
+        alias = dpg.get_item_alias(tab_tag)
+    except Exception:  # pragma: no cover - defensive; alias lookup is total.
+        alias = None
+    return alias if alias else str(tab_tag)
+
+
 def _diag_tab_tag_to_id(tab_tag) -> str:
-    value = str(tab_tag)
+    value = _diag_tab_tag_text(tab_tag)
     if value.startswith("diag_tab_"):
         tab_id = value.removeprefix("diag_tab_")
         if tab_id in DIAGNOSTICS_TAB_IDS:

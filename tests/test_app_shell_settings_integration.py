@@ -73,7 +73,18 @@ from zd_app.ui.app_shell import (
 )
 
 
-def _make_shell(settings_service=None, wrapper_profile_store=None) -> AppShell:
+def _make_shell(
+    settings_service=None,
+    wrapper_profile_store=None,
+    *,
+    profile_apply_readback_verification_enabled: bool = False,
+) -> AppShell:
+    """Build the legacy write-flow fixture without inventing a MagicMock sweep.
+
+    Phase-1 read-back tests opt in explicitly with a getter-backed service;
+    ordinary write assertions retain their pre-sweep status fixture.
+    """
+
     settings_store = MagicMock()
     settings_store.load.return_value = AppSettings()
     device_service = MagicMock()
@@ -122,6 +133,9 @@ def _make_shell(settings_service=None, wrapper_profile_store=None) -> AppShell:
         settings_service=settings_service,
         wrapper_profile_store=wrapper_profile_store,
         restore_point_service=restore_point_service,
+        profile_apply_readback_verification_enabled=(
+            profile_apply_readback_verification_enabled
+        ),
     )
     shell.refresh_shell = lambda: None
     shell.rebuild_current_screen = lambda: None
@@ -327,6 +341,145 @@ def _ok_profile_write_results(settings_service: MagicMock) -> None:
         outcome=SetBackPaddleBindingOutcome.OK,
         error_code=None,
     )
+
+
+class _ReadbackVerificationSettingsService:
+    """Strict fake for profile-Apply read-back verification.
+
+    It accepts exactly the coordinator's write API and the shared fresh-read
+    API.  Setters deliberately leave ``readback`` unchanged, modelling a
+    WriteFile-OK firmware rejection without letting a mock hide an accidental
+    extra write during the sweep.
+    """
+
+    def __init__(
+        self,
+        readback: ControllerSnapshot,
+        *,
+        vibration_read_error: Exception | None = None,
+        button_read_error_slot: ButtonSlot | None = None,
+    ) -> None:
+        self.readback = readback
+        self.vibration_read_error = vibration_read_error
+        self.button_read_error_slot = button_read_error_slot
+        self.events: list[tuple[str, str]] = []
+        self.write_log: list[str] = []
+
+    def _write(self, label: str, outcome) -> SimpleNamespace:
+        self.events.append(("write", label))
+        self.write_log.append(label)
+        return SimpleNamespace(outcome=outcome, error_code=None)
+
+    def _read(self, name: str, value):
+        self.events.append(("read", name))
+        return value
+
+    # Coordinator write contract -------------------------------------------------
+    def set_polling_rate(self, rate):
+        return self._write("polling", SetPollingRateOutcome.OK)
+
+    def set_step_size_verified(self, value, attempts: int = 3, settle_s: float = 0.1):
+        return self._write("step_size", SetStepSizeOutcome.OK)
+
+    def set_vibration(self, settings):
+        return self._write("vibration", SetVibrationOutcome.OK)
+
+    def set_all_deadzones(self, deadzones):
+        return self._write("deadzones", SetDeadzoneOutcome.OK)
+
+    def set_left_stick_inversion(self, inversion):
+        return self._write("axis_inv_left", SetAxisInversionOutcome.OK)
+
+    def set_right_stick_inversion(self, inversion):
+        return self._write("axis_inv_right", SetAxisInversionOutcome.OK)
+
+    def set_left_stick_sensitivity_curve(self, anchors):
+        return self._write("sens_left", SetSensitivityCurveOutcome.OK)
+
+    def set_right_stick_sensitivity_curve(self, anchors):
+        return self._write("sens_right", SetSensitivityCurveOutcome.OK)
+
+    def set_left_trigger_settings(self, settings):
+        return self._write("trigger_left", SetTriggerSettingsOutcome.OK)
+
+    def set_right_trigger_settings(self, settings):
+        return self._write("trigger_right", SetTriggerSettingsOutcome.OK)
+
+    def set_button_binding(self, slot, mapping):
+        return self._write(f"binding_{slot.name}", SetButtonBindingOutcome.OK)
+
+    def set_zone_lighting_verified(self, zone, settings, attempts: int = 3, settle_s: float = 0.1):
+        return self._write(f"lighting_{zone.name}", SetLightingOutcome.OK)
+
+    def set_back_paddle_binding(self, slot, target):
+        return self._write(f"back_paddle_{slot.name}", SetBackPaddleBindingOutcome.OK)
+
+    # Shared fresh-read contract -------------------------------------------------
+    def supports_8point_sensitivity(self) -> bool:
+        return self._read("supports_8point_sensitivity", False)
+
+    def get_polling_rate(self):
+        return self._read("get_polling_rate", self.readback.polling_rate)
+
+    def get_vibration(self):
+        self.events.append(("read", "get_vibration"))
+        if self.vibration_read_error is not None:
+            raise self.vibration_read_error
+        return self.readback.vibration
+
+    def get_deadzones(self):
+        return self._read("get_deadzones", self.readback.deadzones)
+
+    def get_axis_inversion(self):
+        value = (
+            (self.readback.axis_inversion_left, self.readback.axis_inversion_right)
+            if self.readback.axis_inversion_left is not None
+            and self.readback.axis_inversion_right is not None
+            else None
+        )
+        return self._read("get_axis_inversion", value)
+
+    def get_sensitivity_curves(self):
+        value = (
+            (self.readback.sensitivity_left, self.readback.sensitivity_right)
+            if self.readback.sensitivity_left is not None
+            and self.readback.sensitivity_right is not None
+            else None
+        )
+        return self._read("get_sensitivity_curves", value)
+
+    def get_trigger_settings(self):
+        value = (
+            (self.readback.trigger_left, self.readback.trigger_right)
+            if self.readback.trigger_left is not None
+            and self.readback.trigger_right is not None
+            else None
+        )
+        return self._read("get_trigger_settings", value)
+
+    def get_motion_settings(self):
+        return self._read("get_motion_settings", self.readback.motion_settings)
+
+    def get_step_size(self):
+        return self._read("get_step_size", self.readback.step_size)
+
+    def get_button_binding(self, slot):
+        self.events.append(("read", f"get_button_binding({slot.name})"))
+        if slot is self.button_read_error_slot:
+            raise TimeoutError(f"HID read timed out for {slot.name}")
+        return (self.readback.button_bindings or {}).get(slot)
+
+    def get_zone_lighting(self, zone):
+        return self._read(
+            f"get_zone_lighting({zone.name})",
+            (self.readback.lighting_zones or {}).get(zone),
+        )
+
+    def get_all_back_paddle_bindings(self):
+        return self._read(
+            "get_all_back_paddle_bindings",
+            dict(self.readback.back_paddle_bindings or {}),
+        )
 
 
 class TestAppShellSettingsIntegration(unittest.TestCase):
@@ -1393,7 +1546,8 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         shell = _make_shell(MagicMock())
         shell._locale_router.set_locale = MagicMock()
 
-        shell.update_language("ko")
+        # "ja" is not a shipped locale (en, zh-CN, ko are); it must fall back.
+        shell.update_language("ja")
 
         self.assertEqual(shell.settings.language, "en")
         shell._locale_router.set_locale.assert_called_once_with("en")
@@ -3301,6 +3455,300 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
             "Lighting not applied: settings service unavailable.",
         )
         shell.device_service.log_event.assert_not_called()
+
+
+class ProfileApplyReadbackVerificationTests(unittest.TestCase):
+    def _apply_profile(
+        self,
+        settings_service: _ReadbackVerificationSettingsService,
+        snapshot: ControllerSnapshot,
+    ):
+        shell = _make_shell(
+            settings_service,
+            profile_apply_readback_verification_enabled=True,
+        )
+        shell.refresh_from_controller = MagicMock()
+        with (
+            patch("zd_app.services.settings_apply_coordinator.time.sleep"),
+            patch("zd_app.ui.app_shell.time.sleep"),
+        ):
+            shell._apply_wrapper_profile_snapshot(
+                "silent-reject-fixture",
+                snapshot,
+                include_device=False,
+            )
+        self.assertIsNotNone(shell._last_apply_result)
+        assert shell._last_apply_result is not None
+        return shell._last_apply_result
+
+    def test_profile_apply_surfaces_silent_plain_setter_rejects_without_sweep_writes(self) -> None:
+        expected = _full_snapshot(
+            polling_rate=None,
+            lighting_zones={},
+            step_size=None,
+        )
+        old_readback = _full_snapshot(
+            polling_rate=None,
+            vibration=VibrationSettings(
+                99, 88, 77, 66, TriggerVibrationMode.NATIVE
+            ),
+            deadzones=StickDeadzones(21, 22, 23, 24),
+            axis_inversion_left=AxisInversion(False, False),
+            axis_inversion_right=AxisInversion(True, True),
+            sensitivity_left=(
+                SensitivityAnchor(10, 11),
+                SensitivityAnchor(12, 13),
+                SensitivityAnchor(14, 15),
+            ),
+            sensitivity_right=(
+                SensitivityAnchor(16, 17),
+                SensitivityAnchor(18, 19),
+                SensitivityAnchor(20, 21),
+            ),
+            trigger_left=ServiceTriggerSettings(1, 2, TriggerMode.SHORT),
+            trigger_right=ServiceTriggerSettings(3, 4, TriggerMode.LONG),
+            button_bindings={
+                slot: _controller_button_mapping(ControllerButtonTarget.X)
+                for slot in ButtonSlot
+            },
+            lighting_zones={},
+            step_size=None,
+        )
+        settings_service = _ReadbackVerificationSettingsService(old_readback)
+
+        apply_result = self._apply_profile(settings_service, expected)
+
+        verification = apply_result.readback_verification
+        self.assertIsNotNone(verification)
+        assert verification is not None
+        expected_plain_fields = {
+            "vibration",
+            "deadzones",
+            "axis_inversion_left",
+            "axis_inversion_right",
+            "sensitivity_left",
+            "sensitivity_right",
+            "trigger_left",
+            "trigger_right",
+            "button_bindings",
+        }
+        outcomes = {outcome.field_name: outcome for outcome in verification.fields}
+        self.assertEqual(set(outcomes), expected_plain_fields)
+        self.assertTrue(
+            all(outcomes[name].verify_matched is False for name in expected_plain_fields)
+        )
+        self.assertEqual(verification.mismatched, len(expected_plain_fields))
+
+        # The first read begins the shared post-apply sweep. Every event after
+        # it is a getter: the verifier cannot issue a second write.
+        first_read = next(
+            index
+            for index, event in enumerate(settings_service.events)
+            if event[0] == "read"
+        )
+        self.assertTrue(
+            all(event[0] == "read" for event in settings_service.events[first_read:])
+        )
+        self.assertEqual(
+            settings_service.write_log,
+            [
+                "vibration",
+                "deadzones",
+                "axis_inv_left",
+                "axis_inv_right",
+                "sens_left",
+                "sens_right",
+                "trigger_left",
+                "trigger_right",
+                *(f"binding_{slot.name}" for slot in ButtonSlot),
+            ],
+        )
+
+    def test_profile_apply_read_error_is_could_not_verify_not_mismatch(self) -> None:
+        expected = empty_snapshot(
+            vibration=VibrationSettings(1, 2, 3, 4, TriggerVibrationMode.TRIGGER_VIBRATION)
+        )
+        settings_service = _ReadbackVerificationSettingsService(
+            empty_snapshot(),
+            vibration_read_error=TimeoutError("HID read timed out"),
+        )
+
+        apply_result = self._apply_profile(settings_service, expected)
+
+        verification = apply_result.readback_verification
+        self.assertIsNotNone(verification)
+        assert verification is not None
+        self.assertEqual(verification.mismatched, 0)
+        self.assertEqual(verification.could_not_verify, 1)
+        outcome = verification.fields[0]
+        self.assertEqual(outcome.field_name, "vibration")
+        self.assertIsNone(outcome.verify_matched)
+        self.assertIn("TimeoutError: HID read timed out", outcome.verify_note)
+
+    def test_profile_apply_partial_collection_read_error_is_could_not_verify(self) -> None:
+        expected_bindings = {
+            ButtonSlot.A: _controller_button_mapping(ControllerButtonTarget.A),
+            ButtonSlot.B: _controller_button_mapping(ControllerButtonTarget.B),
+        }
+        expected = empty_snapshot(button_bindings=expected_bindings)
+        settings_service = _ReadbackVerificationSettingsService(
+            empty_snapshot(button_bindings=expected_bindings),
+            button_read_error_slot=ButtonSlot.B,
+        )
+
+        apply_result = self._apply_profile(settings_service, expected)
+
+        verification = apply_result.readback_verification
+        self.assertIsNotNone(verification)
+        assert verification is not None
+        self.assertEqual(verification.mismatched, 0)
+        self.assertEqual(verification.could_not_verify, 1)
+        self.assertIsNone(verification.fields[0].verify_matched)
+        self.assertIn("HID read timed out for B", verification.fields[0].verify_note)
+
+    def test_profile_apply_verifier_failure_discloses_all_could_not_verify(self) -> None:
+        # A whole-sweep failure (the verifier raises before it can read the
+        # controller) must NOT leave readback_verification=None — that let the
+        # footer show a caveat-free "write calls completed" result and hide
+        # Verification Details. It now synthesizes a summary marking every
+        # attempted field could-not-verify, so the three-valued disclosure fires
+        # and the details view stays reachable (the exact silent-success the
+        # Track-A honesty work exists to kill; adversarial-review blocker 2026-07-17).
+        expected = empty_snapshot(
+            vibration=VibrationSettings(1, 2, 3, 4, TriggerVibrationMode.TRIGGER_VIBRATION)
+        )
+        settings_service = _ReadbackVerificationSettingsService(empty_snapshot())
+        shell = _make_shell(
+            settings_service,
+            profile_apply_readback_verification_enabled=True,
+        )
+        shell.refresh_from_controller = MagicMock()
+
+        with (
+            patch("zd_app.services.settings_apply_coordinator.time.sleep"),
+            patch("zd_app.ui.app_shell.time.sleep"),
+            patch(
+                "zd_app.ui.app_shell.fresh_read",
+                side_effect=RuntimeError("verifier seam failed"),
+            ),
+        ):
+            shell._apply_wrapper_profile_snapshot(
+                "verifier-failure-fixture",
+                expected,
+                include_device=False,
+            )
+
+        self.assertIsNotNone(shell._last_apply_result)
+        assert shell._last_apply_result is not None
+        # The write result is preserved exactly as before.
+        self.assertEqual(shell._last_apply_result.succeeded, 1)
+        self.assertEqual(shell._last_apply_result.failed, [])
+        # But the disclosure is now structurally present, not silent.
+        verification = shell._last_apply_result.readback_verification
+        self.assertIsNotNone(verification)
+        assert verification is not None
+        self.assertEqual(verification.attempted, 1)
+        self.assertEqual(verification.could_not_verify, 1)
+        self.assertEqual(verification.verified_matched, 0)
+        self.assertEqual(verification.mismatched, 0)
+        # The write itself succeeded, so it is reported as sent-but-unconfirmed.
+        self.assertEqual(verification.wrote_succeeded, 1)
+        self.assertEqual(verification.write_failed, 0)
+        outcome = verification.fields[0]
+        self.assertEqual(outcome.field_name, "vibration")
+        self.assertIsNone(outcome.verify_matched)
+        self.assertIn("post-apply read-back sweep failed", outcome.verify_note)
+        # Verification Details is reachable for this path (button-shown gate).
+        self.assertTrue(shell._has_profile_apply_readback_verification())
+
+    def test_profile_apply_write_failure_plus_sweep_failure_excludes_failed_write(
+        self,
+    ) -> None:
+        # Review fix 2026-07-17 (mixed case): one write fails, THEN the
+        # whole read-back sweep fails. The synthesized could-not-verify count
+        # must exclude the failed write (whose footer copy would say "written"),
+        # the write failure must still be disclosed via the partial-apply path,
+        # and the details must show BOTH statuses. The coordinator result is
+        # stubbed (the fake service has no write-failure injection) so the real
+        # synthesis + counting + message composition run end to end.
+        expected = empty_snapshot(vibration=object(), deadzones=object())
+        settings_service = _ReadbackVerificationSettingsService(empty_snapshot())
+        shell = _make_shell(
+            settings_service,
+            profile_apply_readback_verification_enabled=True,
+        )
+        shell.refresh_from_controller = MagicMock()
+        stub_result = ApplyResult(
+            total_attempted=2,
+            succeeded=1,
+            failed=[ApplyFailure("deadzones", "HID write rejected", True)],
+        )
+
+        with (
+            patch("zd_app.services.settings_apply_coordinator.time.sleep"),
+            patch("zd_app.ui.app_shell.time.sleep"),
+            patch.object(
+                shell, "_apply_snapshot_to_controller", return_value=stub_result
+            ),
+            patch(
+                "zd_app.ui.app_shell.fresh_read",
+                side_effect=RuntimeError("verifier seam failed"),
+            ),
+        ):
+            shell._apply_wrapper_profile_snapshot(
+                "mixed-failure-fixture",
+                expected,
+                include_device=False,
+            )
+
+        result = shell._last_apply_result
+        self.assertIsNotNone(result)
+        assert result is not None
+        # The write failure is preserved and disclosed via the partial path.
+        self.assertEqual(result.succeeded, 1)
+        self.assertEqual([f.setting_label for f in result.failed], ["deadzones"])
+
+        verification = result.readback_verification
+        self.assertIsNotNone(verification)
+        assert verification is not None
+        self.assertEqual(verification.attempted, 2)
+        self.assertEqual(verification.wrote_succeeded, 1)
+        self.assertEqual(verification.write_failed, 1)
+        # THE FIX: the failed write is NOT counted as "written but unconfirmed".
+        self.assertEqual(verification.could_not_verify, 1)
+        self.assertEqual(verification.mismatched, 0)
+        # Details show BOTH: deadzones write=failed, vibration write=ok — both
+        # unverified because the sweep never read the controller.
+        by_name = {o.field_name: o for o in verification.fields}
+        self.assertEqual(set(by_name), {"vibration", "deadzones"})
+        self.assertTrue(by_name["vibration"].write_succeeded)
+        self.assertFalse(by_name["deadzones"].write_succeeded)
+        self.assertIsNone(by_name["vibration"].verify_matched)
+        self.assertIsNone(by_name["deadzones"].verify_matched)
+
+    def test_profile_apply_write_only_back_paddle_is_could_not_verify(self) -> None:
+        expected = empty_snapshot(
+            back_paddle_bindings={
+                MacroSlot.M1: BackPaddleBinding(ControllerButtonTarget.A)
+            }
+        )
+        settings_service = _ReadbackVerificationSettingsService(
+            empty_snapshot(
+                back_paddle_bindings={
+                    MacroSlot.M1: BackPaddleBinding(ControllerButtonTarget.A)
+                }
+            )
+        )
+
+        apply_result = self._apply_profile(settings_service, expected)
+
+        verification = apply_result.readback_verification
+        self.assertIsNotNone(verification)
+        assert verification is not None
+        self.assertEqual(verification.verified_matched, 0)
+        self.assertEqual(verification.mismatched, 0)
+        self.assertEqual(verification.could_not_verify, 1)
+        self.assertIsNone(verification.fields[0].verify_matched)
 
 
 class RestoreAppDefaultsRegressionTests(unittest.TestCase):

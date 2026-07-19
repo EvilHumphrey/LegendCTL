@@ -269,27 +269,19 @@ def _fingerprint_row(signals: TrustMatrixSignals) -> TrustMatrixRow:
 
 
 def _applied_row() -> TrustMatrixRow:
-    # Signal-free BY CONSTRUCTION — this row takes no arguments because there is
-    # no per-apply verification signal to take. It cannot see the device, the
-    # connection, or the ApplyResult. It cannot be wrong because it cannot see
-    # anything, and that is exactly why it must not wear an evidence chip: it
-    # states the app's verification SCOPE, so it takes the non-evidence POLICY
-    # class and renders muted.
+    # Signal-free BY CONSTRUCTION — this row intentionally takes no arguments.
+    # Phase 1 gives profile Apply a per-run post-write read-back sweep, but this
+    # Phase 2 copy change does not give the matrix that signal. It remains a
+    # verification-SCOPE statement, so it must wear the non-evidence POLICY chip
+    # and render muted.
     #
-    # DO NOT restore an evidence provenance here without a real signal behind it.
-    # The honest way to make this row green is to give profile Apply the
-    # post-apply read-back sweep that Restore and Safe Import ALREADY perform
-    # (``restore_point_service._unverified_writes_after_final_restore_read``,
-    # ``app_shell._unverified_writes_after_final_safe_import_read``) and derive
-    # the row from the resulting per-field outcome.
+    # Restore, Safe Import, settled inline-deadzone changes, and profile Apply
+    # now read every readable field back after writing. Profile Apply exposes
+    # its per-field outcomes in apply details; write-only settings are reported
+    # honestly as sent because they cannot be read back.
     #
-    # Until that lands, the scope this row describes is narrow and the copy says
-    # so: in a profile Apply only step size and lighting are read back
-    # (``set_step_size_verified`` / ``set_zone_lighting_verified``). Every other
-    # field is a plain setter whose "success" is a WriteFile return, not a device
-    # ACK — and ``ApplyResult.unverified_writes`` can only ever be populated from
-    # those two verified setters, so an EMPTY ``unverified_writes`` means "nothing
-    # we checked came back ambiguous", NOT "everything committed".
+    # DO NOT make this evidence or accept ApplyResult here until Phase 3 derives
+    # a real per-run matrix signal from the sweep.
     return TrustMatrixRow(
         key="applied",
         claim=t("trust_matrix.row.applied.claim"),

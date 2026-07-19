@@ -2574,6 +2574,48 @@ class PartialCaptureCollectionVerifyTests(unittest.TestCase):
             "verify-read failed: TimeoutError: HID read timed out after 967ms",
         )
 
+    def test_field_outcomes_readable_mismatch_wins_over_sibling_read_error(self) -> None:
+        # ★ Honesty regression guard (2026-07-14 merge fix). A
+        # collection is read per entry, so one slot's getter can raise mid-sweep
+        # while its siblings read back fine — leaving read_errors[collection] set
+        # AND a non-empty read-back. A sibling that DID read back and genuinely
+        # differs is a KNOWN firmware mismatch and must be surfaced; it must
+        # never be masked behind the errored slot's "could not verify". Before
+        # the fix, any read_errors[collection] collapsed the whole field to
+        # could_not_verify, hiding the known-bad — the exact "mask a known-bad
+        # behind an unknown" the project's honesty doctrine forbids.
+        applied = _verify_snapshot(
+            button_bindings={ButtonSlot.A: self._BIND_A, ButtonSlot.B: self._BIND_B}
+        )
+        readback_entries = self._full_readback()
+        # A reads back and matches; B reads back but genuinely differs.
+        readback_entries[ButtonSlot.B] = ButtonMapping.controller_button(
+            ControllerButtonTarget.X
+        )
+        readback = _verify_snapshot(button_bindings=readback_entries)
+
+        outcomes = _build_field_outcomes(
+            ["button_bindings"],
+            applied,
+            readback,
+            ApplyResult(total_attempted=2),
+            # A different slot's getter raised: the whole-collection read error
+            # is recorded, but B's mismatch is unambiguous and must still show.
+            {"button_bindings": "TimeoutError: HID read timed out after 967ms"},
+        )
+
+        outcome = outcomes[0]
+        self.assertIs(
+            outcome.verify_matched,
+            False,
+            "a readable, genuinely-differing entry must surface as a mismatch, "
+            "never be masked by a sibling entry's read error",
+        )
+        self.assertEqual(outcome.verify_note, "read-back value differs from expected")
+        self.assertTrue(outcome.expected_value.startswith("B="))
+        self.assertTrue(outcome.observed_value.startswith("B="))
+        self.assertNotIn("A=", outcome.expected_value)
+
 
 class RestorePostApplyPersistTests(unittest.TestCase):
     """A6/A7: a committed apply's result must survive a post-apply persist

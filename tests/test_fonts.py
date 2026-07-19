@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -149,6 +151,61 @@ class FontTests(unittest.TestCase):
 
         fake_dpg.bind_font.assert_has_calls([call(11), call(22), call(33), call(11)])
         self.assertEqual(fake_dpg.bind_font.call_count, 4)
+
+
+class KoFontRenderIsolatedTests(unittest.TestCase):
+    """Real-render gate: Hangul renders non-tofu through the real font registry.
+
+    The mocked tests above patch ``_needs_explicit_cjk_range`` True and so
+    cannot see the real-DPG behavior where CJK ranges are otherwise skipped on
+    dpg>=2 (Hangul then renders as the fallback/tofu box). The isolated child
+    renders the REAL ``register_fonts`` output in a REAL viewport and asserts
+    Korean strings are strictly wider than a same-length unmapped control. One
+    subprocess per method — a second DPG context in one process hits the known
+    teardown segfault. Timeout-wrapped for the native render-hang class."""
+
+    _METHODS = ("test_hangul_renders_non_tofu_through_register_fonts",)
+
+    def test_isolated_real_render_ko_font(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        for method in self._METHODS:
+            with self.subTest(method=method):
+                test_id = (
+                    "tests.isolated_ko_font_render."
+                    f"IsolatedKoFontRenderTest.{method}"
+                )
+                try:
+                    result = subprocess.run(
+                        [sys.executable, "-m", "unittest", test_id],
+                        cwd=repo_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    output_parts: list[str] = []
+                    for part in (exc.stdout, exc.stderr):
+                        if isinstance(part, bytes):
+                            output_parts.append(part.decode(errors="replace"))
+                        elif part:
+                            output_parts.append(part)
+                    self.fail(
+                        "Isolated ko-font-render child hung (native render hang "
+                        "class).\n\nChild output before timeout:\n"
+                        + "\n".join(output_parts)
+                    )
+
+                output = "\n".join(
+                    part for part in (result.stdout, result.stderr) if part
+                )
+                if any(line.strip() == "OK" for line in output.splitlines()):
+                    continue
+                self.fail(
+                    "Isolated ko-font-render test did not report unittest OK.\n"
+                    f"Return code: {result.returncode}\n"
+                    f"Command: {sys.executable} -m unittest {test_id}\n\n"
+                    f"Child output:\n{output}"
+                )
 
 
 if __name__ == "__main__":

@@ -177,7 +177,7 @@ class I18nTests(unittest.TestCase):
             "未能确认 8 点灵敏度支持；已改为应用 3 点曲线。",
         )
 
-    def test_write_unverified_copy_is_byte_exact_in_both_locales(self) -> None:
+    def test_write_unverified_copy_is_byte_exact_in_all_locales(self) -> None:
         locale_dir = Path("zd_app/i18n/locales")
         expected = {
             "en": {
@@ -194,6 +194,10 @@ class I18nTests(unittest.TestCase):
                 "apply.result.write_unverified": "部分更改已写入，但本次无法通过回读确认——它们可能仍已生效。",
                 "log.apply.write_unverified": "写入报告为成功，但回读结果不确定；报告为未验证，而非已确认。",
             },
+            "ko": {
+                "apply.result.write_unverified": "일부 변경 사항은 쓰기 완료되었지만 이번에는 다시 읽어 확인하지 못했습니다. 그래도 적용되었을 수 있습니다.",
+                "log.apply.write_unverified": "쓰기에서 OK가 보고되었지만 다시 읽기 결과로는 결론을 내릴 수 없었습니다. 검증되지 않음, 확인되지 않음으로 보고되었습니다.",
+            },
         }
 
         for locale, values in expected.items():
@@ -208,7 +212,7 @@ class I18nTests(unittest.TestCase):
                             raw,
                         )
 
-    def test_t03_honest_write_copy_is_byte_exact_in_both_locales(self) -> None:
+    def test_t03_honest_write_copy_is_byte_exact_in_all_locales(self) -> None:
         locale_dir = Path("zd_app/i18n/locales")
         expected = {
             "en": {
@@ -241,18 +245,18 @@ class I18nTests(unittest.TestCase):
                     "OK: Retried {n} failed settings; all write calls succeeded."
                 ),
                 "trust_ritual.verified_writes": (
-                    "Every write reports its outcome. Restore, Safe Import, and settled "
-                    "inline-deadzone changes verify by read-back; profile Apply also "
-                    "read-back-checks step size and lighting zones. Write-only fields are "
+                    "Every write reports its outcome. Restore, Safe Import, settled "
+                    "inline-deadzone changes, and profile Apply read readable fields back "
+                    "and compare them against what was sent. Write-only fields are "
                     "reported as sent, not verified."
                 ),
                 "diagnostics.trust.body": (
                     "Connected plus a recent read means the controller is talking to the app.\n"
                     "Read timings confirm refresh attempts.\n"
                     "Apply results are explicit: every write reports whether the write call "
-                    "succeeded; Restore, Safe Import, and settled inline-deadzone changes "
-                    "read the value back and compare it, and profile Apply also "
-                    "read-back-checks step size and lighting zones; write-only fields "
+                    "succeeded; Restore, Safe Import, settled inline-deadzone changes, and "
+                    "profile Apply read back every readable value they write and compare "
+                    "it; write-only fields "
                     "(back-paddle bindings) are reported as sent, not verified.\n"
                     "Support guidance is separate from protocol verification, so help copy "
                     "never pretends a read or write succeeded."
@@ -261,13 +265,6 @@ class I18nTests(unittest.TestCase):
                 # and must never drift back to an evidence chip (it read "Verified
                 # by read-back", green, before anything was plugged in).
                 "trust_matrix.label.policy": "Verification policy",
-                "trust_matrix.row.applied.why": (
-                    "Restore, Safe Import and settled inline-deadzone changes read every "
-                    "readable field back and compare it against what was sent. Applying a "
-                    "profile read-back-checks step size and lighting zones only - its other "
-                    "fields are reported as sent, not verified. A write that Windows reports "
-                    "as successful is not proof the controller stored the value."
-                ),
             },
             "zh-CN": {
                 "apply.axis_inversion.success": "OK：已写入{side}摇杆轴反转。",
@@ -294,24 +291,32 @@ class I18nTests(unittest.TestCase):
                 ),
                 "results.applied_profile": "配置 {name} 的写入调用已完成（{writes} 项写入）。",
                 "apply.retry.success": "OK：已重试 {n} 项失败设置；全部写入调用成功。",
-                "trust_ritual.verified_writes": (
-                    "每次写入都会报告其结果。还原、安全导入和内联死区的最终写入会通过回读验证；"
-                    "应用配置时还会回读确认步长和各灯光区域。只写字段只报告为已发送，不会标记为已验证。"
-                ),
-                "diagnostics.trust.body": (
-                    "已连接并且最近完成读取，表示手柄正在与应用通信。\n"
-                    "读取时间戳确认刷新尝试。\n"
-                    "应用结果是明确的：每次写入都会报告写入调用是否成功；还原、安全导入和内联死区的最终"
-                    "写入会回读数值并进行比对，应用配置时还会回读确认步长和各灯光区域；只写字段（背键绑定）"
-                    "报告为已发送，而非已验证。\n"
-                    "支持指引与协议验证相互独立，因此帮助文案绝不会假装读取或写入已成功。"
-                ),
+                "trust_ritual.verified_writes": "每次写入都会报告其结果。还原、安全导入、内联死区的最终写入和应用配置都会回读每个可读字段，并与发送的值进行比对。只写字段只报告为已发送，不会标记为已验证。",
+                "diagnostics.trust.body": "已连接并且最近完成读取，表示手柄正在与应用通信。\n读取时间戳确认刷新尝试。\n应用结果是明确的：每次写入都会报告写入调用是否成功；还原、安全导入、内联死区的最终写入和应用配置都会回读各自写入的每个可读值，并与发送的值进行比对；只写字段（背键绑定）报告为已发送，而非已验证。\n支持指引与协议验证相互独立，因此帮助文案绝不会假装读取或写入已成功。",
+                "trust_matrix.row.applied.why": "还原、安全导入和内联死区的最终写入会回读每个可读字段，并与发送的值进行比对。应用配置也会执行相同流程——写入后回读每个可读字段，并在应用详情中显示各字段的结果；只写设置（如后置侧键绑定）无法回读，报告为已发送。Windows 报告写入成功，并不能证明手柄已存储该值。",
                 "trust_matrix.label.policy": "验证策略",
-                "trust_matrix.row.applied.why": (
-                    "还原、安全导入和内联死区的最终写入会回读每个可读字段，并与发送的值进行比对。"
-                    "应用配置时只回读确认步长和各灯光区域——其余字段只报告为已发送，不做验证。"
-                    "Windows 报告写入成功，并不能证明手柄已存储该值。"
-                ),
+            },
+            "ko": {
+                "apply.axis_inversion.success": "OK: {side} 축 반전 쓰기 완료.",
+                "apply.back_paddle.success": "OK: 후면 패들 {slot} -> {target} 전송됨(쓰기 전용, 검증되지 않음).",
+                "apply.binding.success": "OK: 바인딩 {source} -> {target} 쓰기 완료.",
+                "apply.deadzone.success": "OK: 데드존 설정 쓰기 완료.",
+                "apply.lighting.success": "OK: 조명 영역 '{zone}' 쓰기 완료.",
+                "apply.polling_rate.success": "OK: 폴링 레이트 {label} 쓰기 완료.",
+                "apply.sensitivity.success": "OK: {side} 감도 곡선 쓰기 완료.",
+                "apply.sensitivity_8point.success": "OK: {side} 감도 곡선(8포인트) 쓰기 완료.",
+                "apply.step_size.success": "OK: 스텝 크기 {value} 쓰기 완료.",
+                "apply.trigger.success": "OK: {side} 트리거 설정 쓰기 완료.",
+                "apply.vibration.success": "OK: 진동 설정 쓰기 완료.",
+                "apply.profile.success": "OK: 프로필 '{name}' 쓰기 호출 완료({n}회 쓰기).",
+                "apply.profile.success_recovered": "OK: 프로필 '{name}' 쓰기 호출 완료({n}회 쓰기, {k}회 복구됨).",
+                "apply.profile.partial": "Partial: 프로필 '{name}' 쓰기 결과({n}회 중 {m}회; {k}회 실패). 적용 세부 정보를 참조하십시오.",
+                "results.applied_profile": "프로필 {name} 쓰기 호출 완료({writes}회 쓰기).",
+                "apply.retry.success": "OK: 실패한 설정 {n}개 재시도 완료; 모든 쓰기 호출이 성공했습니다.",
+                "trust_ritual.verified_writes": "모든 쓰기는 결과를 보고합니다. 복원, 안전한 가져오기, 입력이 완료된 인라인 데드존 변경 및 프로필 적용은 읽을 수 있는 필드를 다시 읽어 전송된 값과 비교합니다. 쓰기 전용 필드는 전송됨, 검증되지 않음으로 보고됩니다.",
+                "diagnostics.trust.body": "연결되어 있고 최근 읽기 기록이 있으면 게임패드가 앱과 통신 중이라는 뜻입니다.\n읽기 시간 기록은 새로 고침을 시도했음을 확인합니다.\n적용 결과는 명시적으로 표시됩니다. 모든 쓰기는 쓰기 호출의 성공 여부를 보고합니다. 복원, 안전한 가져오기, 입력이 완료된 인라인 데드존 변경 및 프로필 적용은 쓰는 값 중 다시 읽을 수 있는 모든 값을 다시 읽어 비교합니다. 쓰기 전용 필드(후면 패들 바인딩)는 전송됨, 검증되지 않음으로 보고됩니다.\n지원 안내는 프로토콜 검증과 별개이므로 도움말 문구에서 읽기나 쓰기가 성공했다고 잘못 주장하지 않습니다.",
+                "trust_matrix.row.applied.why": "복원, 안전한 가져오기 및 입력이 완료된 인라인 데드존 변경에서는 읽을 수 있는 모든 필드를 다시 읽어 전송된 값과 비교합니다. 프로필을 적용할 때도 동일하게 수행합니다. 쓰기 후 읽을 수 있는 모든 필드를 다시 읽고 적용 세부 정보에 필드별 결과를 표시합니다. 후면 패들 바인딩과 같은 쓰기 전용 설정은 다시 읽을 수 없으며 전송됨으로 보고됩니다. Windows가 성공했다고 보고한 쓰기라도 게임패드가 해당 값을 저장했다는 근거는 아닙니다.",
+                "trust_matrix.label.policy": "검증 정책",
             },
         }
 
@@ -327,33 +332,34 @@ class I18nTests(unittest.TestCase):
                             raw,
                         )
 
-    def test_about_disclaimer_copy_is_byte_exact_in_both_locales(self) -> None:
-        # about.disclaimer states the honest write-verification scope (Track A
-        # honesty cluster). Pinned so the wording cannot silently re-broaden back
-        # to the old universal-verification overclaim. This wording is the
-        # CONSERVATIVE, v2.6.1-cut-true variant: profile Apply is described as
-        # read-back-checking step size and lighting only. When the Track B cut
-        # lands (Apply reads back every readable field), this pin is updated
-        # DELIBERATELY in the same reconciliation pass as trust_ritual.verified_writes
-        # and diagnostics.trust.body. The zh-CN value is an AI draft pending a
-        # Hermes venue-native review before the cut.
+    def test_about_disclaimer_copy_is_byte_exact_in_all_locales(self) -> None:
+        # about.disclaimer states the honest write-verification scope. Pinned so
+        # the wording cannot silently re-broaden past what the code does. This is
+        # the RECONCILED Track-B wording (2026-07-17 4-string reconciliation pass,
+        # with trust_ritual.verified_writes and diagnostics.trust.body): profile
+        # Apply runs the full read-back sweep, and a whole-sweep failure now
+        # synthesizes could-not-verify disclosure, so the claim is universally
+        # true ON TRUNK. ⚠ Port-trap guard: a cut that EXCLUDES Track B must
+        # re-conservatize these strings (2026-07-17 reconciliation note). The zh-CN values
+        # now carry the RECONCILED Track-B scope too (v2.6.2 zh native-review round,
+        # 2026-07-18): profile Apply is stated to read back every readable field,
+        # matching en/ko — the earlier narrower Track-A zh wording was retired.
         locale_dir = Path("zd_app/i18n/locales")
         expected = {
             "en": {
                 "about.disclaimer": (
                     "This app is local-device tooling. Every controller write reports its "
-                    "outcome; the Restore, Safe Import and inline-deadzone flows read the "
-                    "value back to confirm it, and a profile Apply does the same for step "
-                    "size and lighting — write-only fields are reported as sent. It doesn't "
-                    "claim a write succeeded that it couldn't confirm."
+                    "outcome; the Restore, Safe Import, inline-deadzone and profile Apply "
+                    "flows read back every readable value they write and compare it "
+                    "against what was sent — write-only fields are reported as sent. It "
+                    "doesn't claim a write succeeded that it couldn't confirm."
                 ),
             },
             "zh-CN": {
-                "about.disclaimer": (
-                    "此应用是本地设备工具。每次向手柄写入都会报告其结果；还原、安全导入和内联死区流程"
-                    "会通过回读数值进行确认，应用配置时则仅对步长和灯光执行相同的回读确认——只写字段"
-                    "则报告为“已发送”。对于无法确认的写入，它不会声称其已成功。"
-                ),
+                "about.disclaimer": "此应用是本地设备工具。每次向手柄写入都会报告其结果；还原、安全导入、内联死区和应用配置流程都会回读各自写入的每个可读值，并与发送的值进行比对——只写字段则报告为“已发送”。对于无法确认的写入，它不会声称其已成功。",
+            },
+            "ko": {
+                "about.disclaimer": "이 앱은 로컬 기기용 도구입니다. 모든 게임패드 쓰기는 결과를 보고합니다. 복원, 안전한 가져오기, 인라인 데드존 및 프로필 적용 절차에서는 쓰는 값 중 다시 읽을 수 있는 모든 값을 다시 읽어 전송된 값과 비교합니다. 쓰기 전용 필드는 전송됨으로 보고됩니다. 확인할 수 없었던 쓰기를 성공했다고 주장하지 않습니다.",
             },
         }
 
@@ -368,6 +374,60 @@ class I18nTests(unittest.TestCase):
                             f'"{key}": {json.dumps(value, ensure_ascii=False)}'.encode("utf-8"),
                             raw,
                         )
+
+    def test_profile_apply_readback_copy_is_byte_exact_in_english(self) -> None:
+        locale_path = Path("zd_app/i18n/locales/en.json")
+        raw = locale_path.read_bytes()
+        parsed = json.loads(raw.decode("utf-8"))
+        expected = {
+            "apply.result.readback_mismatch": (
+                "{n} change(s) read back different from what was sent. Open apply details "
+                "to see what the controller reported."
+            ),
+            "apply.result.readback_unconfirmed": (
+                "{n} change(s) were written but couldn't be confirmed by read-back this "
+                "time — they may still have applied."
+            ),
+            "apply.result.readback_all_verified": (
+                "All readable changes were confirmed by read-back."
+            ),
+            "apply.readback.detail_note": (
+                "A value that reads back different can mean the controller stored a "
+                "normalized value, or didn't store the change. Write-only settings (like "
+                "paddle bindings) can't be read back."
+            ),
+            "apply.readback.details_action": "Verification details",
+            "field.label.polling_rate": "Polling rate",
+            "field.label.step_size": "Step size",
+            "field.label.vibration": "Vibration",
+            "field.label.deadzones": "Deadzones",
+            "field.label.axis_inversion_left": "Left stick axis inversion",
+            "field.label.axis_inversion_right": "Right stick axis inversion",
+            "field.label.sensitivity_left": "Left stick sensitivity",
+            "field.label.sensitivity_right": "Right stick sensitivity",
+            "field.label.trigger_left": "Left trigger",
+            "field.label.trigger_right": "Right trigger",
+            "field.label.button_bindings": "Button bindings",
+            "field.label.back_paddle_bindings": "Back paddle bindings",
+            "field.label.lighting_zones": "Lighting zones",
+            "trust_matrix.row.applied.why": (
+                "Restore, Safe Import and settled inline-deadzone changes read every "
+                "readable field back and compare it against what was sent. Applying a "
+                "profile does the same — it reads every readable field back after "
+                "writing and shows the per-field result in apply details; write-only "
+                "settings (like paddle bindings) can't be read back and are reported as "
+                "sent. A write Windows reports as successful is not proof the controller "
+                "stored the value."
+            ),
+        }
+
+        for key, value in expected.items():
+            with self.subTest(key=key):
+                self.assertEqual(parsed[key], value)
+                self.assertIn(
+                    f'"{key}": {json.dumps(value, ensure_ascii=False)}'.encode("utf-8"),
+                    raw,
+                )
 
     def test_apply_status_transport_profile_namespaces_in_both_locales(self) -> None:
         locale_dir = Path("zd_app/i18n/locales")

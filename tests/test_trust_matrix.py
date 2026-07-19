@@ -220,19 +220,19 @@ class TrustMatrixDerivationTests(unittest.TestCase):
             )
 
     def test_applied_row_names_the_real_verification_scope(self) -> None:
-        # The old copy asserted a DISPLAY RULE ("applied changes are only marked
-        # verified after the value is read back") — true, but evasive: it told the
-        # user nothing about which of THEIR settings actually got checked, while
-        # sitting under a green chip. The copy must name the real, narrow scope so
-        # it cannot silently re-broaden as the code changes underneath it.
+        # This remains a muted POLICY row, but its copy must follow the real
+        # profile-Apply sweep rather than the old step-size-and-lighting subset.
         why = build_trust_matrix(_signals())[APPLIED].why.lower()
-        self.assertIn("step size", why)
-        self.assertIn("lighting", why)
-        self.assertIn("sent, not verified", why)
+        self.assertIn("every readable field", why)
+        self.assertIn("applying a profile does the same", why)
+        self.assertIn("per-field result in apply details", why)
+        self.assertIn("write-only settings", why)
+        self.assertIn("reported as sent", why)
         # A WriteFile return is not a device ACK, and the copy must say so.
         self.assertIn("not proof", why)
-        # And it must never resurrect the universal-mechanism overclaim (the same
-        # class killed in the public docs' step-size wording).
+        self.assertNotIn("step size and lighting zones only", why)
+        # It must not overclaim that every controller write has a readable
+        # channel, which would erase the write-only settings caveat above.
         self.assertNotIn("are confirmed by reading", why)
         self.assertNotIn("every write is read back", why)
 
