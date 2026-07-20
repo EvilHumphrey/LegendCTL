@@ -52,9 +52,9 @@ Restore always has, and the app speaks Korean.
 ## Same discipline
 
 No new wrapper-written controller settings — the read-back verification only reads. No network
-calls, nothing uploaded. Before publication, the asset-producing CI build must pass the full
-suite; the release build must pass a real-hardware smoke including a Korean-locale pass and the
-exact `한국어` language-picker label; and the release assets must pass `gh attestation verify`.
+calls, nothing uploaded. Before publication, the asset-producing CI build passed the full
+suite; the release build passed a real-hardware smoke including a Korean-locale pass and the
+exact `한국어` language-picker label; and the release assets passed `gh attestation verify`.
 The published assets carry GitHub build provenance you can verify with `gh attestation verify`.
 
 LegendCTL is a standalone, unofficial configurator for the ZD Ultimate Legend — no official ZD app
