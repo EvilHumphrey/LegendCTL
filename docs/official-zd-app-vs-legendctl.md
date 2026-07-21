@@ -42,8 +42,8 @@ LegendCTL configures the **settings** the controller stores onboard, over standa
   above are ZD-Ultimate-Legend-specific)
 
 It writes those settings as HID feature reports and **reports each field's write outcome**, then refreshes the
-on-screen state by re-reading the device. Restore Points, Safe Import, and inline-deadzone writes additionally **read
-back and compare** the readable values they wrote, and profile Apply attempts the same for step size and lighting zones;
+on-screen state by re-reading the device. Profile Apply and the Restore Points, Safe Import, and inline-deadzone
+writes additionally **read back and compare** the readable values they wrote;
 back-paddle bindings are reported as *sent, not verified*. It is **not** a firmware flasher and cannot change
 firmware.
 
@@ -74,8 +74,8 @@ LegendCTL is built so you don't have to take its privacy claims on faith — you
 - **No drivers, no virtual devices, no background service, no input injection, no macros.** It only runs while its
   window is open, and it only configures your controller — it never plays it for you.
 - **Honest write reporting.** A normal Apply reports each field's write outcome and refreshes from the device;
-  Restore Points, Safe Import, and inline-deadzone writes additionally read back and compare readable values
-  (profile Apply additionally attempts read-back verification for step size and lighting zones), and back-paddle
+  profile Apply and the Restore Points, Safe Import, and inline-deadzone writes additionally read back and compare
+  the readable values they wrote, and back-paddle
   bindings are reported as sent, not verified.
 
 This is a statement about what LegendCTL *is*, not a claim about any other software — closed-source tools simply can't

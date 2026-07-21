@@ -60,9 +60,9 @@ short version is **trust you can verify**:
   service of it is left running.
 - **Honest write reporting.** A normal Apply reports each
   field's real write outcome and refreshes the on-screen state from the device;
-  the Restore, Safe Import, and inline deadzone flows go further and verify the
-  readable fields they wrote by reading the values back, and a profile Apply attempts the same
-  for step size and lighting — so a write that the device demonstrably didn't
+  a profile Apply and the Restore, Safe Import, and inline deadzone flows go
+  further and verify the readable fields they wrote by reading the values back
+  — so a write that the device demonstrably didn't
   commit is surfaced honestly instead of flashing "success."
 - **No macros, turbo, or automation.** It configures your controller; it never
   plays for you. That's a deliberate constraint enforced by tests, not a missing
@@ -144,9 +144,9 @@ reproduces verbatim:
 Beyond that: LegendCTL is provided **"as is", without warranty of any kind**,
 express or implied, to the maximum extent permitted by applicable law. You
 assume all risk arising from its use. It writes settings to controller hardware
-over USB/HID and reports each field's write outcome; the Restore, Safe Import,
-and inline deadzone flows additionally verify readable fields by read-back (and a
-profile Apply attempts the same for step size and lighting), while the write-only
+over USB/HID and reports each field's write outcome; profile Apply and the
+Restore, Safe Import, and inline deadzone flows additionally verify readable
+fields by read-back, while the write-only
 back-paddle bindings are reported as sent. There is always a **Recovery** path
 (see below), but you are responsible for how you use it.
 
@@ -171,10 +171,11 @@ how releases are (will be) signed.
 Feature-complete for normal use.
 
 Controller settings (all written as standard HID feature reports; a normal Apply
-reports each field's write outcome and refreshes the on-screen state from the
-device, while the Restore, Safe Import, and inline deadzone flows read back and
-verify the readable values they wrote and a profile Apply attempts the same for step size and
-lighting — the write-only back-paddle bindings are reported as sent, not verified):
+reports each field's write outcome, reads back and compares every readable field
+it wrote — showing per-field matched / mismatched / could-not-verify results —
+and refreshes the on-screen state from the device; the Restore, Safe Import, and
+inline deadzone flows read back and verify the readable values they wrote the
+same way — the write-only back-paddle bindings are reported as sent, not verified):
 
 - USB polling rate (250–8000 Hz; 8K requires firmware v1.18+)
 - 16×16 button binding matrix, with a Current Bindings display read from the
@@ -203,7 +204,7 @@ Controller lifecycle & trust surfaces:
 - Wear Ledger: append-only audit log of wrapper events
 - Module Passport: per-side stick-module fingerprints with longitudinal trends
 - Diagnostic Bundle: operator-triggered, path-sanitized shareable evidence export
-- Trust card at first connect; English + Simplified Chinese UI throughout
+- Trust card at first connect; English, Simplified Chinese, and Korean UI throughout
 - Live Verify: live XInput stick + per-stick circularity readout, plus inline
   firmware-deadzone tuning — each deadzone change captures a Restore Point first,
   and its settled value is read back to confirm, with the panel saying so when the
@@ -316,8 +317,9 @@ Full technical architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Short
 - `zd_app/protocol/` — stable HID protocol layer (interface enumeration, two-handle
   session helpers, preflight checks). Production code; shipped in the dist.
 - `zd_app/services/` — business logic, zero UI imports: settings transport + apply
-  coordinator (per-field write outcomes, firmware-quirk trailers, best-effort read-back
-  verify/retry for step size and lighting zones), restore points, snapshot differ, health
+  coordinator (per-field write outcomes, firmware-quirk trailers, a post-apply read-back
+  sweep over every readable written field, best-effort verify/retry setters for step
+  size and lighting zones), restore points, snapshot differ, health
   report, wear ledger, module passport, diagnostic bundle.
 - `zd_app/storage/` — JSON/JSONL stores with atomic writes: wrapper profiles, app
   settings, restore points, last-applied record, snapshot codec.

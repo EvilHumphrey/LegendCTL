@@ -42,8 +42,8 @@ With the live read-only view open:
 ## Use LegendCTL for supported USB-HID settings
 
 Once the stick is calibrated, LegendCTL can apply the supported settings around it — deadzones, sensitivity curves,
-step size, axis inversion — reporting each write's outcome and refreshing from the device (inline-deadzone, Restore,
-and Safe Import writes additionally read back and compare, and profile Apply attempts the same for step size). See the
+step size, axis inversion — reporting each write's outcome and refreshing from the device (profile Apply and the
+inline-deadzone, Restore, and Safe Import writes additionally read back and compare readable values). See the
 [deadzone & circularity tuning guide](zd-ultimate-legend-deadzone-circularity.md) for the details of each setting.
 
 ## When to use official ZD calibration or firmware resources

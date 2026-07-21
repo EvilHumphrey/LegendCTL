@@ -33,9 +33,9 @@ not aspirational promises:
   macros/turbo/scripting).
 - **HID-only writes, honestly reported.** Controller settings are written as
   standard USB/HID feature reports to the controller's onboard memory. Every write
-  reports its outcome; the Restore, Safe Import, and inline-deadzone flows verify readable
-  fields by read-back (profile Apply additionally attempts read-back verification for step
-  size and lighting zones), and the write-only back-paddle bindings are reported as sent,
+  reports its outcome; profile Apply and the Restore, Safe Import, and inline-deadzone
+  flows verify readable fields by read-back (per-field matched / mismatched /
+  could-not-verify), and the write-only back-paddle bindings are reported as sent,
   not verified.
 
 ## Distribution & signing
