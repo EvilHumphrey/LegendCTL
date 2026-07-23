@@ -326,7 +326,7 @@ Full technical architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Short
 - `zd_app/ui/` — Dear PyGui screens + the AppShell coordinator, including the
   threaded HID-job seam (long device flows run off the render thread) and the
   modal-swap seam (encodes DearPyGui's modal-rendering law).
-- `zd_app/i18n/` — locale loader + `en.json` / `zh-CN.json` (full parity gate).
+- `zd_app/i18n/` — locale loader + `en.json` / `zh-CN.json` / `ko.json` (full parity gate).
 - The shipped application imports nothing outside `zd_app/`, `main_zd.py`, and the
   build tools — a boundary enforced by tests.
 

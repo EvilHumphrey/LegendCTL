@@ -106,7 +106,7 @@ Enforcement lives in the test suite, not in promises:
     `tools/diag_dpg_modal_thread_visibility.py`). Modal chains therefore route through
     `_defer_modal_swap` (teardown pass → rendered frame → create pass, with coalescing
     keys); two modals never show stacked — lower modals hide and re-show instead.
-- `i18n/` — locale loader + `en.json` / `zh-CN.json` (full-file parity gate).
+- `i18n/` — locale loader + `en.json` / `zh-CN.json` / `ko.json` (full-file parity gate).
 
 Entry point: `main_zd.py` (wires real stores/services/executor; `AppShell` accepts
 injected fakes for tests). Version constants: `zd_app/version.py`.
