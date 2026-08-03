@@ -1,0 +1,171 @@
+name: Publish winget update
+
+# The release-build workflow deliberately stops at a DRAFT release so the
+# maintainer can hardware-smoke the exact CI-built installer before publishing.
+# This separate workflow begins only after that release is published; draft or
+# prerelease assets must never be submitted to the winget community repository.
+#
+# One-time repository setup is documented in packaging/winget/README.md. The
+# job stays inert until WINGET_AUTOMATION_ENABLED is exactly "true".
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable release tag (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: winget-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Submit version update to microsoft/winget-pkgs
+    if: ${{ vars.WINGET_AUTOMATION_ENABLED == 'true' }}
+    runs-on: windows-2025
+    timeout-minutes: 20
+
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
+
+    steps:
+      - name: Guard published stable release and exact installer asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw "Refusing winget submission: '$tag' is not vMAJOR.MINOR.PATCH."
+          }
+
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Could not read release $tag." }
+          if ($release.draft) { throw "Refusing winget submission: $tag is still a draft." }
+          if ($release.prerelease) { throw "Refusing winget submission: $tag is a prerelease." }
+          if ($release.tag_name -ne $tag) { throw "Release/tag mismatch: expected $tag, got $($release.tag_name)." }
+
+          $version = $tag.Substring(1)
+          $assetName = "ZDUltimateLegend-v$version-Setup.exe"
+          $assets = @($release.assets | Where-Object { $_.name -eq $assetName })
+          if ($assets.Count -ne 1) {
+            throw "Expected exactly one published $assetName asset, found $($assets.Count)."
+          }
+
+          $installerUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$assetName"
+          if ($assets[0].browser_download_url -ne $installerUrl) {
+            throw "Installer URL mismatch: expected $installerUrl, got $($assets[0].browser_download_url)."
+          }
+          if ($assets[0].digest -notmatch '^sha256:[0-9a-f]{64}$') {
+            throw "Published installer has no GitHub SHA-256 digest; refusing submission."
+          }
+
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "INSTALLER_URL=$installerUrl" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $releaseDate = ([datetimeoffset] $release.published_at).ToString('yyyy-MM-dd')
+          "RELEASE_DATE=$releaseDate" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Stable published release $tag and installer digest confirmed."
+
+      - name: Set up the pinned .NET 9 SDK required by WingetCreate
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '9.0.316'
+
+      - name: Download pinned Microsoft WingetCreate
+        shell: pwsh
+        run: |
+          $toolUrl = "https://github.com/microsoft/winget-create/releases/download/v1.12.13.0/wingetcreate.exe"
+          $expected = "24042bd37915805615e6cf969ac57c6439124c3fe85823327f5f3fb24bd9ffea"
+          Invoke-WebRequest -Uri $toolUrl -OutFile wingetcreate.exe
+          $actual = (Get-FileHash -LiteralPath wingetcreate.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "WingetCreate hash mismatch: expected $expected, got $actual."
+          }
+          & .\wingetcreate.exe info
+          if ($LASTEXITCODE -ne 0) { throw "Pinned WingetCreate failed its startup check." }
+
+      - name: Generate and normalize the version manifest
+        shell: pwsh
+        run: |
+          & .\wingetcreate.exe update EvilHumphrey.LegendCTL `
+            --version $env:VERSION `
+            --urls "$env:INSTALLER_URL|x64" `
+            --release-date $env:RELEASE_DATE `
+            --release-notes-url "https://github.com/$env:GITHUB_REPOSITORY/releases/tag/v$env:VERSION" `
+            --out winget-manifest
+          if ($LASTEXITCODE -ne 0) { throw "WingetCreate update failed." }
+
+          $yaml = @(Get-ChildItem -Path winget-manifest -Recurse -File -Filter '*.yaml')
+          if ($yaml.Count -ne 3) {
+            throw "Expected exactly three generated manifest YAML files, found $($yaml.Count)."
+          }
+          $manifestDirs = @($yaml | ForEach-Object { $_.Directory.FullName } | Sort-Object -Unique)
+          if ($manifestDirs.Count -ne 1) {
+            throw "Expected all generated YAML files in one version directory, found $($manifestDirs.Count) directories."
+          }
+          $installer = @($yaml | Where-Object { $_.Name -eq 'EvilHumphrey.LegendCTL.installer.yaml' })
+          $locale = @($yaml | Where-Object { $_.Name -eq 'EvilHumphrey.LegendCTL.locale.en-US.yaml' })
+          if ($installer.Count -ne 1 -or $locale.Count -ne 1) {
+            throw "Could not resolve exactly one installer manifest and one en-US locale manifest."
+          }
+
+          function Set-SingleYamlField {
+            param(
+              [Parameter(Mandatory)] [string] $Path,
+              [Parameter(Mandatory)] [string] $Field,
+              [Parameter(Mandatory)] [string] $Value
+            )
+            $raw = [IO.File]::ReadAllText($Path)
+            $pattern = '(?m)^' + [regex]::Escape($Field) + ':[^\r\n]*'
+            $matches = [regex]::Matches($raw, $pattern)
+            if ($matches.Count -ne 1) {
+              throw "Expected exactly one $Field field in $Path, found $($matches.Count)."
+            }
+            $updated = [regex]::Replace($raw, $pattern, ($Field + ': ' + $Value))
+            [IO.File]::WriteAllText($Path, $updated, [Text.UTF8Encoding]::new($false))
+          }
+
+          # WingetCreate carries version-independent locale fields forward from
+          # the previous manifest. Re-pin all version-specific references and
+          # the release date before the submission step.
+          Set-SingleYamlField -Path $installer[0].FullName -Field 'ReleaseDate' -Value $env:RELEASE_DATE
+          Set-SingleYamlField -Path $locale[0].FullName -Field 'LicenseUrl' `
+            -Value "https://github.com/$env:GITHUB_REPOSITORY/blob/v$env:VERSION/LICENSE"
+          Set-SingleYamlField -Path $locale[0].FullName -Field 'ReleaseNotesUrl' `
+            -Value "https://github.com/$env:GITHUB_REPOSITORY/releases/tag/v$env:VERSION"
+
+          foreach ($file in $yaml | Sort-Object FullName) {
+            $raw = [IO.File]::ReadAllText($file.FullName)
+            if ($raw -notmatch ('(?m)^PackageVersion: ' + [regex]::Escape($env:VERSION) + '\r?$')) {
+              throw "$($file.Name) does not carry PackageVersion $env:VERSION."
+            }
+            Write-Host "::group::$($file.Name)"
+            Get-Content -LiteralPath $file.FullName
+            Write-Host "::endgroup::"
+          }
+          "MANIFEST_DIR=$($manifestDirs[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Submit the reviewed manifest set
+        shell: pwsh
+        env:
+          # Microsoft recommends the environment variable for CI because
+          # passing --token can expose a classic PAT in process/log output.
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_CREATE_GITHUB_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINGET_CREATE_GITHUB_TOKEN)) {
+            throw "WINGET_CREATE_GITHUB_TOKEN is not configured."
+          }
+          $expected = "24042bd37915805615e6cf969ac57c6439124c3fe85823327f5f3fb24bd9ffea"
+          $actual = (Get-FileHash -LiteralPath wingetcreate.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "WingetCreate changed after generation: expected $expected, got $actual."
+          }
+          & .\wingetcreate.exe submit $env:MANIFEST_DIR
+          if ($LASTEXITCODE -ne 0) { throw "WingetCreate submission failed." }

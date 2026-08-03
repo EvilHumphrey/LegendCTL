@@ -98,15 +98,18 @@ gh attestation verify .\ZDUltimateLegend-v<version>-Setup.exe `
 - **No drivers, no background service.** It's a plain desktop app; closing it stops it completely.
 - **Standalone.** It doesn't require, launch, or modify the official ZD app. (One narrow read-only exception: if the official app's Controller Settings window is already open during an explicit device read, LegendCTL may read a few summary labels from it via Windows UI Automation — it never launches or changes that app.)
 
-## 6. Install via winget (when available)
+## 6. Install via winget
 
-Once the manifest is accepted into the Windows Package Manager community repo, you'll be able to install and update with:
+LegendCTL is available from the Windows Package Manager community repository:
 
 ```powershell
-winget install EvilHumphrey.LegendCTL
+winget install --id EvilHumphrey.LegendCTL --exact
 ```
 
-winget installs are a smoother path because the package is fetched and hash-checked for you.
+winget fetches and hash-checks the installer for you. The community catalog can
+trail the newest GitHub release while an update is validated; check the
+currently published version with
+`winget show --id EvilHumphrey.LegendCTL --exact`.
 
 ## 7. Uninstall
 
