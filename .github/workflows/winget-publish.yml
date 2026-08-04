@@ -17,6 +17,11 @@ on:
         description: Published stable release tag (vMAJOR.MINOR.PATCH)
         required: true
         type: string
+      dry_run:
+        description: Generate and verify the manifest, but do NOT submit it
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -28,7 +33,7 @@ concurrency:
 jobs:
   publish:
     name: Submit version update to microsoft/winget-pkgs
-    if: ${{ vars.WINGET_AUTOMATION_ENABLED == 'true' }}
+    if: ${{ github.repository == 'EvilHumphrey/LegendCTL' && vars.WINGET_AUTOMATION_ENABLED == 'true' }}
     runs-on: windows-2025
     timeout-minutes: 20
 
@@ -42,36 +47,84 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = $env:RELEASE_TAG
-          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+          # \z, not $: .NET's $ also matches before a trailing newline, so a
+          # dispatched "v1.2.3`n" would otherwise pass this gate.
+          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+\z') {
             throw "Refusing winget submission: '$tag' is not vMAJOR.MINOR.PATCH."
+          }
+
+          # Only ever move the catalog forward. Without this, a dispatch naming
+          # an older tag passes every other gate and opens a PR that rewrites
+          # manifests Microsoft has already validated and merged.
+          $latest = gh api "repos/$env:GITHUB_REPOSITORY/releases/latest" --jq '.tag_name'
+          if ($LASTEXITCODE -ne 0) { throw "Could not read the latest release." }
+          $latest = "$latest".Trim()
+          if ($latest -cne $tag) {
+            throw "Refusing winget submission: $tag is not the latest published release ($latest)."
           }
 
           $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw "Could not read release $tag." }
           if ($release.draft) { throw "Refusing winget submission: $tag is still a draft." }
           if ($release.prerelease) { throw "Refusing winget submission: $tag is a prerelease." }
-          if ($release.tag_name -ne $tag) { throw "Release/tag mismatch: expected $tag, got $($release.tag_name)." }
+          if ($release.tag_name -cne $tag) { throw "Release/tag mismatch: expected $tag, got $($release.tag_name)." }
 
           $version = $tag.Substring(1)
           $assetName = "ZDUltimateLegend-v$version-Setup.exe"
-          $assets = @($release.assets | Where-Object { $_.name -eq $assetName })
+          # -ceq: PowerShell's -eq is case-insensitive, but GitHub asset URLs
+          # are case-sensitive, so a differently-cased asset would pass here and
+          # then 404 at download time.
+          $assets = @($release.assets | Where-Object { $_.name -ceq $assetName })
           if ($assets.Count -ne 1) {
             throw "Expected exactly one published $assetName asset, found $($assets.Count)."
           }
 
           $installerUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/$assetName"
-          if ($assets[0].browser_download_url -ne $installerUrl) {
+          if ($assets[0].browser_download_url -cne $installerUrl) {
             throw "Installer URL mismatch: expected $installerUrl, got $($assets[0].browser_download_url)."
           }
-          if ($assets[0].digest -notmatch '^sha256:[0-9a-f]{64}$') {
+          if ($assets[0].digest -notmatch '^sha256:[0-9a-f]{64}\z') {
             throw "Published installer has no GitHub SHA-256 digest; refusing submission."
+          }
+
+          # The digest check above only proves GitHub recorded *a* hash. WingetCreate
+          # downloads the URL itself and hashes whatever bytes it receives, so without
+          # the binding below the submitted InstallerSha256 would be self-consistent
+          # with whatever was served rather than with anything this project verified.
+          # release-build.yml already publishes SHA256SUMS.txt and a build-provenance
+          # attestation; this is the one path pushing bytes into a public catalog, so
+          # it checks both before anything is generated.
+          New-Item -ItemType Directory -Force -Path verify | Out-Null
+          gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern $assetName --dir verify
+          if ($LASTEXITCODE -ne 0) { throw "Could not download $assetName for verification." }
+          gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern 'SHA256SUMS.txt' --dir verify
+          if ($LASTEXITCODE -ne 0) { throw "Could not download SHA256SUMS.txt for verification." }
+
+          $localHash = (Get-FileHash -LiteralPath "verify/$assetName" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ("sha256:$localHash" -cne $assets[0].digest) {
+            throw "Asset bytes do not match the API digest: API $($assets[0].digest), bytes sha256:$localHash."
+          }
+
+          # SHA256SUMS.txt lines are "<64-hex> *<filename>".
+          $sumsLines = @(Get-Content -LiteralPath "verify/SHA256SUMS.txt" |
+            Where-Object { $_ -cmatch ('^([0-9a-f]{64}) \*' + [regex]::Escape($assetName) + '\z') })
+          if ($sumsLines.Count -ne 1) {
+            throw "Expected exactly one $assetName line in SHA256SUMS.txt, found $($sumsLines.Count)."
+          }
+          if ($sumsLines[0] -cnotmatch ('^' + [regex]::Escape($localHash) + ' \*')) {
+            throw "SHA256SUMS.txt disagrees with the published bytes for $assetName."
+          }
+
+          gh attestation verify "verify/$assetName" --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) {
+            throw "Installer failed build-provenance verification; refusing submission."
           }
 
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "INSTALLER_URL=$installerUrl" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           $releaseDate = ([datetimeoffset] $release.published_at).ToString('yyyy-MM-dd')
           "RELEASE_DATE=$releaseDate" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "Stable published release $tag and installer digest confirmed."
+          Write-Host "$tag installer bound to SHA256SUMS.txt and to its build-provenance attestation."
 
       - name: Set up the pinned .NET 9 SDK required by WingetCreate
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
@@ -124,22 +177,35 @@ jobs:
             )
             $raw = [IO.File]::ReadAllText($Path)
             $pattern = '(?m)^' + [regex]::Escape($Field) + ':[^\r\n]*'
-            $matches = [regex]::Matches($raw, $pattern)
-            if ($matches.Count -ne 1) {
-              throw "Expected exactly one $Field field in $Path, found $($matches.Count)."
+            # Deliberately not named $matches: that is a PowerShell automatic
+            # variable, and shadowing it here reads as a bug even though it is not.
+            $found = [regex]::Matches($raw, $pattern)
+            if ($found.Count -ne 1) {
+              throw "Expected exactly one $Field field in $Path, found $($found.Count)."
             }
             $updated = [regex]::Replace($raw, $pattern, ($Field + ': ' + $Value))
             [IO.File]::WriteAllText($Path, $updated, [Text.UTF8Encoding]::new($false))
           }
 
           # WingetCreate carries version-independent locale fields forward from
-          # the previous manifest. Re-pin all version-specific references and
-          # the release date before the submission step.
+          # the previous manifest. Re-pin the three root-level version-specific
+          # references it does not update itself. Set-SingleYamlField is anchored
+          # at column 0, so it deliberately cannot reach nested fields; the
+          # DisplayVersion sweep below covers the one nested field that could
+          # carry a stale version if upstream ever reintroduces it.
           Set-SingleYamlField -Path $installer[0].FullName -Field 'ReleaseDate' -Value $env:RELEASE_DATE
           Set-SingleYamlField -Path $locale[0].FullName -Field 'LicenseUrl' `
             -Value "https://github.com/$env:GITHUB_REPOSITORY/blob/v$env:VERSION/LICENSE"
           Set-SingleYamlField -Path $locale[0].FullName -Field 'ReleaseNotesUrl' `
             -Value "https://github.com/$env:GITHUB_REPOSITORY/releases/tag/v$env:VERSION"
+
+          # (?:-\s+)? because AppsAndFeaturesEntries is a YAML *list*, so the field
+          # can appear as "- DisplayVersion: x" on the entry's first key.
+          $staleDisplay = @(Get-Content -LiteralPath $installer[0].FullName |
+            Where-Object { $_ -match '^\s*(?:-\s+)?DisplayVersion:\s*(\S+)\s*\z' -and $Matches[1] -cne $env:VERSION })
+          if ($staleDisplay.Count -ne 0) {
+            throw "Installer manifest carries a DisplayVersion that is not $env:VERSION: $($staleDisplay -join '; ')"
+          }
 
           foreach ($file in $yaml | Sort-Object FullName) {
             $raw = [IO.File]::ReadAllText($file.FullName)
@@ -152,7 +218,17 @@ jobs:
           }
           "MANIFEST_DIR=$($manifestDirs[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Report a dry run and stop before submitting
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        shell: pwsh
+        run: |
+          Write-Host "Dry run: manifest generated and verified for $env:RELEASE_TAG, not submitted."
+          Write-Host "Re-run with dry_run unchecked to open the winget-pkgs pull request."
+
       - name: Submit the reviewed manifest set
+        # A dispatch is a rehearsal unless dry_run is explicitly unchecked; a
+        # published release always submits.
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.dry_run }}
         shell: pwsh
         env:
           # Microsoft recommends the environment variable for CI because
