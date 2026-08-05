@@ -33,6 +33,12 @@ concurrency:
 jobs:
   publish:
     name: Submit version update to microsoft/winget-pkgs
+    # Scopes the PAT to this job: an environment secret is unreadable by any job
+    # that does not name its environment, so ci.yml and release-build.yml cannot
+    # reach it. Configure winget-publish with a required reviewer to get a manual
+    # approval gate before a submission is opened against microsoft/winget-pkgs.
+    # A repository-level secret of the same name still works if you prefer that.
+    environment: winget-publish
     if: ${{ github.repository == 'EvilHumphrey/LegendCTL' && vars.WINGET_AUTOMATION_ENABLED == 'true' }}
     runs-on: windows-2025
     timeout-minutes: 20

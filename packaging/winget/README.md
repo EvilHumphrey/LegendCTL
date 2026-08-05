@@ -22,17 +22,37 @@ intact: `release-build.yml` still creates a draft, the maintainer still
 hardware-smokes the exact CI-built installer, and winget automation sees the
 release only after the maintainer publishes it.
 
-Configure the secret first, then enable the workflow with the variable:
+Configure the token first, then enable the workflow with the variable. Do these
+in order — the last step is the one that arms anything:
 
-1. An Actions secret named `WINGET_CREATE_GITHUB_TOKEN`. Microsoft WingetCreate
-   currently requires a classic GitHub PAT with the `public_repo` scope for
-   automated submissions; fine-grained tokens are not supported.
-2. An Actions variable named `WINGET_AUTOMATION_ENABLED` with the exact value
+1. **Create the environment `winget-publish`** (Settings → Environments) and add
+   yourself under **Required reviewers**. The job names this environment, so a
+   submission then pauses for a manual approval before it can run. Optionally
+   limit its deployment branches to `main`.
+2. **Add `WINGET_CREATE_GITHUB_TOKEN` as a secret _inside that environment_.**
+   Microsoft WingetCreate currently requires a classic GitHub PAT with the
+   `public_repo` scope; fine-grained tokens are not supported. An environment
+   secret is unreadable by any job that does not name its environment, which
+   keeps the PAT out of reach of `ci.yml` and `release-build.yml`.
+3. **Add the Actions variable `WINGET_AUTOMATION_ENABLED`** with the exact value
    `true`.
 
+> ⚠ **Create the environment *with* its reviewer rule before step 3.** A workflow
+> that names an environment which does not exist yet auto-creates it on first
+> run, with **no** protection rules — so enabling the variable first would let a
+> submission through unapproved. Doing step 1 first makes that impossible.
+
+A repository-level secret of the same name also works if you would rather skip
+the approval gate; environment secrets simply take precedence when both exist.
+
+Because the PAT is classic and `public_repo` grants write to **every public
+repository the account owns** — including this one — consider issuing it from a
+dedicated account that owns nothing but a `winget-pkgs` fork, and give it an
+expiry.
+
 The job is skipped while the variable is unset or set to `false`; if it is
-enabled without the secret, the final submission step fails closed. Once both
-settings are ready, rehearse from Actions with `workflow_dispatch`, leaving
+enabled without the secret, the final submission step fails closed. Once all
+three are ready, rehearse from Actions with `workflow_dispatch`, leaving
 **`dry_run` checked** — that generates and fully verifies the manifest but stops
 before opening any pull request. Unchecking `dry_run` submits for real.
 
@@ -65,12 +85,10 @@ Before a submission, the workflow:
   `LicenseUrl`, and `ReleaseNotesUrl` to the published release, and refuses a
   manifest carrying a `DisplayVersion` other than the one being published;
 - passes the PAT only through WingetCreate's recommended environment variable,
-  and only to the final submit step.
-
-A note on the token: WingetCreate needs a **classic** PAT, and `public_repo`
-grants write to every public repository the account owns — including this one.
-Issuing it from a dedicated account that owns nothing but a `winget-pkgs` fork,
-with an expiry set, keeps that blast radius off the main account.
+  and only to the final submit step. The job names the `winget-publish`
+  environment, so it also waits for that environment's required reviewers —
+  when reviewers are configured on it, which is step 1 of the setup above and
+  not something this file can guarantee on its own.
 
 The resulting pull request still goes through microsoft/winget-pkgs validation
 and moderator review. If automation is disabled, prepare the same three-file
