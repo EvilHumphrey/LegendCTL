@@ -1,106 +1,79 @@
-# winget manifest — EvilHumphrey.LegendCTL
+# winget publishing — EvilHumphrey.LegendCTL
 
-This directory holds the [winget](https://learn.microsoft.com/windows/package-manager/)
-package manifest for the **public LegendCTL release**, so that
-`winget install EvilHumphrey.LegendCTL` (or `winget install --id EvilHumphrey.LegendCTL`)
-works once it is merged into the community repo. No code-signing certificate is
-required — winget only needs a public installer URL and its SHA256.
+LegendCTL is published in the
+[Windows Package Manager community repository](https://github.com/microsoft/winget-pkgs/tree/master/manifests/e/EvilHumphrey/LegendCTL).
+That upstream directory is the source of truth for versions users receive with:
 
-The version subfolder (`2.3.0/`) contains the three manifest files that get
-copied verbatim into a `microsoft/winget-pkgs` fork. **Copy only the `.yaml`
-files** — this `README.md` stays here.
-
-```
-2.3.0/
-  EvilHumphrey.LegendCTL.installer.yaml     # installer manifest (url, sha256, inno, ProductCode)
-  EvilHumphrey.LegendCTL.locale.en-US.yaml  # default-locale manifest (publisher, description, tags)
-  EvilHumphrey.LegendCTL.yaml               # version manifest (ties the set together)
+```powershell
+winget install --id EvilHumphrey.LegendCTL --exact
+winget show --id EvilHumphrey.LegendCTL --exact
 ```
 
-## Provenance (every asserted value, and where it came from)
+The versioned folders beside this file are historical submission snapshots.
+They are not the live catalog and must not be copied forward as a new release
+template. Microsoft accepted the package at 2.6.0; future updates are generated
+from the accepted upstream manifest.
 
-| Field | Value | Source |
-|---|---|---|
-| InstallerUrl | `https://github.com/EvilHumphrey/LegendCTL/releases/download/v2.3.0/ZDUltimateLegend-v2.3.0-Setup.exe` | `gh release view v2.3.0 -R EvilHumphrey/LegendCTL` asset `url` |
-| InstallerSha256 | `A6CA8F2DE16FBCC65C8EE825891C1EAB2694FE29C3E3C2D43DA35747C729DFB2` | Release `SHA256SUMS.txt`, cross-checked against GitHub's API asset `digest` (`sha256:a6ca8f2d…`) — both agree |
-| InstallerType | `inno` | `tools/installer/inno_setup_zd_wrapper.iss` (Inno Setup script) |
-| ProductCode | `{ZDUltimateLegend}_is1` | Inno `AppId={{ZDUltimateLegend}` → resolved AppId `{ZDUltimateLegend}` → Inno appends `_is1` for the ARP/uninstall key |
-| AppsAndFeaturesEntries DisplayName | `ZD Ultimate Legend Wrapper` | Inno `AppName` (`.iss` line 21) — the legacy EXE name the installer still registers |
-| AppsAndFeaturesEntries Publisher | `EvilHumphrey` | Inno `AppPublisher` (`.iss` line 23) |
-| AppsAndFeaturesEntries DisplayVersion | `2.3.0` | Inno `AppVersion` = `ZDUL_VERSION` build env = release version |
-| Scope | `machine` | Inno `PrivilegesRequired=admin` + `DefaultDirName={autopf}\ZDUltimateLegend` (Program Files) |
-| Architecture | `x64` | Inno `ArchitecturesAllowed=x64compatible` |
+## Automated update workflow
 
-### On the ProductCode / AppId (the one place precision matters)
+`.github/workflows/winget-publish.yml` submits a version update only after a
+stable GitHub release is published. This keeps the release-build safety boundary
+intact: `release-build.yml` still creates a draft, the maintainer still
+hardware-smokes the exact CI-built installer, and winget automation sees the
+release only after the maintainer publishes it.
 
-In an Inno `.iss`, a leading `{{` is the escape for a literal `{`. So
-`AppId={{ZDUltimateLegend}` resolves to the AppId **`{ZDUltimateLegend}`** (braces
-included), and Inno registers its uninstall key as `{AppId}_is1` →
-**`{ZDUltimateLegend}_is1`**. This braces-are-kept behaviour was confirmed against
-real Inno apps already installed on the build machine (e.g. ExitLag's
-`{58571ef5-…}_is1`, Revo's `{A28DBDA2-…}_is1` — braced AppIds keep their braces in
-the key; unbraced ones like `Git_is1` do not). winget uses this value to detect
-installed/upgradeable/uninstallable state, so it must match exactly.
+Configure the secret first, then enable the workflow with the variable:
 
-> The `{ZDUltimateLegend}_is1` key was **not** present in this machine's registry
-> at authoring time (the operator has only used the portable/local-install path,
-> never the actual Setup.exe), so the value is derived from the `.iss` rather than
-> read live. It is stable across versions because the AppId is a hardcoded literal
-> in the only `.iss`, not version-parameterized.
+1. An Actions secret named `WINGET_CREATE_GITHUB_TOKEN`. Microsoft WingetCreate
+   currently requires a classic GitHub PAT with the `public_repo` scope for
+   automated submissions; fine-grained tokens are not supported.
+2. An Actions variable named `WINGET_AUTOMATION_ENABLED` with the exact value
+   `true`.
 
-### One chosen-convention field
+The job is skipped while the variable is unset or set to `false`; if it is
+enabled without the secret, the final submission step fails closed. Once both
+settings are ready, rehearse from Actions with `workflow_dispatch`, leaving
+**`dry_run` checked** — that generates and fully verifies the manifest but stops
+before opening any pull request. Unchecking `dry_run` submits for real.
 
-`MinimumOSVersion: 10.0.17763.0` is a pragmatic "modern Windows 10 (1809+)" floor.
-The project does **not** document an exact minimum build, and the app is x64-only
-(DearPyGui / Python 3.12). Lower it to `10.0.0.0` for maximum reach, or raise it,
-if you prefer — it only gates which Windows builds winget will install on.
+## Safety gates
 
-## Validation
+Before a submission, the workflow:
 
-```
-> winget validate --manifest <this>/2.3.0
-Manifest validation succeeded.
-```
-(Validated locally with winget v1.28.240.)
+- runs only in this repository, and only while `WINGET_AUTOMATION_ENABLED` is
+  exactly `true`;
+- accepts only `vMAJOR.MINOR.PATCH` tags;
+- **refuses any tag that is not the latest published release**, so a submission
+  can only move the catalog forward and can never rewrite a version Microsoft
+  has already merged;
+- re-reads GitHub's release object and rejects drafts and prereleases;
+- requires exactly one expected Setup asset, matched case-sensitively, carrying
+  a GitHub SHA-256 digest;
+- **downloads that installer and binds it to this project's own build
+  provenance** before generating anything — the bytes must hash to the digest
+  GitHub recorded, must match the release's published `SHA256SUMS.txt`, and must
+  pass `gh attestation verify` against this repository. Without this the
+  submitted `InstallerSha256` would only be self-consistent with whatever the
+  URL happened to serve;
+- installs the exact .NET 9.0.316 SDK through a full-SHA-pinned official
+  `actions/setup-dotnet` step;
+- downloads Microsoft's WingetCreate v1.12.13.0 from its immutable release URL
+  and verifies SHA-256
+  `24042bd37915805615e6cf969ac57c6439124c3fe85823327f5f3fb24bd9ffea`, then
+  re-verifies it immediately before the token-bearing submit step;
+- generates from the accepted upstream package, pins `ReleaseDate`,
+  `LicenseUrl`, and `ReleaseNotesUrl` to the published release, and refuses a
+  manifest carrying a `DisplayVersion` other than the one being published;
+- passes the PAT only through WingetCreate's recommended environment variable,
+  and only to the final submit step.
 
-## How to submit (operator does this — not the agent)
+A note on the token: WingetCreate needs a **classic** PAT, and `public_repo`
+grants write to every public repository the account owns — including this one.
+Issuing it from a dedicated account that owns nothing but a `winget-pkgs` fork,
+with an expiry set, keeps that blast radius off the main account.
 
-1. **Fork** `https://github.com/microsoft/winget-pkgs` on GitHub (or reuse an
-   existing fork). Clone it locally and add the upstream remote if you want to
-   keep it current:
-   ```powershell
-   git clone https://github.com/<you>/winget-pkgs.git
-   cd winget-pkgs
-   git checkout -b legendctl-2.3.0
-   ```
-2. **Place the files** at the path winget-pkgs expects (publisher's first letter,
-   lowercase, then PackageIdentifier parts, then version):
-   ```
-   manifests/e/EvilHumphrey/LegendCTL/2.3.0/EvilHumphrey.LegendCTL.installer.yaml
-   manifests/e/EvilHumphrey/LegendCTL/2.3.0/EvilHumphrey.LegendCTL.locale.en-US.yaml
-   manifests/e/EvilHumphrey/LegendCTL/2.3.0/EvilHumphrey.LegendCTL.yaml
-   ```
-   (Copy the three `.yaml` files from this repo's `packaging/winget/2.3.0/`.)
-3. **Re-validate** in place, and optionally test-install in Windows Sandbox:
-   ```powershell
-   winget validate --manifest manifests/e/EvilHumphrey/LegendCTL/2.3.0
-   # optional, requires Windows Sandbox enabled — installs the package for real:
-   winget install --manifest manifests/e/EvilHumphrey/LegendCTL/2.3.0
-   ```
-4. **Commit and push to your fork**, then open a PR against
-   `microsoft/winget-pkgs:master`:
-   ```powershell
-   git add manifests/e/EvilHumphrey/LegendCTL/2.3.0
-   git commit -m "New package: EvilHumphrey.LegendCTL version 2.3.0"
-   git push -u origin legendctl-2.3.0
-   ```
-   Open the PR on GitHub. The winget-pkgs CI runs schema validation **and** an
-   automated Windows Sandbox install/uninstall smoke test; a moderator merges
-   once they pass.
-
-**Shortcut alternative:** `wingetcreate submit <dir>` (from Microsoft's
-`wingetcreate` tool) forks, branches, and opens the PR in one step. Either path
-ends in the same community-repo PR — which only you (the operator) should open.
-
-After merge, `winget install EvilHumphrey.LegendCTL` is the one-line install you
-can drop into video descriptions and the README.
+The resulting pull request still goes through microsoft/winget-pkgs validation
+and moderator review. If automation is disabled, prepare the same three-file
+manifest set manually, run
+`winget validate --manifest <manifest-directory>`, and open a one-version-only
+pull request against `microsoft/winget-pkgs:master`.

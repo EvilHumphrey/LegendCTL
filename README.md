@@ -96,9 +96,12 @@ release number shown on the [latest release](https://github.com/EvilHumphrey/Leg
   registers an uninstaller in Windows Settings → Apps, and optionally adds a
   desktop shortcut (unchecked by default). The only difference from the ZIP is the
   install/uninstall machinery; the wrapper itself is identical.
-- **winget / Scoop (planned).** A [Windows Package Manager submission](https://github.com/microsoft/winget-pkgs/pull/402609)
-  is awaiting review/merge in `microsoft/winget-pkgs`; once accepted,
-  `winget install EvilHumphrey.LegendCTL` will work. A Scoop bucket is also planned.
+- **winget (available) / Scoop (planned).** Install from the
+  [Windows Package Manager community repository](https://github.com/microsoft/winget-pkgs/tree/master/manifests/e/EvilHumphrey/LegendCTL)
+  with `winget install --id EvilHumphrey.LegendCTL --exact`. The community
+  catalog can trail the newest GitHub release while an update is
+  validated; `winget show --id EvilHumphrey.LegendCTL --exact` reports the
+  version it currently carries. A Scoop bucket is still planned.
 
 > **A note on names.** The project is named **LegendCTL**, but the application
 > window, Start Menu entry, and executable still carry the legacy name *ZD
