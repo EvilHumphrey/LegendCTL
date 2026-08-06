@@ -119,14 +119,17 @@ injected fakes for tests). Version constants: `zd_app/version.py`.
 
 ## Test architecture
 
-~3,134 unittest tests (v2.6.2). Services are tested headlessly; screens are tested
+3,172 unittest tests (v2.6.2 public maintenance gate, 2026-08-06). Services are tested headlessly; screens are tested
 against a patched DearPyGui that records widget calls (no real rendering — which is why
 real-DPG behaviors like the modal law are additionally pinned by the manual bench tool
 in `tools/`). Suite conventions: system Python 3.12 with `dearpygui` installed (the
 release CI additionally runs the full suite on Python 3.13 — the runtime the release
 binaries ship with — before building); exit
-code 139 on teardown is a known DPG segfault artifact, not a failure. Drift/parity/
-forbidden-phrase gates run as ordinary tests so they fail the build on violation.
+code 139 (or Windows' signed/unsigned `0xC0000005` form after a complete `OK`
+summary) on teardown is a known DPG artifact, not a failure. The current 36 skips
+include ten exact-signature quarantines for latent font-pressure findings; a timeout,
+unrelated assertion, changed signature, or unexpected success fails the matrix gate.
+Drift/parity/forbidden-phrase gates run as ordinary tests so they fail the build on violation.
 
 ## Build & distribution
 
