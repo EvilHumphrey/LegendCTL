@@ -95,6 +95,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The tag guard below proves this commit belongs to public main.
+          # A shallow tag-only checkout cannot establish that ancestry.
+          fetch-depth: 0
 
       - name: Set up Python 3.13
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -135,6 +139,34 @@ jobs:
           if ("v$version" -ne $tag) {
             throw "Tag $tag does not match zd_app/version.py __version__=$version — refusing to build a mislabeled release."
           }
+          if ($versionPy -notmatch '__version_tuple__\s*=\s*\((\d+),\s*(\d+),\s*(\d+),\s*0\)') {
+            throw "Could not parse __version_tuple__ from zd_app/version.py"
+          }
+          $tupleVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
+          if ($tupleVersion -ne $version) {
+            throw "zd_app/version.py disagrees: __version__=$version but __version_tuple__=$tupleVersion.0"
+          }
+
+          $quad = "$version.0"
+          $versionInfo = Get-Content "version_info.txt" -Raw
+          $parts = $version.Split('.')
+          $tuplePattern = "\($($parts[0]),\s*$($parts[1]),\s*$($parts[2]),\s*0\)"
+          foreach ($field in @('filevers', 'prodvers')) {
+            if ($versionInfo -notmatch "(?m)^\s*$field\s*=\s*$tuplePattern") {
+              throw "version_info.txt $field does not match $quad"
+            }
+          }
+          foreach ($field in @('FileVersion', 'ProductVersion')) {
+            $fieldPattern = [regex]::Escape("StringStruct(u'$field', u'$quad')")
+            if ($versionInfo -notmatch $fieldPattern) {
+              throw "version_info.txt $field string does not match $quad"
+            }
+          }
+
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tag $tag does not point to a commit on public main — refusing an off-branch release."
+          }
 
       - name: Install runtime dependencies (test gate)
         run: |
@@ -146,10 +178,11 @@ jobs:
         run: |
           # Mirrors ci.yml exactly: an attested "trustworthy" release that
           # skipped the honesty/constraint gates would be self-contradictory.
-          # Pass/fail comes from the unittest *summary line*, not the raw exit
-          # code — exit code 139 on teardown is a known DPG segfault artifact,
-          # not a failure (docs/ARCHITECTURE.md, "Test architecture").
-          # unittest writes its output to stderr, hence 2>&1.
+          # Pass/fail comes from the unittest summary together with the raw
+          # exit code. Only exit 0 and the documented post-summary DPG
+          # teardown artifact (139) are allowed; another non-zero code must
+          # not be hidden by an earlier OK line. unittest writes its output to
+          # stderr, hence 2>&1.
           $ErrorActionPreference = 'Continue'
           python -m unittest discover -s tests 2>&1 | Tee-Object -FilePath test_output.txt
           $code = $LASTEXITCODE
@@ -160,8 +193,18 @@ jobs:
             exit 1
           }
           elseif ($log -match '(?m)^OK\b') {
-            Write-Host "Suite PASSED. (process exit code = $code; 139 = known DPG teardown artifact, ignored)"
-            exit 0
+            if ($code -eq 0) {
+              Write-Host "Suite PASSED. (process exit code = 0)"
+              exit 0
+            }
+            elseif ($code -eq 139) {
+              Write-Host "::warning::Suite passed, then hit the known Dear PyGui teardown artifact (exit code 139)."
+              exit 0
+            }
+            else {
+              Write-Host "::error::unittest printed OK but exited with unexpected code $code; refusing to hide a post-summary failure."
+              exit 1
+            }
           }
           else {
             Write-Host "::error::No unittest 'OK' summary found (exit code $code). Likely a crash/segfault BEFORE the summary — investigate; do not treat as green."

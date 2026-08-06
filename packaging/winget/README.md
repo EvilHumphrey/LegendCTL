@@ -53,8 +53,10 @@ expiry.
 The job is skipped while the variable is unset or set to `false`; if it is
 enabled without the secret, the final submission step fails closed. Once all
 three are ready, rehearse from Actions with `workflow_dispatch`, leaving
-**`dry_run` checked** — that generates and fully verifies the manifest but stops
-before opening any pull request. Unchecking `dry_run` submits for real.
+**`dry_run` checked** — that generates the manifest and runs the project's
+integrity and structural safety checks, but stops before opening any pull
+request. Microsoft performs the authoritative schema validation after a real
+submission. Unchecking `dry_run` submits for real.
 
 ## Safety gates
 

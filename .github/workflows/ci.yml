@@ -53,10 +53,11 @@ jobs:
           # `unittest discover` runs clean in a single process. Historically a
           # DPG teardown segfault could still surface as process exit code 139
           # AFTER every test passed and the summary printed. So we decide
-          # pass/fail from the unittest *summary line*, not the raw exit code —
-          # the project's own rule (docs/ARCHITECTURE.md, "Test architecture":
-          # "exit code 139 on teardown is a known DPG segfault artifact, not a
-          # failure"). unittest writes its output to stderr, hence 2>&1.
+          # pass/fail from the unittest summary together with the raw exit
+          # code. Only exit 0 and the documented post-summary DPG teardown
+          # artifact (139) are allowed; another non-zero code must not be
+          # hidden by an earlier OK line. unittest writes to stderr, hence
+          # 2>&1.
           $ErrorActionPreference = 'Continue'
           python -m unittest discover -s tests 2>&1 | Tee-Object -FilePath test_output.txt
           $code = $LASTEXITCODE
@@ -67,8 +68,18 @@ jobs:
             exit 1
           }
           elseif ($log -match '(?m)^OK\b') {
-            Write-Host "Suite PASSED. (process exit code = $code; 139 = known DPG teardown artifact, ignored)"
-            exit 0
+            if ($code -eq 0) {
+              Write-Host "Suite PASSED. (process exit code = 0)"
+              exit 0
+            }
+            elseif ($code -eq 139) {
+              Write-Host "::warning::Suite passed, then hit the known Dear PyGui teardown artifact (exit code 139)."
+              exit 0
+            }
+            else {
+              Write-Host "::error::unittest printed OK but exited with unexpected code $code; refusing to hide a post-summary failure."
+              exit 1
+            }
           }
           else {
             Write-Host "::error::No unittest 'OK' summary found (exit code $code). Likely a crash/segfault BEFORE the summary — investigate; do not treat as green."

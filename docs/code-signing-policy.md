@@ -43,14 +43,17 @@ open-source software.
    installer inputs are submitted to SignPath for signing **before** the final
    distributables are packaged, because AuthentiCode signing changes a binary's
    bytes (and a signed inner executable changes the ZIP/installer bytes). The
-   signed-release flow is: build → sign → package the final distributables →
-   smoke-test the final artifacts → hash + attest the final bytes → publish.
+   signed-release flow is: source tests + CVE audit → build → sign → package
+   the final distributables → hash + attest the final bytes → draft release →
+   smoke-test the final artifacts → publish.
    Only artifacts produced by step 2 from the tagged commit are submitted.
-   Until signing is live this step is skipped, and the flow is: build →
-   smoke-test → hash + attest → publish.
-4. **Verify the build.** The release smoke test (`.\tools\smoke_release.ps1`)
-   and the unit suite are run against the final artifacts before a build is
-   considered releasable.
+   Until signing is live this step is skipped, and the flow is: source tests +
+   CVE audit → build + package → hash + attest → draft release → smoke-test
+   the final artifacts → publish.
+4. **Verify the build.** The unit suite and dependency audit gate the source
+   before packaging. After the workflow creates a draft release, the release
+   smoke test (`.\tools\smoke_release.ps1`) exercises the exact final artifacts
+   before a maintainer publishes them.
 5. **Publish hashes.** Each release publishes `SHA256SUMS.txt` computed over
    the **final published bytes** (after signing, once signing is live), so
    users can verify integrity independently of the signature — hashes and
