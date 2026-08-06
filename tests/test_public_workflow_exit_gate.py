@@ -39,6 +39,8 @@ class PublicWorkflowExitGateTests(unittest.TestCase):
         cases = (
             ("success", good_summary, 0, 0),
             ("known teardown", good_summary, 139, 0),
+            ("known Windows teardown signed", good_summary, -1073741819, 0),
+            ("known Windows teardown unsigned", good_summary, 3221225477, 0),
             ("unexpected exit", good_summary, 7, 1),
             ("early fake OK", "OK\nthen stopped\n", 0, 1),
             (

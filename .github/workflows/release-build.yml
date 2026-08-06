@@ -180,7 +180,8 @@ jobs:
           # skipped the honesty/constraint gates would be self-contradictory.
           # The shared evaluator requires a real `Ran ...` + `OK` summary and
           # combines it with the process exit code. Only exit 0 and the
-          # documented post-summary DPG teardown artifact (139) are allowed.
+          # documented post-summary DPG teardown artifact (139 or Windows'
+          # signed/unsigned 0xC0000005 form) are allowed.
           # unittest writes to stderr, hence 2>&1.
           $ErrorActionPreference = 'Continue'
           python -m unittest discover -s tests 2>&1 | Tee-Object -FilePath test_output.txt

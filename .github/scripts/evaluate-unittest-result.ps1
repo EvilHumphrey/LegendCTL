@@ -37,8 +37,8 @@ if ($ProcessExitCode -eq 0) {
   Write-Host "Suite PASSED. (process exit code = 0)"
   exit 0
 }
-if ($ProcessExitCode -eq 139) {
-  Write-Host "::warning::Suite passed, then hit the known Dear PyGui teardown artifact (exit code 139)."
+if ($ProcessExitCode -in @(139, -1073741819, 3221225477)) {
+  Write-Host "::warning::Suite passed, then hit the known Dear PyGui teardown artifact (exit code $ProcessExitCode)."
   exit 0
 }
 
