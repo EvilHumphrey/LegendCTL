@@ -81,12 +81,13 @@ class FontTests(unittest.TestCase):
         self.assertIn(("mono", "en"), handles)
         self.assertIn(("mono", "zh-CN"), handles)
         self.assertEqual(handles[("mono", "en")], handles[("mono", "zh-CN")])
-        # Noto Sans SC receives both Chinese and Korean ranges for picker
-        # autonyms; Noto Sans KR receives the Korean range for its four rows.
-        self.assertEqual(fake_dpg.add_font_range_hint.call_count, 12)
+        # Noto Sans SC and Noto Sans KR both receive Chinese_Full + Korean:
+        # SC for picker autonyms; KR so General Punctuation (em dash, ellipsis)
+        # in ko strings renders instead of tofu. Four rows each, both ranges.
+        self.assertEqual(fake_dpg.add_font_range_hint.call_count, 16)
         self.assertEqual(
             [call.args[0] for call in fake_dpg.add_font_range_hint.call_args_list],
-            [123, 456, 123, 456, 123, 456, 123, 456, 456, 456, 456, 456],
+            [123, 456, 123, 456, 123, 456, 123, 456, 123, 456, 123, 456, 123, 456, 123, 456],
         )
 
     def test_register_fonts_handles_missing_file_gracefully(self) -> None:
@@ -164,7 +165,10 @@ class KoFontRenderIsolatedTests(unittest.TestCase):
     subprocess per method — a second DPG context in one process hits the known
     teardown segfault. Timeout-wrapped for the native render-hang class."""
 
-    _METHODS = ("test_hangul_renders_non_tofu_through_register_fonts",)
+    _METHODS = (
+        "test_hangul_renders_non_tofu_through_register_fonts",
+        "test_general_punctuation_renders_non_tofu_through_register_fonts",
+    )
 
     def test_isolated_real_render_ko_font(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

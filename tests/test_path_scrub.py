@@ -1744,9 +1744,9 @@ class InteriorDotTraversalHomeRootTests(unittest.TestCase):
         # The control: an interior '.' in the TAIL (after the username) is a
         # no-op — the real username is still dropped, but the legit file basename
         # SURVIVES, not collapsed. (Pass-on-base control that must STAY green.)
-        out = scrub_paths(_d("C:/Users/humphrey/./app.log"))
+        out = scrub_paths(_d("C:/Users/jane.doe/./app.log"))
         self.assertEqual(out, "app.log")
-        self.assertNotIn("humphrey", out)
+        self.assertNotIn("jane.doe", out)
 
     def test_dotdot_immediately_after_root_to_leaf(self) -> None:
         # base 3316462 -> 'Bob'. 'Users\..\Bob' resolves to 'C:\Bob' (not even a
@@ -1801,7 +1801,7 @@ class TraversalInMarkerTailTrimTests(unittest.TestCase):
         # base 3316462 -> '<APP_DATA>/../../Eve Ng' (LEAK). Trimmed at the first
         # '..' -> bare <APP_DATA>.
         out = scrub_paths(
-            _d("C:/Users/humphrey/AppData/Roaming/ZDUltimateLegend/../../Eve Ng")
+            _d("C:/Users/jane.doe/AppData/Roaming/ZDUltimateLegend/../../Eve Ng")
         )
         self.assertEqual(out, APP_DATA_PLACEHOLDER)
         self.assertNotIn("Eve", out)
@@ -1812,7 +1812,7 @@ class TraversalInMarkerTailTrimTests(unittest.TestCase):
         # at the FIRST '..', so the legit pre-'..' component 'services' is kept
         # and the username 'Dave Lee' is dropped -> 'zd_app/services'.
         out = scrub_paths(
-            _d("C:/Users/humphrey/proj/zd_app/services/../../Dave Lee")
+            _d("C:/Users/jane.doe/proj/zd_app/services/../../Dave Lee")
         )
         self.assertEqual(out, "zd_app/services")
         self.assertNotIn("Dave", out)
@@ -1822,7 +1822,7 @@ class TraversalInMarkerTailTrimTests(unittest.TestCase):
         # Control: a real single-separator app-data tail carries no '..' and is
         # preserved in full (the '..' trim must not over-fire).
         out = scrub_paths(
-            _d("C:/Users/humphrey/AppData/Roaming/ZDUltimateLegend/logs/sub/x.log")
+            _d("C:/Users/jane.doe/AppData/Roaming/ZDUltimateLegend/logs/sub/x.log")
         )
         self.assertEqual(out, f"{APP_DATA_PLACEHOLDER}/logs/sub/x.log")
 

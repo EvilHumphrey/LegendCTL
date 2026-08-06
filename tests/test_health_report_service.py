@@ -860,7 +860,7 @@ class WearLedgerIntegrationTests(unittest.TestCase):
 
         from zd_app.services.wear_ledger import WearLedgerService
 
-        leaky_name = r"ZD @ C:\Users\humphrey\AppData\controller"
+        leaky_name = r"ZD @ C:\Users\jane.doe\AppData\controller"
 
         def _leaky_device_provider(*, hz: int = 1000) -> DeviceContext:
             return DeviceContext(
@@ -898,7 +898,7 @@ class WearLedgerIntegrationTests(unittest.TestCase):
             self.assertEqual(len(health_events), 1)
             detail = health_events[0].details["device_controller_name"]
             self.assertNotIn(r"C:\Users", detail)
-            self.assertNotIn("humphrey", detail)
+            self.assertNotIn("jane.doe", detail)
 
     def test_finalize_without_ledger_does_not_crash(self) -> None:
         from types import SimpleNamespace
