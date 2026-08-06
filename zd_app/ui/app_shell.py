@@ -275,6 +275,33 @@ class _PendingSliderWrite:
     stable_identifier: str
 
 
+@dataclass(frozen=True)
+class _RefreshReadResult:
+    """A settings read bound to the controller generation that requested it."""
+
+    snapshot: ControllerSnapshot
+    first_connect_identity: DeviceIdentity | None
+    skipped_fields: int
+    presence_key: tuple[str, str, str]
+    presence_generation: int
+
+    def __iter__(self):
+        """Keep the established three-value job-result test/helper contract."""
+
+        yield self.snapshot
+        yield self.first_connect_identity
+        yield self.skipped_fields
+
+
+@dataclass(frozen=True)
+class _RefreshReadFailure:
+    """A failed settings read carrying the same immutable controller token."""
+
+    error: BaseException
+    presence_key: tuple[str, str, str]
+    presence_generation: int
+
+
 class _SliderWriteThrottle:
     """Throttle slider live-writes with leading-edge fire + trailing-edge flush.
 
@@ -1207,6 +1234,12 @@ class AppShell:
         self._last_tick = 0.0
         self._last_presence_poll = 0.0
         self._last_connection_state: str | None = None
+        # A refresh completion belongs to the exact controller presence
+        # generation that started it.  DeviceService.state is mutable and can
+        # move from unit A to unit B while the worker is reading, so completion
+        # code must never derive ownership from that live object.
+        self._controller_presence_generation = 0
+        self._observed_controller_presence_key = self._controller_presence_key()
         self._fast_disconnect_force_probe_armed = True
         self._stick_preview_deadline = 0.0
         self._stick_preview_backup: tuple[StickSettings, StickSettings] | None = None
@@ -1427,6 +1460,10 @@ class AppShell:
 
     def run(self) -> None:
         self.device_service.refresh_state(background=False)
+        # Startup discovery establishes the baseline before the first async
+        # settings read.  Treating it as a later transition would invalidate
+        # that same read on the first render-loop poll.
+        self._observed_controller_presence_key = self._controller_presence_key()
         self._sync_manual_write_windows_to_device_state()
         self._last_connection_state = self.device_service.state.connection_state
         dpg.create_context()
@@ -2492,20 +2529,46 @@ class AppShell:
             self.refresh_shell()
             return
 
+        presence_key = self._controller_presence_key()
+        presence_generation = self._controller_presence_generation
         self._run_hid_job(
-            self._refresh_read_job,
+            lambda: self._refresh_read_job_bound(
+                presence_key,
+                presence_generation,
+            ),
             lambda outcome: self._refresh_read_on_done(
                 outcome, include_device=include_device
             ),
         )
 
-    def _refresh_read_job(self) -> tuple[ControllerSnapshot, DeviceIdentity | None, int]:
+    def _refresh_read_job_bound(
+        self,
+        presence_key: tuple[str, str, str],
+        presence_generation: int,
+    ) -> _RefreshReadResult | _RefreshReadFailure:
+        """Run a refresh while preserving its immutable controller ownership."""
+
+        try:
+            return self._refresh_read_job(presence_key, presence_generation)
+        except BaseException as exc:  # noqa: BLE001 - render-side handler preserves scope
+            return _RefreshReadFailure(exc, presence_key, presence_generation)
+
+    def _refresh_read_job(
+        self,
+        presence_key: tuple[str, str, str] | None = None,
+        presence_generation: int | None = None,
+    ) -> _RefreshReadResult:
         """DPG-free job half of :meth:`refresh_from_controller`.
 
         Full settings read plus the first-readable-connect RP capture (the
         capture is its own HID read, so it must stay job-side; the
         trust-ritual card it may earn renders in on_done).
         """
+
+        if presence_key is None:
+            presence_key = self._controller_presence_key()
+        if presence_generation is None:
+            presence_generation = self._controller_presence_generation
 
         snapshot = self._read_all_settings_with_timeout_retry()
         raw_skipped_fields = getattr(
@@ -2523,7 +2586,13 @@ class AppShell:
         # once per (product_string, app session) so reconnecting the same
         # controller within one session doesn't spam the vault. The capture
         # itself is best-effort and never blocks the read.
-        first_connect_identity = self._capture_first_readable_connect()
+        token_is_current = self._controller_presence_token_is_current(
+            presence_key,
+            presence_generation,
+        )
+        first_connect_identity = (
+            self._capture_first_readable_connect() if token_is_current else None
+        )
         # Best-effort official-app summary enrichment. Firmware + active profile
         # are NOT protocol-readable from the controller (proven by the 2026-07-06
         # RE investigation); the only in-app source is the official ZD app's
@@ -2533,11 +2602,31 @@ class AppShell:
         # PowerShell UIA probe; it degrades silently and never delays/fails the
         # primary settings snapshot above. The common case (vendor app closed)
         # fast-returns (~0.27s, well under the probe's 3s ceiling).
-        self.device_service.read_official_summary_into_state()
-        return snapshot, first_connect_identity, skipped_fields
+        if token_is_current:
+            self.device_service.read_official_summary_into_state()
+        return _RefreshReadResult(
+            snapshot,
+            first_connect_identity,
+            skipped_fields,
+            presence_key,
+            presence_generation,
+        )
 
     def _refresh_read_on_done(self, outcome, *, include_device: bool) -> None:
         """DPG on_done half of :meth:`refresh_from_controller`."""
+
+        if isinstance(outcome, (_RefreshReadResult, _RefreshReadFailure)):
+            if not self._controller_presence_token_is_current(
+                outcome.presence_key,
+                outcome.presence_generation,
+            ):
+                self._discard_stale_refresh_result(
+                    outcome.presence_key,
+                    outcome.presence_generation,
+                )
+                return
+            if isinstance(outcome, _RefreshReadFailure):
+                outcome = outcome.error
 
         if isinstance(outcome, BaseException):
             if not isinstance(outcome, Exception):
@@ -2558,7 +2647,13 @@ class AppShell:
             self.refresh_shell()
             return
 
-        if len(outcome) == 2:
+        snapshot_identity: str | None = None
+        if isinstance(outcome, _RefreshReadResult):
+            snapshot = outcome.snapshot
+            first_connect_identity = outcome.first_connect_identity
+            skipped_fields = outcome.skipped_fields
+            snapshot_identity = outcome.presence_key[2]
+        elif len(outcome) == 2:
             snapshot, first_connect_identity = outcome
             skipped_fields = 0
         else:
@@ -2571,7 +2666,15 @@ class AppShell:
         # `stored` for the same reason. `missing` is unaffected — the fold only
         # adds back-paddle bindings, and _hydrate_back_paddle_bindings consumes
         # them without contributing to the readable-field set.
-        stored = self._set_last_controller_snapshot(snapshot)
+        if snapshot_identity is None:
+            # Legacy/direct helper callers have no immutable token; keep their
+            # established single-positional-argument store contract.
+            stored = self._set_last_controller_snapshot(snapshot)
+        else:
+            stored = self._set_last_controller_snapshot(
+                snapshot,
+                stable_identifier=snapshot_identity,
+            )
         if stored is None:  # snapshot is non-None here; keep the type checker happy
             stored = snapshot
         self.last_snapshot_ts = time.time()
@@ -3235,6 +3338,7 @@ class AppShell:
         trigger: RestorePointTrigger,
         *,
         title: str | None = None,
+        record_shell_state: bool = True,
     ):
         """Capture a restore point without ever crashing the calling flow.
 
@@ -3265,7 +3369,7 @@ class AppShell:
                 title=title,
                 device_identity=identity,
             )
-            if rp is not None:
+            if rp is not None and record_shell_state:
                 self.setup_drawer_restore_point_created = True
                 self.setup_drawer_restore_point_identity = (
                     self.device_service.state.stable_identifier
@@ -3496,6 +3600,120 @@ class AppShell:
         state = self.device_service.state
         return str(getattr(state, "stable_identifier", "unknown") or "unknown")
 
+    def _controller_presence_key(self) -> tuple[str, str, str]:
+        """Return the current connection/class/identity tuple as plain values."""
+
+        state = self.device_service.state
+        return (
+            str(getattr(state, "connection_state", "no_device") or "no_device"),
+            str(getattr(state, "device_class", "none") or "none"),
+            str(getattr(state, "stable_identifier", "unknown") or "unknown"),
+        )
+
+    def _controller_presence_token_is_current(
+        self,
+        presence_key: tuple[str, str, str],
+        presence_generation: int,
+    ) -> bool:
+        return (
+            presence_generation == self._controller_presence_generation
+            and presence_key == self._controller_presence_key()
+        )
+
+    def _observe_controller_presence(
+        self,
+    ) -> tuple[tuple[str, str, str], tuple[str, str, str], bool]:
+        """Advance the render-side generation when presence identity changes."""
+
+        previous = self._observed_controller_presence_key
+        current = self._controller_presence_key()
+        changed = current != previous
+        if changed:
+            self._controller_presence_generation += 1
+            self._observed_controller_presence_key = current
+        return previous, current, changed
+
+    @staticmethod
+    def _presence_supports_settings_read(
+        presence_key: tuple[str, str, str],
+    ) -> bool:
+        return presence_key[0] == "connected" and presence_key[1] == "zd_ultimate_legend"
+
+    def _invalidate_cached_controller_settings(self, *, status: str = "") -> None:
+        """Drop settings/cache state that cannot cross a controller boundary."""
+
+        with self._last_back_paddle_bindings_lock:
+            self._last_back_paddle_bindings.clear()
+            self.last_controller_snapshot = None
+        self.last_snapshot_identity = None
+        self.last_snapshot_ts = None
+        self.last_snapshot_status = status
+        self._step_size_hydrated = False
+        self._polling_rate_hydrated = False
+        self._diag_deadzone_hydrated = False
+        self._active_wrapper_profile_name = None
+        self._pending_step_size_save = None
+
+    def _restart_settings_service_for_current_presence(self) -> None:
+        """Close cached handles, then hydrate only for a currently verified ZD."""
+
+        if self.settings_service is None:
+            return
+        self._needs_hydration = False
+        if self._hid_job_in_flight:
+            self._needs_service_restart = True
+            return
+        self.settings_service.stop()
+        self._needs_hydration = self._presence_supports_settings_read(
+            self._controller_presence_key()
+        )
+
+    def _discard_stale_refresh_result(
+        self,
+        presence_key: tuple[str, str, str],
+        presence_generation: int,
+    ) -> None:
+        """Discard a read whose controller identity/generation is no longer live."""
+
+        _previous, _current, newly_observed = self._observe_controller_presence()
+        self._invalidate_cached_controller_settings(
+            status=t("apply.read.discarded_device_changed")
+        )
+        if newly_observed:
+            self._restart_settings_service_for_current_presence()
+            self._request_presence_rebuild()
+        logger.info(
+            "Discarded stale settings read for presence=%r generation=%s; "
+            "current=%r generation=%s",
+            presence_key,
+            presence_generation,
+            self._controller_presence_key(),
+            self._controller_presence_generation,
+        )
+        self._render_settings_snapshot_status()
+        self.refresh_shell()
+
+    def _discard_stale_controller_operation(
+        self,
+        presence_key: tuple[str, str, str],
+        presence_generation: int,
+    ) -> None:
+        """Refuse a multi-phase write when the confirmed controller changed."""
+
+        _previous, _current, newly_observed = self._observe_controller_presence()
+        self._invalidate_cached_controller_settings()
+        if newly_observed:
+            self._restart_settings_service_for_current_presence()
+            self._request_presence_rebuild()
+        logger.info(
+            "Profile apply refused after controller transition from %r/%s to %r/%s",
+            presence_key,
+            presence_generation,
+            self._controller_presence_key(),
+            self._controller_presence_generation,
+        )
+        self._record_settings_apply_result(False, t("apply.device_changed"))
+
     def _sync_manual_write_windows_to_device_state(self) -> None:
         """Discard manual-write windows at a disconnect or identity boundary.
 
@@ -3686,42 +3904,65 @@ class AppShell:
             else without_device_settings(profile.snapshot)
         )
 
-        def job() -> bool:
-            if include_device and not skip_capture:
-                # Trigger model #3 — capture before applying a
-                # profile whose payload includes Device settings (polling
-                # rate / step size). Skipped when include_device=False
-                # because "Profile settings only" doesn't change the device
-                # class. The capture is its own HID read, hence job-side.
-                rp = self._capture_restore_point_safe(
-                    RestorePointTrigger(
-                        type="before_profile_apply_with_device_settings",
-                        source_label="Profile apply (with Device settings)",
-                        reason=(
-                            f"Created automatically before applying profile "
-                            f"{name!r} with Device settings"
-                        ),
-                    ),
-                    title=f"Before Device settings apply — {name}",
-                )
-                if rp is None:
-                    # Phase one stops here. The render-side on_done posts a
-                    # visible confirmation; no coordinator write has run.
-                    return False
-            # Nested jobbed flow: under the sync default this runs inline; on
-            # a worker it executes here and its DPG on_done drains in _tick.
+        # Only the device-inclusive path needs a fresh restore-point capture.
+        # The other choices can begin the real write job directly from this
+        # render-thread callback.
+        if not include_device or skip_capture:
             self._apply_wrapper_profile_snapshot(
                 name,
                 snapshot,
                 include_device=include_device,
                 no_restore_point=include_device and skip_capture,
             )
-            return True
+            return
+
+        presence_key = self._controller_presence_key()
+        presence_generation = self._controller_presence_generation
+
+        def job():
+            # Trigger model #3 — capture before applying a profile whose
+            # payload includes Device settings. This is the HID-only phase;
+            # the render-side completion owns every UI gate and starts the
+            # separate worker-bound write phase.
+            return self._capture_restore_point_safe(
+                RestorePointTrigger(
+                    type="before_profile_apply_with_device_settings",
+                    source_label="Profile apply (with Device settings)",
+                    reason=(
+                        f"Created automatically before applying profile "
+                        f"{name!r} with Device settings"
+                    ),
+                ),
+                title=f"Before Device settings apply — {name}",
+                record_shell_state=False,
+            )
 
         def on_done(outcome) -> None:
             if isinstance(outcome, BaseException):
                 raise outcome  # today's path has no catch at this level
-            if outcome:
+            if not self._controller_presence_token_is_current(
+                presence_key,
+                presence_generation,
+            ):
+                self._discard_stale_controller_operation(
+                    presence_key,
+                    presence_generation,
+                )
+                return
+            if outcome is not None:
+                # The setup-drawer marker is UI-facing shell state; keep it
+                # beside the DPG work on the render-thread completion and bind
+                # its identity to the same immutable token as the capture.
+                self.setup_drawer_restore_point_created = True
+                self.setup_drawer_restore_point_identity = presence_key[2]
+                # This call begins on the render thread. Its HID write remains
+                # worker-bound because the completed capture cleared the outer
+                # busy flag before invoking us.
+                self._apply_wrapper_profile_snapshot(
+                    name,
+                    snapshot,
+                    include_device=include_device,
+                )
                 return
 
             # The Device-confirm modal was closed when the phase-one job
@@ -4804,7 +5045,9 @@ class AppShell:
         ):
             self._needs_service_restart = False
             self.settings_service.stop()
-            self._needs_hydration = True
+            self._needs_hydration = self._presence_supports_settings_read(
+                self._controller_presence_key()
+            )
 
         # While a HID job is in flight, DEFER (don't consume) a pending
         # hydration request: consuming it would start a refresh job that gets
@@ -4917,7 +5160,10 @@ class AppShell:
             )
 
     def _set_last_controller_snapshot(
-        self, snapshot: ControllerSnapshot | None
+        self,
+        snapshot: ControllerSnapshot | None,
+        *,
+        stable_identifier: str | None = None,
     ) -> ControllerSnapshot | None:
         """Overwrite the cached controller snapshot under the back-paddle lock.
 
@@ -4965,7 +5211,13 @@ class AppShell:
         # a same-session read of THIS controller from a stale read of a swapped
         # one. Clearing the snapshot clears the stamp.
         self.last_snapshot_identity = (
-            self.device_service.state.stable_identifier if snapshot is not None else None
+            (
+                stable_identifier
+                if stable_identifier is not None
+                else self.device_service.state.stable_identifier
+            )
+            if snapshot is not None
+            else None
         )
         return snapshot
 
@@ -5143,21 +5395,31 @@ class AppShell:
                 self.device_service.refresh_state(background=False, force_probe=True)
                 self._sync_manual_write_windows_to_device_state()
                 current_connection_state = self.device_service.state.connection_state
+
+            # Bind generation changes only after every probe for this poll has
+            # landed.  In particular, the reconnect force-probe can replace a
+            # cache-level connected/unknown identity with the verified class
+            # and stable identifier.  Observing before that probe would make a
+            # hydration started below look stale on the next poll.
+            previous_presence, current_presence, presence_changed = (
+                self._observe_controller_presence()
+            )
+            connected_controller_changed = (
+                presence_changed
+                and previous_presence[0] == "connected"
+                and current_presence[0] == "connected"
+                and previous_presence[1:] != current_presence[1:]
+            )
+
+            if was_disconnected and is_connected:
                 if (
                     current_connection_state == "connected"
                     and self.settings_service is not None
                 ):
-                    if self._hid_job_in_flight:
-                        # A worker job is mid-batch on the cached HID
-                        # handles — stop() here would CloseHandle them out
-                        # from under its in-flight ReadFile/WriteFile.
-                        # Defer exactly like the hydration request:
-                        # _tick_settings_service_tasks consumes the flag
-                        # (stop + hydration request) once the job drains.
-                        self._needs_service_restart = True
-                    else:
-                        self.settings_service.stop()
-                        self._needs_hydration = True
+                    # A worker job may still hold cached handles; the helper
+                    # defers stop() until it drains and hydrates only when the
+                    # final presence is still a verified ZD.
+                    self._restart_settings_service_for_current_presence()
                     self.device_service.log_event(
                         "Controller reconnected; refreshing Wrapper Settings."
                     )
@@ -5171,6 +5433,17 @@ class AppShell:
                 and current_connection_state == "no_device"
             ):
                 self.device_service.log_i18n_event("log.controller.disconnected")
+                self._request_presence_rebuild()
+            elif connected_controller_changed:
+                # A -> B and ZD -> generic transitions do not pass through the
+                # reconnect branch. Drop A's cached settings/paddle state,
+                # close SettingsService handles safely, and rebuild presence UI
+                # before any hydration can label it as B.
+                self._invalidate_cached_controller_settings()
+                self._restart_settings_service_for_current_presence()
+                self.device_service.log_event(
+                    "Connected controller changed; refreshing Wrapper Settings."
+                )
                 self._request_presence_rebuild()
             self._last_connection_state = current_connection_state
 
