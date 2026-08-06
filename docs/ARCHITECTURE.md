@@ -119,7 +119,7 @@ injected fakes for tests). Version constants: `zd_app/version.py`.
 
 ## Test architecture
 
-3,192 unittest tests (v2.6.2 public maintenance gate, 2026-08-06). Services are tested headlessly; screens are tested
+3,271 unittest tests (v2.6.2 public maintenance gate, 2026-08-06). Services are tested headlessly; screens are tested
 against a patched DearPyGui that records widget calls (no real rendering — which is why
 real-DPG behaviors like the modal law are additionally pinned by the manual bench tool
 in `tools/`). Suite conventions: system Python 3.12 with `dearpygui` installed (the
