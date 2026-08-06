@@ -178,38 +178,17 @@ jobs:
         run: |
           # Mirrors ci.yml exactly: an attested "trustworthy" release that
           # skipped the honesty/constraint gates would be self-contradictory.
-          # Pass/fail comes from the unittest summary together with the raw
-          # exit code. Only exit 0 and the documented post-summary DPG
-          # teardown artifact (139) are allowed; another non-zero code must
-          # not be hidden by an earlier OK line. unittest writes its output to
-          # stderr, hence 2>&1.
+          # The shared evaluator requires a real `Ran ...` + `OK` summary and
+          # combines it with the process exit code. Only exit 0 and the
+          # documented post-summary DPG teardown artifact (139) are allowed.
+          # unittest writes to stderr, hence 2>&1.
           $ErrorActionPreference = 'Continue'
           python -m unittest discover -s tests 2>&1 | Tee-Object -FilePath test_output.txt
           $code = $LASTEXITCODE
-          $log  = Get-Content test_output.txt -Raw
-
-          if ($log -match '(?m)^FAILED \(') {
-            Write-Host "::error::unittest reported FAILED — see summary above."
-            exit 1
-          }
-          elseif ($log -match '(?m)^OK\b') {
-            if ($code -eq 0) {
-              Write-Host "Suite PASSED. (process exit code = 0)"
-              exit 0
-            }
-            elseif ($code -eq 139) {
-              Write-Host "::warning::Suite passed, then hit the known Dear PyGui teardown artifact (exit code 139)."
-              exit 0
-            }
-            else {
-              Write-Host "::error::unittest printed OK but exited with unexpected code $code; refusing to hide a post-summary failure."
-              exit 1
-            }
-          }
-          else {
-            Write-Host "::error::No unittest 'OK' summary found (exit code $code). Likely a crash/segfault BEFORE the summary — investigate; do not treat as green."
-            exit 1
-          }
+          & .\.github\scripts\evaluate-unittest-result.ps1 `
+            -LogPath test_output.txt `
+            -ProcessExitCode $code
+          exit $LASTEXITCODE
 
       - name: Audit dependencies for known CVEs before building (pip-audit)
         run: |
