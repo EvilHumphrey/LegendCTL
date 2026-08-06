@@ -3644,7 +3644,13 @@ class AppShell:
             )
             if remaining == record.failed_fields:
                 return
-            store.save(replace(record, failed_fields=remaining))
+            store.save(
+                replace(
+                    record,
+                    failed_fields=remaining,
+                    snapshot=snapshot_as_sent(record.snapshot, retry_result),
+                )
+            )
         except Exception:
             logger.exception(
                 "Last-applied retry update failed — retry result unaffected"

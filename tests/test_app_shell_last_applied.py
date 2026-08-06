@@ -258,6 +258,83 @@ class NamedApplyRecordingTests(unittest.TestCase):
             )
             self.assertEqual(write_events, [0xA001])
 
+    def test_retried_skipped_fallback_strips_unsent_8point_rider(self) -> None:
+        path_a = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02#7&a"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        handles = iter((0xA001, 0xA002))
+        write_events: list[int] = []
+
+        def write_file(handle: int, payload: bytes) -> tuple[bool, int, int]:
+            write_events.append(handle)
+            if len(write_events) == 1:
+                return False, 1167, 0
+            return True, 0, len(payload)
+
+        service = SettingsService(
+            enumerate_paths=lambda: [path_a],
+            open_write_handle=lambda _path: (next(handles), 0),
+            write_file=write_file,
+            close_handle=lambda _handle: True,
+            sleep=lambda _seconds: None,
+        )
+        service.supports_8point_sensitivity = lambda: False  # type: ignore[method-assign]
+        left_3point = (
+            SensitivityAnchor(0, 0),
+            SensitivityAnchor(50, 40),
+            SensitivityAnchor(100, 100),
+        )
+        left_8point = tuple(SensitivityAnchor(i * 10, i * 10) for i in range(8))
+        snapshot = empty_snapshot(
+            polling_rate=PollingRate.HZ_1000,
+            sensitivity_left=left_3point,
+            sensitivity_left_8point=left_8point,
+        )
+
+        with TemporaryDirectory() as tmp:
+            store = LastAppliedStore(base_dir=tmp)
+            shell = _make_shell(service, last_applied_store=store)
+            shell.refresh_from_controller = MagicMock()
+            with patch("zd_app.ui.app_shell.time.sleep"):
+                _capture_widget_state(
+                    lambda: shell._apply_wrapper_profile_snapshot(
+                        "fallback retry",
+                        snapshot,
+                    )
+                )
+
+            apply_result = shell._last_apply_result
+            self.assertEqual(
+                [failure.setting_label for failure in apply_result.failed],
+                ["polling", "sens_left"],
+            )
+            self.assertEqual(apply_result.sensitivity_downgrades, ())
+            before_retry = store.load_for_controller(_UNIT_A)
+            self.assertEqual(before_retry.failed_fields, ("polling", "sens_left"))
+            self.assertEqual(before_retry.snapshot.sensitivity_left_8point, left_8point)
+
+            # stop() is the SettingsService contract's explicit latch reset.
+            service.stop()
+            self.assertEqual(service.start().value, "ok")
+            with patch("zd_app.ui.app_shell.time.sleep"):
+                _capture_widget_state(
+                    lambda: shell._retry_failed_settings(
+                        list(apply_result.failed),
+                        originating_result=apply_result,
+                    )
+                )
+
+            retry_result = shell._last_apply_result
+            after_retry = store.load_for_controller(_UNIT_A)
+
+        self.assertEqual(retry_result.failed, [])
+        self.assertEqual(retry_result.sensitivity_downgrades, ("sens_left",))
+        self.assertEqual(after_retry.failed_fields, ())
+        self.assertIsNone(after_retry.snapshot.sensitivity_left_8point)
+        self.assertEqual(after_retry.snapshot.sensitivity_left, left_3point)
+        self.assertEqual(write_events, [0xA001, 0xA002, 0xA002])
+
     def test_downgraded_apply_records_the_sent_3point_curve_after_round_trip(self) -> None:
         left_3point = (
             SensitivityAnchor(0, 0),

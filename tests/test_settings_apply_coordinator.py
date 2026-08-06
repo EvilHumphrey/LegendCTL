@@ -1565,6 +1565,117 @@ class CoordinatorSensitivity8PointDispatchTests(unittest.TestCase):
         svc.set_right_stick_sensitivity_curve_8point.assert_not_called()
         self.assertEqual(result.sensitivity_downgrades, ("sens_left", "sens_right"))
 
+    def test_skipped_3point_fallback_reports_downgrade_only_after_retry_success(self) -> None:
+        svc = self._service()
+        svc.supports_8point_sensitivity.return_value = False
+        svc.set_polling_rate.return_value = _polling_result(
+            SetPollingRateOutcome.WRITE_FAILED,
+            error_code=1167,
+        )
+        coordinator = SettingsApplyCoordinator(svc, field_trailer_delay_s=0.0)
+        snapshot = _empty_snapshot(
+            polling_rate=PollingRate.HZ_1000,
+            sensitivity_left=self._LEFT_3,
+            sensitivity_left_8point=self._LEFT_8,
+        )
+
+        apply_result = coordinator.apply_snapshot(snapshot)
+
+        self.assertEqual(
+            [failure.setting_label for failure in apply_result.failed],
+            ["polling", "sens_left"],
+        )
+        self.assertEqual(apply_result.sensitivity_downgrades, ())
+        self.assertEqual(
+            apply_result.failed[1].sensitivity_downgrades_on_success,
+            ("sens_left",),
+        )
+        svc.set_polling_rate.return_value = _polling_result(SetPollingRateOutcome.OK)
+
+        retry_result = coordinator.retry_failures(
+            apply_result.failed,
+            originating_result=apply_result,
+        )
+
+        self.assertEqual(retry_result.succeeded, 2)
+        self.assertEqual(retry_result.failed, [])
+        self.assertEqual(retry_result.sensitivity_downgrades, ("sens_left",))
+
+    def test_skipped_3point_fallback_metadata_survives_failed_retry(self) -> None:
+        svc = self._service()
+        svc.supports_8point_sensitivity.return_value = False
+        svc.set_polling_rate.return_value = _polling_result(
+            SetPollingRateOutcome.WRITE_FAILED,
+            error_code=1167,
+        )
+        coordinator = SettingsApplyCoordinator(svc, field_trailer_delay_s=0.0)
+        apply_result = coordinator.apply_snapshot(
+            _empty_snapshot(
+                polling_rate=PollingRate.HZ_1000,
+                sensitivity_left=self._LEFT_3,
+                sensitivity_left_8point=self._LEFT_8,
+            )
+        )
+        sensitivity_failure = apply_result.failed[1]
+        svc.set_left_stick_sensitivity_curve.side_effect = [
+            _polling_result(SetPollingRateOutcome.WRITE_FAILED),
+            _polling_result(SetPollingRateOutcome.OK),
+        ]
+
+        failed_retry = coordinator.retry_failures(
+            [sensitivity_failure],
+            originating_result=apply_result,
+        )
+
+        self.assertEqual(failed_retry.sensitivity_downgrades, ())
+        self.assertEqual(len(failed_retry.failed), 1)
+        self.assertEqual(
+            failed_retry.failed[0].sensitivity_downgrades_on_success,
+            ("sens_left",),
+        )
+
+        recovered_retry = coordinator.retry_failures(
+            failed_retry.failed,
+            originating_result=failed_retry,
+        )
+
+        self.assertEqual(recovered_retry.succeeded, 1)
+        self.assertEqual(recovered_retry.failed, [])
+        self.assertEqual(recovered_retry.sensitivity_downgrades, ("sens_left",))
+
+    def test_skipped_capable_8point_retry_does_not_report_downgrade(self) -> None:
+        svc = self._service()
+        svc.supports_8point_sensitivity.return_value = True
+        svc.set_polling_rate.return_value = _polling_result(
+            SetPollingRateOutcome.WRITE_FAILED,
+            error_code=1167,
+        )
+        coordinator = SettingsApplyCoordinator(svc, field_trailer_delay_s=0.0)
+        apply_result = coordinator.apply_snapshot(
+            _empty_snapshot(
+                polling_rate=PollingRate.HZ_1000,
+                sensitivity_left=self._LEFT_3,
+                sensitivity_left_8point=self._LEFT_8,
+            )
+        )
+        self.assertEqual(
+            apply_result.failed[1].sensitivity_downgrades_on_success,
+            (),
+        )
+        svc.set_polling_rate.return_value = _polling_result(SetPollingRateOutcome.OK)
+
+        retry_result = coordinator.retry_failures(
+            apply_result.failed,
+            originating_result=apply_result,
+        )
+
+        self.assertEqual(retry_result.succeeded, 2)
+        self.assertEqual(retry_result.sensitivity_downgrades, ())
+        svc.set_left_stick_sensitivity_curve_8point.assert_called_once_with(
+            self._LEFT_8
+        )
+        svc.set_left_stick_sensitivity_curve.assert_not_called()
+
     def test_legacy_snapshot_without_8point_never_probes(self) -> None:
         # The guard: a snapshot with no 8-point curve must NOT consult the
         # capability probe (short-circuit), so legacy/profile applies keep the

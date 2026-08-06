@@ -98,6 +98,7 @@ class ApplyFailure:
     is_transient: bool
     retry_fn: Callable[[], object] | None = field(default=None, repr=False, compare=False)
     on_success: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+    sensitivity_downgrades_on_success: tuple[str, ...] = ()
 
 
 @dataclass
@@ -280,18 +281,38 @@ class SettingsApplyCoordinator:
         )
         use_8point = has_8point_curve and settings_service.supports_8point_sensitivity()
 
-        def trailer_write(label, fn, *, on_success=None):
+        def trailer_write(
+            label,
+            fn,
+            *,
+            on_success=None,
+            sensitivity_downgrades_on_success=(),
+        ):
             if write_state.abort_remaining:
                 # The field is still part of the requested Apply, but it must
                 # not touch the device after identity proof is lost. Route it
                 # through the writer so the result records an explicit
                 # not-written failure (and preserves its safe Retry closure).
-                return write(label, fn, on_success=on_success)
+                return write(
+                    label,
+                    fn,
+                    on_success=on_success,
+                    sensitivity_downgrades_on_success=(
+                        sensitivity_downgrades_on_success
+                    ),
+                )
             # Per-field trailer: sleep first so the firmware is in a quiet
             # state before the next write hits, then fire the write.
             if field_delay > 0:
                 time.sleep(field_delay)
-            return write(label, fn, on_success=on_success)
+            return write(
+                label,
+                fn,
+                on_success=on_success,
+                sensitivity_downgrades_on_success=(
+                    sensitivity_downgrades_on_success
+                ),
+            )
 
         # --- Main burst (back-to-back, no inter-write settle) ---
         # Only polling_rate and back_paddle_bindings remain in the burst.
@@ -381,16 +402,15 @@ class SettingsApplyCoordinator:
                 ),
             )
         elif snapshot.sensitivity_left is not None:
-            if (
-                not write_state.abort_remaining
-                and not use_8point
-                and left_8point is not None
-            ):
-                result.sensitivity_downgrades += ("sens_left",)
             trailer_write(
                 "sens_left",
                 lambda: settings_service.set_left_stick_sensitivity_curve(
                     snapshot.sensitivity_left
+                ),
+                sensitivity_downgrades_on_success=(
+                    ("sens_left",)
+                    if not use_8point and left_8point is not None
+                    else ()
                 ),
             )
 
@@ -402,16 +422,15 @@ class SettingsApplyCoordinator:
                 ),
             )
         elif snapshot.sensitivity_right is not None:
-            if (
-                not write_state.abort_remaining
-                and not use_8point
-                and right_8point is not None
-            ):
-                result.sensitivity_downgrades += ("sens_right",)
             trailer_write(
                 "sens_right",
                 lambda: settings_service.set_right_stick_sensitivity_curve(
                     snapshot.sensitivity_right
+                ),
+                sensitivity_downgrades_on_success=(
+                    ("sens_right",)
+                    if not use_8point and right_8point is not None
+                    else ()
                 ),
             )
         if snapshot.trigger_left is not None:
@@ -557,6 +576,9 @@ class SettingsApplyCoordinator:
                         is_transient=True,
                         retry_fn=failure.retry_fn,
                         on_success=failure.on_success,
+                        sensitivity_downgrades_on_success=(
+                            failure.sensitivity_downgrades_on_success
+                        ),
                     )
                 )
                 continue
@@ -574,6 +596,9 @@ class SettingsApplyCoordinator:
                         is_transient=False,
                         retry_fn=failure.retry_fn,
                         on_success=failure.on_success,
+                        sensitivity_downgrades_on_success=(
+                            failure.sensitivity_downgrades_on_success
+                        ),
                     )
                 )
                 continue
@@ -596,6 +621,10 @@ class SettingsApplyCoordinator:
 
             outcome = getattr(result, "outcome", None)
             if outcome_is_success(outcome):
+                retry_result.sensitivity_downgrades = _merge_sensitivity_downgrades(
+                    retry_result.sensitivity_downgrades,
+                    failure.sensitivity_downgrades_on_success,
+                )
                 retry_result.succeeded += 1
                 if outcome_used_retry(outcome):
                     retry_result.retry_recoveries += 1
@@ -609,6 +638,9 @@ class SettingsApplyCoordinator:
                     is_transient=result_is_transient(result),
                     retry_fn=failure.retry_fn,
                     on_success=failure.on_success,
+                    sensitivity_downgrades_on_success=(
+                        failure.sensitivity_downgrades_on_success
+                    ),
                 )
             )
 
@@ -624,6 +656,7 @@ class SettingsApplyCoordinator:
             write_fn: Callable[[], object],
             *,
             on_success: Callable[[], None] | None = None,
+            sensitivity_downgrades_on_success: tuple[str, ...] = (),
         ) -> bool:
             if write_state.abort_remaining:
                 # This label was applicable to the requested snapshot, but no
@@ -638,6 +671,9 @@ class SettingsApplyCoordinator:
                         is_transient=True,
                         retry_fn=write_fn,
                         on_success=on_success,
+                        sensitivity_downgrades_on_success=(
+                            sensitivity_downgrades_on_success
+                        ),
                     )
                 )
                 return False
@@ -654,6 +690,9 @@ class SettingsApplyCoordinator:
                         is_transient=True,
                         retry_fn=write_fn,
                         on_success=on_success,
+                        sensitivity_downgrades_on_success=(
+                            sensitivity_downgrades_on_success
+                        ),
                     )
                 )
                 return False
@@ -672,12 +711,19 @@ class SettingsApplyCoordinator:
                         is_transient=False,
                         retry_fn=write_fn,
                         on_success=on_success,
+                        sensitivity_downgrades_on_success=(
+                            sensitivity_downgrades_on_success
+                        ),
                     )
                 )
                 return False
 
             outcome = getattr(outcome_result, "outcome", None)
             if outcome_is_success(outcome):
+                result.sensitivity_downgrades = _merge_sensitivity_downgrades(
+                    result.sensitivity_downgrades,
+                    sensitivity_downgrades_on_success,
+                )
                 if getattr(outcome_result, "verify_inconclusive", False) is True:
                     result.unverified_writes = _merge_unverified_writes(
                         result.unverified_writes,
@@ -695,6 +741,9 @@ class SettingsApplyCoordinator:
                     is_transient=result_is_transient(outcome_result),
                     retry_fn=write_fn,
                     on_success=on_success,
+                    sensitivity_downgrades_on_success=(
+                        sensitivity_downgrades_on_success
+                    ),
                 )
             )
             if getattr(outcome_result, "error_code", None) in DISCONNECT_WIN32_ERRORS:
