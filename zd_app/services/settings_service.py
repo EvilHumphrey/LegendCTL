@@ -3553,7 +3553,22 @@ class SettingsService:
         )
 
     def _ensure_handle(self) -> _EnsureHandleResult:
+        # Serialize the pre-open quarantine check through candidate commit with
+        # stop/latch/poison. Otherwise a forced-close can occur between a
+        # precheck and CreateFile, recreating the same numeric raw handle while
+        # the old reader is still able to resume.
+        with self._lifecycle_lock:
+            return self._ensure_handle_under_lifecycle()
+
+    def _ensure_handle_under_lifecycle(self) -> _EnsureHandleResult:
         with self._handle_lock:
+            if self._forced_closed_io_handles:
+                # A force-closed synchronous reader has not left user space yet.
+                # Refuse before enumeration/CreateFile so no replacement OS
+                # object can reuse a quarantined raw value under that reader.
+                return _EnsureHandleResult(
+                    outcome=SetPollingRateOutcome.OPEN_FAILED
+                )
             bound_admission = getattr(
                 self._operation_local,
                 "write_admission",
@@ -3722,7 +3737,15 @@ class SettingsService:
         return result
 
     def _ensure_read_write_admission(self) -> Optional[_HandleAdmission]:
+        with self._lifecycle_lock:
+            return self._ensure_read_write_admission_under_lifecycle()
+
+    def _ensure_read_write_admission_under_lifecycle(
+        self,
+    ) -> Optional[_HandleAdmission]:
         with self._handle_lock:
+            if self._forced_closed_io_handles:
+                return None
             if self._identity_change_latched:
                 # This handle is GENERIC_READ|GENERIC_WRITE. Reopening it on a
                 # replacement could both write a query there and falsely

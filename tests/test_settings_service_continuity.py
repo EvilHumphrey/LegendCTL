@@ -278,13 +278,17 @@ class TestIoAdmissionAndLeases(unittest.TestCase):
 
 
 class TestAtomicTargetCommit(unittest.TestCase):
-    def test_write_first_rejects_concurrent_rw_target_b(self) -> None:
+    def test_rw_open_serializes_write_and_prevents_split_target(self) -> None:
         rw_opened = threading.Event()
         release_rw = threading.Event()
         closed = []
 
         def enumerate_paths():
-            return [_SECOND_PATH] if threading.current_thread().name == "rw-open" else [_FAKE_PATH]
+            return (
+                [_SECOND_PATH]
+                if threading.current_thread().name == "rw-open"
+                else [_FAKE_PATH]
+            )
 
         def open_rw(path):
             rw_opened.set()
@@ -299,31 +303,43 @@ class TestAtomicTargetCommit(unittest.TestCase):
             close_handle=lambda handle: closed.append(handle) or True,
         )
         rw_results = []
-        worker = threading.Thread(
+        rw_worker = threading.Thread(
             target=lambda: rw_results.append(service._ensure_read_write_handle()),
             name="rw-open",
         )
-        worker.start()
-        self.addCleanup(worker.join, 1.0)
+        write_results = []
+        write_worker = threading.Thread(
+            target=lambda: write_results.append(service._ensure_handle()),
+            name="write-open",
+        )
+        rw_worker.start()
+        self.addCleanup(rw_worker.join, 1.0)
+        self.addCleanup(write_worker.join, 1.0)
         self.addCleanup(release_rw.set)
         self.assertTrue(rw_opened.wait(timeout=1.0))
-        self.assertEqual(service.start(), SetPollingRateOutcome.OK)
+        write_worker.start()
         release_rw.set()
-        worker.join(timeout=1.0)
+        rw_worker.join(timeout=1.0)
+        write_worker.join(timeout=1.0)
 
-        self.assertEqual(rw_results, [None])
-        self.assertEqual(service.target_path, _FAKE_PATH)
-        self.assertEqual(service._write_handle, _HANDLE)
+        self.assertEqual(rw_results, [_SECOND_HANDLE])
+        self.assertEqual(
+            write_results[0].outcome,
+            SetPollingRateOutcome.DEVICE_NOT_FOUND,
+        )
+        self.assertIsNone(service.target_path)
+        self.assertIsNone(service._write_handle)
         self.assertIsNone(service._read_write_handle)
         self.assertEqual(closed, [_SECOND_HANDLE])
+        self.assertTrue(service._identity_change_latched)
 
-    def test_rw_first_rejects_concurrent_write_target_a(self) -> None:
+    def test_write_open_serializes_rw_open_on_same_target(self) -> None:
         write_opened = threading.Event()
         release_write = threading.Event()
         closed = []
 
         def enumerate_paths():
-            return [_FAKE_PATH] if threading.current_thread().name == "write-open" else [_SECOND_PATH]
+            return [_FAKE_PATH]
 
         def open_write(path):
             write_opened.set()
@@ -334,29 +350,41 @@ class TestAtomicTargetCommit(unittest.TestCase):
         service = SettingsService(
             enumerate_paths=enumerate_paths,
             open_write_handle=open_write,
-            open_read_write_handle=lambda path: (_SECOND_HANDLE, 0),
+            open_read_write_handle=lambda path: (
+                (_SECOND_HANDLE, 0)
+                if path == _FAKE_PATH
+                else (_ for _ in ()).throw(AssertionError("RW target split"))
+            ),
             close_handle=lambda handle: closed.append(handle) or True,
         )
         write_results = []
-        worker = threading.Thread(
+        write_worker = threading.Thread(
             target=lambda: write_results.append(service._ensure_handle()),
             name="write-open",
         )
-        worker.start()
-        self.addCleanup(worker.join, 1.0)
+        rw_results = []
+        rw_worker = threading.Thread(
+            target=lambda: rw_results.append(service._ensure_read_write_handle()),
+            name="rw-open",
+        )
+        write_worker.start()
+        self.addCleanup(write_worker.join, 1.0)
+        self.addCleanup(rw_worker.join, 1.0)
         self.addCleanup(release_write.set)
         self.assertTrue(write_opened.wait(timeout=1.0))
-        self.assertEqual(service._ensure_read_write_handle(), _SECOND_HANDLE)
+        rw_worker.start()
         release_write.set()
-        worker.join(timeout=1.0)
+        write_worker.join(timeout=1.0)
+        rw_worker.join(timeout=1.0)
 
-        self.assertEqual(write_results[0].outcome, SetPollingRateOutcome.OPEN_FAILED)
-        self.assertEqual(service.target_path, _SECOND_PATH)
-        self.assertIsNone(service._write_handle)
+        self.assertEqual(write_results[0].outcome, SetPollingRateOutcome.OK)
+        self.assertEqual(rw_results, [_SECOND_HANDLE])
+        self.assertEqual(service.target_path, _FAKE_PATH)
+        self.assertEqual(service._write_handle, _HANDLE)
         self.assertEqual(service._read_write_handle, _SECOND_HANDLE)
-        self.assertEqual(closed, [_HANDLE])
+        self.assertEqual(closed, [])
 
-    def test_stale_missing_target_opener_does_not_latch_same_a_winner(self) -> None:
+    def test_first_missing_target_opener_serializes_and_latches(self) -> None:
         rec = _Recorder(paths=[_FAKE_PATH])
         service = _make_service(rec)
         self.assertEqual(service.get_polling_rate(), PollingRate.HZ_8000)
@@ -373,22 +401,30 @@ class TestAtomicTargetCommit(unittest.TestCase):
 
         service._enumerate_paths = enumerate_paths
         stale_results = []
-        worker = threading.Thread(
+        stale_worker = threading.Thread(
             target=lambda: stale_results.append(service._ensure_handle()),
             name="stale-open",
         )
-        worker.start()
-        self.addCleanup(worker.join, 1.0)
+        fresh_results = []
+        fresh_worker = threading.Thread(
+            target=lambda: fresh_results.append(service._ensure_handle()),
+            name="fresh-open",
+        )
+        stale_worker.start()
+        self.addCleanup(stale_worker.join, 1.0)
+        self.addCleanup(fresh_worker.join, 1.0)
         self.addCleanup(release_stale.set)
         self.assertTrue(stale_entered.wait(timeout=1.0))
-        self.assertEqual(service.start(), SetPollingRateOutcome.OK)
+        fresh_worker.start()
         release_stale.set()
-        worker.join(timeout=1.0)
+        stale_worker.join(timeout=1.0)
+        fresh_worker.join(timeout=1.0)
 
         self.assertEqual(stale_results[0].outcome, SetPollingRateOutcome.DEVICE_NOT_FOUND)
-        self.assertEqual(service.target_path, _FAKE_PATH)
-        self.assertEqual(service._write_handle, _HANDLE)
-        self.assertFalse(service._identity_change_latched)
+        self.assertEqual(fresh_results[0].outcome, SetPollingRateOutcome.DEVICE_NOT_FOUND)
+        self.assertIsNone(service.target_path)
+        self.assertIsNone(service._write_handle)
+        self.assertTrue(service._identity_change_latched)
 
 
 class TestMultiCallContinuity(unittest.TestCase):

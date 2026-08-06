@@ -1633,7 +1633,7 @@ class TestWriteRetryIdentityPinning(unittest.TestCase):
         self.assertIn(("open_read_write_handle", _FAKE_PATH), rec.events)
         self.assertNotIn(("open_read_write_handle", self._SECOND_UNIT), rec.events)
 
-    def test_stop_wins_while_cached_target_enumeration_is_in_flight(self) -> None:
+    def test_stop_waits_while_cached_target_enumeration_is_in_flight(self) -> None:
         enumerate_entered = threading.Event()
         allow_enumeration = threading.Event()
         rec = _Recorder(paths=[_FAKE_PATH])
@@ -1659,11 +1659,20 @@ class TestWriteRetryIdentityPinning(unittest.TestCase):
         self.addCleanup(opener.join, 1.0)
         self.addCleanup(allow_enumeration.set)
         self.assertTrue(enumerate_entered.wait(timeout=1.0))
-        service.stop()
+        stop_finished = threading.Event()
+        stopper = threading.Thread(
+            target=lambda: (service.stop(), stop_finished.set()),
+            name="test-cached-target-stop",
+        )
+        stopper.start()
+        self.addCleanup(stopper.join, 1.0)
+        self.assertFalse(stop_finished.wait(timeout=0.05))
         allow_enumeration.set()
         opener.join(timeout=1.0)
+        stopper.join(timeout=1.0)
 
         self.assertFalse(opener.is_alive())
+        self.assertFalse(stopper.is_alive())
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].outcome, SetPollingRateOutcome.DEVICE_NOT_FOUND)
         # stop() advanced the generation, so the stale opener did not re-latch.
@@ -5898,6 +5907,8 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
                 self._read_once(service)
             self.assertEqual(opened, [self._FIRST_HANDLE])
             service.stop()
+            kernel.released[self._FIRST_HANDLE].set()
+            self.assertTrue(kernel.returned[self._FIRST_HANDLE].wait(timeout=1.0))
             response = self._read_once(service)
 
         self.assertEqual(response[7], PollingRate.HZ_8000.value)
@@ -5934,6 +5945,8 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
                 self._read_once(service)
             self.assertEqual(opened, [self._FIRST_HANDLE])
             service.stop()
+            kernel.released[self._FIRST_HANDLE].set()
+            self.assertTrue(kernel.returned[self._FIRST_HANDLE].wait(timeout=1.0))
             response = self._read_once(service)
 
         self.assertEqual(response[7], PollingRate.HZ_4000.value)
@@ -6117,6 +6130,7 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
         self.addCleanup(kernel.release_all)
         close_calls: list[int] = []
         rw_open_count = 0
+        write_open_count = 0
 
         def open_read_write_handle(path: str) -> tuple[int | None, int]:
             nonlocal rw_open_count
@@ -6124,9 +6138,15 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
             rw_open_count += 1
             return handle, 0
 
+        def open_write_handle(path: str) -> tuple[int | None, int]:
+            nonlocal write_open_count
+            self.assertEqual(path, _FAKE_PATH)
+            write_open_count += 1
+            return handle, 0
+
         service = SettingsService(
             enumerate_paths=lambda: [_FAKE_PATH],
-            open_write_handle=lambda path: (handle, 0),
+            open_write_handle=open_write_handle,
             open_read_write_handle=open_read_write_handle,
             write_file=lambda _handle, payload: (True, 0, len(payload)),
             close_handle=lambda closed_handle: close_calls.append(closed_handle) or True,
@@ -6142,40 +6162,153 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
 
             if read_write_candidate:
                 self.assertIsNone(service._ensure_read_write_handle())
-                self.assertEqual(rw_open_count, 2)
+                self.assertEqual(rw_open_count, 1)
             else:
                 self.assertEqual(service.start(), SetPollingRateOutcome.OPEN_FAILED)
                 self.assertEqual(rw_open_count, 1)
 
-            # The same numeric value now names a newly opened candidate. It is
-            # refused and closed exactly once; the old lease completion below
-            # only removes quarantine and must not close that candidate again.
-            self.assertEqual(close_calls, [handle, handle])
+            # Quarantine refuses before enumeration/CreateFile, so no candidate
+            # exists to leak (or for the old reader to consume from).
+            self.assertEqual(write_open_count, 0)
+            self.assertEqual(close_calls, [handle])
             kernel.released[handle].set()
             self.assertTrue(kernel.returned[handle].wait(timeout=1.0))
 
-        self.assertEqual(close_calls, [handle, handle])
+            if read_write_candidate:
+                self.assertEqual(service._ensure_read_write_handle(), handle)
+                self.assertEqual(rw_open_count, 2)
+            else:
+                self.assertEqual(service.start(), SetPollingRateOutcome.OK)
+                self.assertEqual(write_open_count, 1)
 
-    def test_force_closed_raw_reuse_write_candidate_is_closed_once(self) -> None:
+        self.assertEqual(close_calls, [handle])
+
+    def test_force_closed_raw_quarantine_blocks_write_open_until_release(self) -> None:
         self._assert_force_closed_raw_reuse_candidate_is_closed(
             read_write_candidate=False
         )
 
-    def test_force_closed_raw_reuse_rw_candidate_is_closed_once(self) -> None:
+    def test_force_closed_raw_quarantine_blocks_rw_open_until_release(self) -> None:
         self._assert_force_closed_raw_reuse_candidate_is_closed(
             read_write_candidate=True
         )
 
-    def test_concurrent_stop_and_read_handle_open_discards_open_candidate(self) -> None:
+    def _assert_pre_native_read_quarantine_blocks_open(
+        self,
+        *,
+        read_write_candidate: bool,
+    ) -> None:
+        from zd_app.services import settings_service as ss
+
+        handle = self._FIRST_HANDLE
+        pre_native = threading.Event()
+        release_native = threading.Event()
+
+        class _PausedBeforeNativeReadKernel:
+            def __init__(self) -> None:
+                self.events: list[tuple] = []
+
+            def ReadFile(self, _handle, _buf, _length, _bytes_read, _overlapped):
+                self.events.append(("pre_native_read", _handle))
+                pre_native.set()
+                if not release_native.wait(timeout=2.0):
+                    raise AssertionError("test failed to release pre-native reader")
+                self.events.append(("raw_read", _handle))
+                return 0
+
+            def CancelIoEx(self, _handle, _overlapped):
+                self.events.append(("cancel", _handle))
+                return 0
+
+            def GetLastError(self):
+                return 1168
+
+        kernel = _PausedBeforeNativeReadKernel()
+        paths = [_FAKE_PATH]
+        second_path = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02#7&second"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        opens: list[tuple[str, str]] = []
+
+        def open_rw(path: str) -> tuple[int | None, int]:
+            opens.append(("rw", path))
+            return handle, 0
+
+        def open_write(path: str) -> tuple[int | None, int]:
+            opens.append(("write", path))
+            return handle, 0
+
+        service = SettingsService(
+            enumerate_paths=lambda: list(paths),
+            open_write_handle=open_write,
+            open_read_write_handle=open_rw,
+            write_file=lambda _handle, payload: (True, 0, len(payload)),
+            close_handle=lambda closed: kernel.events.append(("close", closed)) or True,
+        )
+        failures: list[BaseException] = []
+
+        def read_a() -> None:
+            try:
+                self._read_once(service, timeout_ms=5000)
+            except BaseException as exc:
+                failures.append(exc)
+
+        caller = threading.Thread(target=read_a)
+        with mock.patch.object(ss._Win32, "kernel32", return_value=kernel):
+            caller.start()
+            self.addCleanup(caller.join, 1.0)
+            self.addCleanup(release_native.set)
+            self.assertTrue(pre_native.wait(timeout=1.0))
+            service.stop()
+            paths[:] = [second_path]
+
+            opens_before = list(opens)
+            if read_write_candidate:
+                self.assertIsNone(service._ensure_read_write_handle())
+            else:
+                self.assertEqual(service.start(), SetPollingRateOutcome.OPEN_FAILED)
+            self.assertEqual(opens, opens_before)
+            self.assertNotIn(("raw_read", handle), kernel.events)
+
+            release_native.set()
+            caller.join(timeout=1.0)
+            self.assertFalse(caller.is_alive())
+            self.assertEqual(len(failures), 1)
+
+            if read_write_candidate:
+                self.assertEqual(service._ensure_read_write_handle(), handle)
+                self.assertEqual(opens[-1], ("rw", second_path))
+            else:
+                self.assertEqual(service.start(), SetPollingRateOutcome.OK)
+                self.assertEqual(opens[-1], ("write", second_path))
+
+        raw_read_index = kernel.events.index(("raw_read", handle))
+        close_index = kernel.events.index(("close", handle))
+        self.assertLess(close_index, raw_read_index)
+
+    def test_pre_native_reader_quarantine_blocks_write_open(self) -> None:
+        self._assert_pre_native_read_quarantine_blocks_open(
+            read_write_candidate=False
+        )
+
+    def test_pre_native_reader_quarantine_blocks_rw_open(self) -> None:
+        self._assert_pre_native_read_quarantine_blocks_open(
+            read_write_candidate=True
+        )
+
+    def _assert_stop_waits_for_inflight_open(self, *, read_write: bool) -> None:
         open_entered = threading.Event()
         allow_open_return = threading.Event()
+        stop_entered = threading.Event()
+        stop_finished = threading.Event()
         closed: list[int] = []
         candidate = self._FIRST_HANDLE
 
         def enumerate_paths() -> list[str]:
             return [_FAKE_PATH]
 
-        def open_read_write_handle(path: str) -> tuple[int | None, int]:
+        def blocked_open(path: str) -> tuple[int | None, int]:
             if path != _FAKE_PATH:
                 raise AssertionError("unexpected path")
             open_entered.set()
@@ -6191,28 +6324,57 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
 
         service = SettingsService(
             enumerate_paths=enumerate_paths,
-            open_read_write_handle=open_read_write_handle,
+            open_write_handle=blocked_open,
+            open_read_write_handle=blocked_open,
             close_handle=close_handle,
         )
-        result: list[int | None] = []
+        result: list[object] = []
         opener = threading.Thread(
-            target=lambda: result.append(service._ensure_read_write_handle()),
-            name="test-read-handle-open",
+            target=lambda: result.append(
+                service._ensure_read_write_handle()
+                if read_write
+                else service.start()
+            ),
+            name="test-handle-open",
         )
+
+        def stop_service() -> None:
+            stop_entered.set()
+            service.stop()
+            stop_finished.set()
+
+        stopper = threading.Thread(target=stop_service, name="test-stop")
 
         opener.start()
         self.addCleanup(opener.join, 1.0)
+        self.addCleanup(stopper.join, 1.0)
         self.addCleanup(allow_open_return.set)
         self.assertTrue(open_entered.wait(timeout=1.0))
-        service.stop()
+        stopper.start()
+        self.assertTrue(stop_entered.wait(timeout=1.0))
+        # The lifecycle gate spans CreateFile and candidate installation, so
+        # stop cannot invalidate/force-close between the precheck and commit.
+        self.assertFalse(stop_finished.wait(timeout=0.05))
         allow_open_return.set()
         opener.join(timeout=1.0)
+        stopper.join(timeout=1.0)
 
         self.assertFalse(opener.is_alive())
-        self.assertEqual(result, [None])
+        self.assertFalse(stopper.is_alive())
+        self.assertEqual(
+            result,
+            [candidate if read_write else SetPollingRateOutcome.OK],
+        )
         self.assertEqual(closed, [candidate])
         self.assertIsNone(service._read_write_handle)
+        self.assertIsNone(service._write_handle)
         self.assertIsNone(service.target_path)
+
+    def test_stop_waits_for_inflight_read_write_open(self) -> None:
+        self._assert_stop_waits_for_inflight_open(read_write=True)
+
+    def test_stop_waits_for_inflight_write_open(self) -> None:
+        self._assert_stop_waits_for_inflight_open(read_write=False)
 
 
 @unittest.skipUnless(sys.platform == "win32", "real Win32 DLL binding")
