@@ -7680,16 +7680,22 @@ class AppShell:
             # showing preview is torn down a rendered frame before the
             # tail's open_result creates the result modal (open_result's
             # own deletes become no-ops). The Save + Apply flow below is
-            # untouched: it tears its modals down at job start, so by the
-            # time its on_done runs this same tail in the _tick completion
-            # drain, frames have long since rendered and open_result is a
-            # pure create. The save-error path above stays synchronous
-            # (delete-only teardown is safe; nothing is created).
+            # routed through the same outcome-only seam below. The save-error
+            # path above stays synchronous (delete-only teardown is safe;
+            # nothing is created).
+            #
+            # The profile is ALREADY on disk at this point, so the tail's
+            # bookkeeping -- status result, footer combo, screen rebuild --
+            # runs here, synchronously, and only the result modal goes through
+            # the seam. Inside the seam the whole tail was cancellable: another
+            # site's request arriving before the create pass could otherwise
+            # discard the confirmation of a committed save.
             audit.controller_write = "not_performed"
+            open_result_modal = self._commit_safe_import_apply_result(
+                name, apply_to_controller=apply_to_controller
+            )
             self._defer_modal_swap(
-                lambda: self._finish_safe_import_apply(
-                    name, apply_to_controller=apply_to_controller
-                ),
+                open_result_modal,
                 delete_tags=(
                     safe_import.CONFIRM_MODAL,
                     safe_import.PREVIEW_MODAL,
@@ -7854,34 +7860,35 @@ class AppShell:
 
         self._run_hid_job(job, on_done)
 
-    def _finish_safe_import_apply(
+    def _commit_safe_import_apply_result(
         self, name: str, *, apply_to_controller: bool
-    ) -> None:
-        """Render-thread tail of :meth:`safe_import_apply`.
+    ) -> Callable[[], None]:
+        """Record the finished Safe Import, and return its modal opener.
 
-        Runs inline for plain Save and as the jobbed flow's on_done for
-        Save + Apply — the statement order is today's post-sequence block
-        either way.
+        The profile is already on disk when this runs, so the status, footer,
+        and screen rebuild are mandatory and synchronous. Only modal creation
+        rides the cancellable two-frame swap seam.
         """
 
         message: str | LogEntry | ComposedLogEntry = _make_log_entry(
             "safe_import.result.saved_as", name=name
         )
-        if apply_to_controller and self._last_apply_result is not None:
+        apply_result = self._last_apply_result
+        if apply_to_controller and apply_result is not None:
             # Safe Import does not attach the profile-Apply sweep. Hide only the
             # new footer action so it cannot point at a previous profile run;
             # its established result/modal behavior stays below unchanged.
             self._sync_profile_apply_readback_details_action()
             message = self._with_sensitivity_downgrade_notice(
-                message, self._last_apply_result
+                message, apply_result
             )
         self._record_settings_apply_result(True, message)
         self._refresh_footer_profile_combo(selected_name=name)
         self.rebuild_current_screen()
         apply_failed = (
             apply_to_controller
-            and self._last_apply_result is not None
-            and self._last_apply_result.failed
+            and apply_result is not None
+            and apply_result.failed
         )
         if apply_failed:
             # A partial/failed apply must surface the per-field failure
@@ -7891,9 +7898,75 @@ class AppShell:
             # and per the benched modal law (see _defer_modal_swap) the second
             # never renders — hiding the failure modal the user needs. The
             # "Saved as <name>" outcome is preserved in the result banner above.
-            self._show_apply_failure_modal(self._last_apply_result)
-        else:
+            return lambda: self._show_apply_failure_modal(apply_result)
+        import_result = self._safe_import_result
+        if apply_to_controller:
+            result_presence_key = self._last_apply_result_presence_key
+            result_presence_generation = self._last_apply_result_presence_generation
+            return lambda: self._open_controller_safe_import_result_if_current(
+                import_result,
+                apply_result,
+                result_presence_key,
+                result_presence_generation,
+            )
+        return lambda: self._open_frozen_safe_import_result(import_result)
+
+    def _open_controller_safe_import_result_if_current(
+        self,
+        import_result,
+        apply_result: ApplyResult | None,
+        presence_key: tuple[str, str, str] | None,
+        presence_generation: int | None,
+    ) -> None:
+        """Open a Save+Apply result only while its controller result is current."""
+
+        if (
+            apply_result is None
+            or apply_result is not self._last_apply_result
+            or presence_key is None
+            or presence_generation is None
+            or presence_key != self._last_apply_result_presence_key
+            or presence_generation != self._last_apply_result_presence_generation
+            or not self._controller_presence_token_is_current(
+                presence_key,
+                presence_generation,
+            )
+        ):
+            return
+        self._open_frozen_safe_import_result(import_result)
+
+    def _open_frozen_safe_import_result(self, result) -> None:
+        """Render the result modal for the import captured by its opener."""
+
+        live = self._safe_import_result
+        self._safe_import_result = result
+        try:
             safe_import.open_result(self)
+        finally:
+            self._safe_import_result = live
+
+    def _finish_safe_import_apply(
+        self, name: str, *, apply_to_controller: bool
+    ) -> None:
+        """Commit a finished Safe Import, then defer only its outcome modal.
+
+        A hidden stale failure modal still exists in Dear PyGui. Building a
+        replacement in this completion pass would delete and recreate the tag
+        without a rendered frame between, yielding an unviewable dialog. Both
+        failure and success openers therefore name their tags on the swap seam.
+        """
+
+        open_outcome_modal = self._commit_safe_import_apply_result(
+            name, apply_to_controller=apply_to_controller
+        )
+        self._defer_modal_swap(
+            open_outcome_modal,
+            delete_tags=(
+                safe_import.RESULT_MODAL,
+                "apply_failure_modal",
+            ),
+            key="safe_import_open_result",
+        )
 
     def _finish_safe_import_abort(self) -> None:
         """Render the Safe Import fail-closed outcome after a missing checkpoint."""

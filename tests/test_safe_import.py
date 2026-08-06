@@ -551,9 +551,10 @@ class ModalThreadDeferralTests(_DpgTestCase):
     teardown and create land on separate passes, the create runs exactly
     once, error paths stay synchronous, the preview is hidden (state
     intact) under the confirm and restored on cancel, and the
-    already-render-threaded Save + Apply on_done path is NOT routed
-    through the seam. The seam's own mechanics (FIFO, pass bounds,
-    containment, unarmed inline mode the rest of this file relies on)
+    Save + Apply outcome modal is also routed through the seam while its
+    already-committed bookkeeping stays synchronous. The seam's own mechanics
+    (FIFO, pass bounds, containment, and the unarmed inline mode used by the
+    rest of this file)
     live in test_app_shell_ui_deferral.py.
     """
 
@@ -732,11 +733,48 @@ class ModalThreadDeferralTests(_DpgTestCase):
         saved_profile = shell.wrapper_profile_store.save.call_args.args[0]
         self.assertEqual(saved_profile.name, "Smoke Custom Name")
 
-    def test_save_apply_on_done_bypasses_deferral_seam(self) -> None:
-        # The jobbed flow's on_done already runs on the render thread (the
-        # _tick completion drain in threaded mode; inline in sync mode),
-        # frames after the job-start modal teardown — that path
-        # must NOT pick up an extra deferral hop from this fix.
+    def test_failed_save_apply_replaces_hidden_failure_modal_over_two_passes(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        shell._dpg_context_ready = True
+        shell._defer_ui_armed = True
+        apply_result = ApplyResult(
+            total_attempted=1,
+            failed=[ApplyFailure("polling", "boom", False)],
+        )
+        shell._publish_apply_result_for_presence(
+            apply_result,
+            shell._controller_presence_key(),
+            shell._controller_presence_generation,
+        )
+        shell._record_settings_apply_result = MagicMock()
+        shell._refresh_footer_profile_combo = MagicMock()
+        shell.rebuild_current_screen = MagicMock()
+
+        with dpg.window(tag="apply_failure_modal", modal=True):
+            dpg.add_text("stale", tag="stale_safe_import_failure_marker")
+        dpg.hide_item("apply_failure_modal")
+
+        shell._finish_safe_import_apply("Imported", apply_to_controller=True)
+
+        # The profile/result bookkeeping is mandatory and lands now; the hidden
+        # old modal is not deleted in this same completion pass.
+        shell._record_settings_apply_result.assert_called_once()
+        self.assertTrue(dpg.does_item_exist("stale_safe_import_failure_marker"))
+
+        # Pass 1 performs teardown only, leaving a rendered-frame gap.
+        shell._drain_deferred_ui_calls()
+        self.assertFalse(dpg.does_item_exist("stale_safe_import_failure_marker"))
+        self.assertFalse(dpg.does_item_exist("apply_failure_modal"))
+
+        # Pass 2 creates the fresh, visible failure modal into the empty slot.
+        shell._drain_deferred_ui_calls()
+        self.assertTrue(dpg.does_item_exist("apply_failure_modal"))
+
+    def test_save_apply_on_done_routes_its_outcome_modal_through_the_seam(self) -> None:
+        # The success opener itself is a pure create, but the same tail may
+        # choose the failure opener, whose defensive delete of a hidden stale
+        # modal needs the rendered-frame gap. Both outcomes therefore ride the
+        # seam while already-committed bookkeeping remains synchronous.
         shell = make_shell(settings_service=MagicMock())
         shell.last_controller_snapshot = _snapshot()
         applied: dict = {}
@@ -760,13 +798,15 @@ class ModalThreadDeferralTests(_DpgTestCase):
         with patch("zd_app.ui.app_shell.time.sleep"):
             shell.safe_import_apply(apply_to_controller=True)
 
-        # Sync mode runs job + on_done inline: the result modal is already
-        # up and the deferred-UI queue was never touched.
-        self.assertTrue(dpg.does_item_exist(safe_import.RESULT_MODAL))
-        self.assertTrue(shell._deferred_ui_calls.empty())
+        # Sync mode runs job + on_done inline, but the modal is now a pending
+        # seam transition. The committed audit is already available.
+        self.assertFalse(dpg.does_item_exist(safe_import.RESULT_MODAL))
+        self.assertFalse(shell._deferred_ui_calls.empty())
         self.assertEqual(
             shell._safe_import_result.audit.controller_write, "verified"
         )
+        self._drain_swap(shell)
+        self.assertTrue(dpg.does_item_exist(safe_import.RESULT_MODAL))
 
     def test_failed_save_apply_tears_down_stale_result_modal(self) -> None:
         # A5 (follow-up): a prior completed apply can leave RESULT_MODAL up. A
@@ -805,8 +845,10 @@ class ModalThreadDeferralTests(_DpgTestCase):
         with patch("zd_app.ui.app_shell.time.sleep"):
             shell.safe_import_apply(apply_to_controller=True)
 
-        # Failure modal is up; the stale result modal was torn down at job start
-        # and the failure path did not recreate it.
+        # The outcome modal rides the seam, so it lands one swap later. The
+        # stale result modal remains gone and the failure path does not
+        # recreate it.
+        self._drain_swap(shell)
         self.assertTrue(dpg.does_item_exist("apply_failure_modal"))
         self.assertFalse(dpg.does_item_exist(safe_import.RESULT_MODAL))
 

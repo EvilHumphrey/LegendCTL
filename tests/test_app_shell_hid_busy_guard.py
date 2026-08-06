@@ -1102,6 +1102,53 @@ class SafeImportApplyJobbingTests(unittest.TestCase):
             i18n.t("apply.device_changed_after_write"),
         )
 
+    def test_safe_import_success_modal_does_not_reopen_after_frame_gap_swap(self) -> None:
+        shell = _make_shell(_RecordingService(empty_snapshot()))
+        shell._dpg_context_ready = True
+        shell._defer_ui_armed = True
+        state = shell.device_service.state
+        state.connection_state = "connected"
+        state.device_class = "zd_ultimate_legend"
+        state.stable_identifier = "zd-unit-a"
+        shell._observe_controller_presence()
+        self._plant_import(shell)
+        apply_result = SimpleNamespace(
+            failed=[],
+            sensitivity_downgrades=(),
+        )
+        shell._publish_apply_result_for_presence(
+            apply_result,
+            shell._controller_presence_key(),
+            shell._controller_presence_generation,
+        )
+        shell._record_settings_apply_result = MagicMock()
+        shell._refresh_footer_profile_combo = MagicMock()
+        shell.rebuild_current_screen = MagicMock()
+
+        with patch(
+            "zd_app.ui.app_shell.dpg.does_item_exist", return_value=False
+        ), patch("zd_app.ui.app_shell.dpg.delete_item"), patch(
+            "zd_app.ui.app_shell.safe_import.open_result"
+        ) as open_result:
+            shell._finish_safe_import_apply(
+                "Imported Profile",
+                apply_to_controller=True,
+            )
+            # First pass owns teardown and queues the captured success opener.
+            shell._drain_deferred_ui_calls()
+            open_result.assert_not_called()
+
+            state.stable_identifier = "zd-unit-b"
+            shell._observe_controller_presence()
+            shell._invalidate_cached_controller_settings()
+
+            # Second pass runs the old opener after B is current. It must not
+            # recreate A's result modal over the changed-controller outcome.
+            shell._drain_deferred_ui_calls()
+
+        open_result.assert_not_called()
+        self.assertIsNone(shell._last_apply_result)
+
     def test_stale_preview_refuses_before_profile_restore_point_or_device_write(self) -> None:
         service = _RecordingService(empty_snapshot())
         shell = _make_shell(service)
