@@ -79,6 +79,7 @@
   "apply.deadzone.unavailable": "Deadzone settings not applied: settings service unavailable.",
   "apply.error.ambiguous_device": "more than one compatible controller was found; no settings were written",
   "apply.error.device_not_found": "device not found",
+  "apply.error.identity_changed_not_written": "Not written because the controller changed during this operation.",
   "apply.error.open_failed": "device open failed",
   "apply.error.verify_failed": "device did not commit the value (firmware rejected the write)",
   "apply.error.with_code": "{message} (error {code})",

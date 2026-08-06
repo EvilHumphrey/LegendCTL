@@ -79,6 +79,7 @@
   "apply.deadzone.unavailable": "死区设置未应用：设置服务不可用。",
   "apply.error.ambiguous_device": "发现多个兼容的控制器；未写入任何设置",
   "apply.error.device_not_found": "未找到设备",
+  "apply.error.identity_changed_not_written": "操作期间手柄已更换，因此未写入。",
   "apply.error.open_failed": "设备打开失败",
   "apply.error.verify_failed": "设备未提交该数值（固件拒绝了写入）",
   "apply.error.with_code": "{message}（错误 {code}）",

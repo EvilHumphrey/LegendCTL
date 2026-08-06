@@ -544,7 +544,14 @@ class RestorePointService:
         wrote_succeeded = sum(1 for f in field_outcomes if f.write_succeeded)
         write_failed = sum(1 for f in field_outcomes if not f.write_succeeded)
         verified_matched = sum(1 for f in field_outcomes if f.verify_matched is True)
-        could_not_verify = sum(1 for f in field_outcomes if f.verify_matched is None)
+        # A write-failed field was not written by this Restore, so an absent
+        # read-back must not inflate the "written but could not verify" count.
+        # Its write failure is already the honest outcome.
+        could_not_verify = sum(
+            1
+            for f in field_outcomes
+            if f.write_succeeded and f.verify_matched is None
+        )
         mismatched = sum(1 for f in field_outcomes if f.verify_matched is False)
         label = _label_for(
             attempted=len(field_outcomes),

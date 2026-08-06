@@ -1024,13 +1024,16 @@ class RestoreFlowTests(unittest.TestCase):
             captured = service.capture(_basic_trigger(), device_identity=_identity())
             assert captured is not None
             stub.fail_labels = {"polling"}
+            stub.polling_rate = None
             result = service.restore(captured.id)
             self.assertEqual(result.label, RestoreResultLabel.PARTIALLY_RESTORED)
             self.assertEqual(result.write_failed, 1)
+            self.assertEqual(result.could_not_verify, 0)
             polling_outcome = next(
                 f for f in result.fields if f.field_name == "polling_rate"
             )
             self.assertFalse(polling_outcome.write_succeeded)
+            self.assertIsNone(polling_outcome.verify_matched)
 
     def test_restore_failed_when_every_field_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

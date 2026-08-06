@@ -36,6 +36,7 @@ from zd_app.services.settings_apply_coordinator import ApplyFailure, ApplyResult
 from zd_app.services.settings_service import (
     PollingRate,
     SensitivityAnchor,
+    SettingsService,
     TriggerVibrationMode,
     VibrationSettings,
 )
@@ -185,6 +186,77 @@ class NamedApplyRecordingTests(unittest.TestCase):
         # The partial-failure banner still fired exactly as before.
         recorded = shell.device_service.record_apply_result.call_args
         self.assertIs(recorded.args[0], False)
+
+    def test_disconnect_marks_every_unwritten_field_failed_end_to_end(self) -> None:
+        path_a = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02#7&a"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        write_events: list[int] = []
+
+        def write_file(handle: int, _payload: bytes) -> tuple[bool, int, int]:
+            write_events.append(handle)
+            return False, 1167, 0
+
+        service = SettingsService(
+            enumerate_paths=lambda: [path_a],
+            open_write_handle=lambda _path: (0xA001, 0),
+            write_file=write_file,
+            close_handle=lambda _handle: True,
+            sleep=lambda _seconds: None,
+        )
+        with TemporaryDirectory() as tmp:
+            store = LastAppliedStore(base_dir=tmp)
+            shell = _make_shell(service, last_applied_store=store)
+            self._apply(shell)
+
+            result = shell._last_apply_result
+            self.assertIsNotNone(result)
+            failed_labels = [failure.setting_label for failure in result.failed]
+            self.assertEqual(
+                failed_labels,
+                ["polling", "vibration", "step_size"],
+            )
+            self.assertEqual(write_events, [0xA001])
+            self.assertTrue(
+                all(failure.retry_fn is not None for failure in result.failed)
+            )
+            self.assertTrue(
+                all(
+                    "not written" in failure.error.lower()
+                    for failure in result.failed[1:]
+                )
+            )
+
+            verification = result.readback_verification
+            self.assertIsNotNone(verification)
+            self.assertEqual(verification.wrote_succeeded, 0)
+            self.assertEqual(verification.write_failed, 3)
+            self.assertEqual(verification.could_not_verify, 0)
+            self.assertTrue(
+                all(not field.write_succeeded for field in verification.fields)
+            )
+
+            record = store.load_for_controller(_UNIT_A)
+            self.assertIsNotNone(record)
+            self.assertEqual(record.failed_fields, tuple(failed_labels))
+
+            # Retry owns the complete failure set, but the service is still
+            # identity-latched. It must retain every failure without another
+            # write or independently admitting a replacement controller.
+            with patch("zd_app.ui.app_shell.time.sleep"):
+                _capture_widget_state(
+                    lambda: shell._retry_failed_settings(
+                        list(result.failed),
+                        originating_result=result,
+                    )
+                )
+            retry_result = shell._last_apply_result
+            self.assertEqual(
+                [failure.setting_label for failure in retry_result.failed],
+                failed_labels,
+            )
+            self.assertEqual(write_events, [0xA001])
 
     def test_downgraded_apply_records_the_sent_3point_curve_after_round_trip(self) -> None:
         left_3point = (

@@ -182,9 +182,13 @@ class CoordinatorAggregationTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.total_attempted, 1)
-        self.assertEqual(len(result.failed), 1)
-        self.assertEqual(result.failed[0].setting_label, "polling")
+        self.assertEqual(result.total_attempted, 2)
+        self.assertEqual(
+            [failure.setting_label for failure in result.failed],
+            ["polling", "vibration"],
+        )
+        self.assertIn("not written", result.failed[1].error.lower())
+        self.assertIsNotNone(result.failed[1].retry_fn)
         self.assertNotIn(("open_write_handle", path_b), events)
         self.assertEqual(
             [event[1] for event in events if event[0] == "write_file"],
@@ -303,8 +307,14 @@ class CoordinatorAggregationTests(unittest.TestCase):
 
         result = coordinator.apply_snapshot(snapshot)
 
-        self.assertEqual(result.total_attempted, 2)
-        self.assertEqual([failure.setting_label for failure in result.failed], ["vibration"])
+        self.assertEqual(result.total_attempted, 4)
+        self.assertEqual(
+            [failure.setting_label for failure in result.failed],
+            ["vibration", "deadzones", "step_size"],
+        )
+        self.assertTrue(
+            all(failure.retry_fn is not None for failure in result.failed)
+        )
         settings_service.set_polling_rate.assert_called_once()
         settings_service.set_vibration.assert_called_once()
         settings_service.set_all_deadzones.assert_not_called()

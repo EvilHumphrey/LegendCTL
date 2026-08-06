@@ -282,7 +282,11 @@ class SettingsApplyCoordinator:
 
         def trailer_write(label, fn, *, on_success=None):
             if write_state.abort_remaining:
-                return False
+                # The field is still part of the requested Apply, but it must
+                # not touch the device after identity proof is lost. Route it
+                # through the writer so the result records an explicit
+                # not-written failure (and preserves its safe Retry closure).
+                return write(label, fn, on_success=on_success)
             # Per-field trailer: sleep first so the firmware is in a quiet
             # state before the next write hits, then fire the write.
             if field_delay > 0:
@@ -460,8 +464,11 @@ class SettingsApplyCoordinator:
         # across N=60 trials. Kept as its own configurable delay
         # so the step_size work's separate hardware envelope (100/200/500 ms)
         # remains the source of truth for that field's settle.
-        if snapshot.step_size is not None and not write_state.abort_remaining:
-            if self._step_size_trailer_delay_s > 0:
+        if snapshot.step_size is not None:
+            if (
+                not write_state.abort_remaining
+                and self._step_size_trailer_delay_s > 0
+            ):
                 time.sleep(self._step_size_trailer_delay_s)
             # Verified write: the firmware silently rejects a fraction of
             # step_size writes (WriteFile OK, device never commits), and this is
@@ -619,6 +626,20 @@ class SettingsApplyCoordinator:
             on_success: Callable[[], None] | None = None,
         ) -> bool:
             if write_state.abort_remaining:
+                # This label was applicable to the requested snapshot, but no
+                # device write was attempted after the earlier disconnect.
+                # Keep it out of write-success / verification baselines and in
+                # the Retry set without invoking its setter on a stale session.
+                result.total_attempted += 1
+                result.failed.append(
+                    ApplyFailure(
+                        setting_label=label,
+                        error=t("apply.error.identity_changed_not_written"),
+                        is_transient=True,
+                        retry_fn=write_fn,
+                        on_success=on_success,
+                    )
+                )
                 return False
             if (
                 write_state.operation_is_current is not None
