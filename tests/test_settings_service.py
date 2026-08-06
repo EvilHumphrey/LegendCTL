@@ -5875,6 +5875,22 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
             timeout_ms=timeout_ms,
         )
 
+    def _wait_for_forced_quarantine_release(
+        self,
+        service: SettingsService,
+    ) -> None:
+        """Wait until the reader-finished callback has balanced its I/O lease."""
+
+        deadline = time.monotonic() + 1.0
+        while True:
+            with service._handle_lock:
+                pending = bool(service._forced_closed_io_handles)
+            if not pending:
+                return
+            if time.monotonic() >= deadline:
+                self.fail("forced-closed reader quarantine did not release")
+            time.sleep(0.001)
+
     def test_cancel_false_poisoned_handle_reopens_before_retry(self) -> None:
         from zd_app.services import settings_service as ss
 
@@ -5909,6 +5925,7 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
             service.stop()
             kernel.released[self._FIRST_HANDLE].set()
             self.assertTrue(kernel.returned[self._FIRST_HANDLE].wait(timeout=1.0))
+            self._wait_for_forced_quarantine_release(service)
             response = self._read_once(service)
 
         self.assertEqual(response[7], PollingRate.HZ_8000.value)
@@ -5947,6 +5964,7 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
             service.stop()
             kernel.released[self._FIRST_HANDLE].set()
             self.assertTrue(kernel.returned[self._FIRST_HANDLE].wait(timeout=1.0))
+            self._wait_for_forced_quarantine_release(service)
             response = self._read_once(service)
 
         self.assertEqual(response[7], PollingRate.HZ_4000.value)
@@ -6014,6 +6032,7 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
             service.stop()
             kernel.released[self._FIRST_HANDLE].set()
             self.assertTrue(kernel.returned[self._FIRST_HANDLE].wait(timeout=1.0))
+            self._wait_for_forced_quarantine_release(service)
             response = self._read_once(service)
 
         self.assertEqual(response, fresh_response)
@@ -6173,6 +6192,7 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
             self.assertEqual(close_calls, [handle])
             kernel.released[handle].set()
             self.assertTrue(kernel.returned[handle].wait(timeout=1.0))
+            self._wait_for_forced_quarantine_release(service)
 
             if read_write_candidate:
                 self.assertEqual(service._ensure_read_write_handle(), handle)
