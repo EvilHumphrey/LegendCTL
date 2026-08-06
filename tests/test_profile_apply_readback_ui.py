@@ -512,6 +512,38 @@ class ProfileApplyReadbackUiTests(unittest.TestCase):
                 self.assertNotIn("write=ok", rendered)
                 self.assertNotIn("verify=matched", rendered)
 
+    def test_write_error_translation_allowlist_preserves_i18n_key_collisions(self) -> None:
+        verification = _verification(
+            _outcome(
+                "step_size",
+                verify_matched=None,
+                write_succeeded=False,
+                write_error="actions.cancel",
+            ),
+            _outcome(
+                "vibration",
+                verify_matched=None,
+                write_succeeded=False,
+                write_error="apply.failure.error.not_available",
+            ),
+        )
+        shell = SimpleNamespace(COLORS={"text": (1, 1, 1), "muted": (2, 2, 2)})
+        expected_sentinel_by_locale = {
+            "en": "not available",
+            "zh-CN": "不可用",
+            "ko": "사용할 수 없음",
+        }
+
+        for locale, expected_sentinel in expected_sentinel_by_locale.items():
+            with self.subTest(locale=locale):
+                i18n.set_locale(locale)
+                with _DpgTextRecorder() as recorder:
+                    AppShell._render_profile_apply_readback_details(shell, verification)
+                rendered = "\n".join(recorder.texts)
+                self.assertIn("actions.cancel", rendered)
+                self.assertIn(expected_sentinel, rendered)
+                self.assertNotIn(i18n.t("actions.cancel"), rendered)
+
     def test_status_action_tracks_sweep_and_opens_through_the_modal_swap(self) -> None:
         shell = make_shell()
         result = ApplyResult(

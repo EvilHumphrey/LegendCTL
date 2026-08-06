@@ -20,6 +20,7 @@ _VERIFY_NOTE_KEYS = {
     "write-only": "verification_details.note.write_only",
 }
 _VERIFY_READ_FAILED_PREFIX = "verify-read failed: "
+_WRITE_ERROR_I18N_KEYS = frozenset({"apply.failure.error.not_available"})
 
 
 def _translate_or_raw(key: str, raw: str) -> str:
@@ -65,6 +66,14 @@ def _verification_note(note: str) -> str:
     return note
 
 
+def _write_error(error: str) -> str:
+    """Translate only reviewed internal sentinels; preserve raw failures exactly."""
+
+    if error in _WRITE_ERROR_I18N_KEYS:
+        return t(error)
+    return error
+
+
 def format_verification_outcome(
     outcome: RestoreFieldOutcome,
 ) -> tuple[str, str | None]:
@@ -98,7 +107,7 @@ def format_verification_outcome(
 
     detail: str | None = None
     if outcome.write_error:
-        detail = _translate_or_raw(outcome.write_error, outcome.write_error)
+        detail = _write_error(outcome.write_error)
     elif outcome.verify_matched is None and outcome.verify_note:
         detail = _verification_note(outcome.verify_note)
     if detail:
