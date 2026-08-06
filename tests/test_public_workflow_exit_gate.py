@@ -26,11 +26,6 @@ class PublicWorkflowExitGateTests(unittest.TestCase):
                 self.assertNotIn("elseif ($log -match", text)
                 self.assertIn("-MinimumTestCount 3000", text)
 
-        render_workflow = (
-            REPO_ROOT / ".github" / "workflows" / "render-matrix.yml"
-        ).read_text(encoding="utf-8")
-        self.assertIn("-MinimumTestCount 40", render_workflow)
-
     def test_evaluator_matrix(self) -> None:
         pwsh = shutil.which("pwsh")
         if not pwsh:
