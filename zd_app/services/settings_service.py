@@ -3679,7 +3679,12 @@ class SettingsService:
             ):
                 # Real Win32 cannot reuse an open leased HANDLE. Treat an
                 # injected/raw collision as unavailable without closing the
-                # still-owned old handle.
+                # still-owned old handle. A force-closed stranded handle is
+                # different: the same numeric value now names a new OS object,
+                # so refusing it must also close that new candidate exactly
+                # once rather than leak it untracked.
+                if handle in self._forced_closed_io_handles:
+                    close_candidate = handle
                 result = _EnsureHandleResult(outcome=SetPollingRateOutcome.OPEN_FAILED)
             elif (
                 self._read_write_generation != generation
@@ -3753,6 +3758,8 @@ class SettingsService:
                 self._active_io_leases.get(handle, 0) > 0
                 or handle in self._retired_io_handles
             ):
+                if handle in self._forced_closed_io_handles:
+                    close_candidate = handle
                 result = None
             elif (
                 self._read_write_generation != generation

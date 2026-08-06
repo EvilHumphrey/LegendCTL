@@ -6100,6 +6100,72 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
         self.assertEqual(kernel.read_handles, [])
         self.assertEqual(closed, [self._FIRST_HANDLE])
 
+    def _assert_force_closed_raw_reuse_candidate_is_closed(
+        self,
+        *,
+        read_write_candidate: bool,
+    ) -> None:
+        from zd_app.services import settings_service as ss
+
+        handle = self._FIRST_HANDLE
+        kernel = _StrictReadKernel32(
+            ss,
+            plans={handle: [("block", None)]},
+            cancel_results={handle: False},
+            cancel_errors={handle: 1168},
+        )
+        self.addCleanup(kernel.release_all)
+        close_calls: list[int] = []
+        rw_open_count = 0
+
+        def open_read_write_handle(path: str) -> tuple[int | None, int]:
+            nonlocal rw_open_count
+            self.assertEqual(path, _FAKE_PATH)
+            rw_open_count += 1
+            return handle, 0
+
+        service = SettingsService(
+            enumerate_paths=lambda: [_FAKE_PATH],
+            open_write_handle=lambda path: (handle, 0),
+            open_read_write_handle=open_read_write_handle,
+            write_file=lambda _handle, payload: (True, 0, len(payload)),
+            close_handle=lambda closed_handle: close_calls.append(closed_handle) or True,
+        )
+
+        with mock.patch.object(ss._Win32, "kernel32", return_value=kernel):
+            with self.assertRaises(ss.StrandedReadTimeout):
+                self._read_once(service)
+            # Poison force-closed the old OS object and quarantined its raw
+            # value while the old worker still owns the lease.
+            self.assertEqual(close_calls, [handle])
+            service.stop()
+
+            if read_write_candidate:
+                self.assertIsNone(service._ensure_read_write_handle())
+                self.assertEqual(rw_open_count, 2)
+            else:
+                self.assertEqual(service.start(), SetPollingRateOutcome.OPEN_FAILED)
+                self.assertEqual(rw_open_count, 1)
+
+            # The same numeric value now names a newly opened candidate. It is
+            # refused and closed exactly once; the old lease completion below
+            # only removes quarantine and must not close that candidate again.
+            self.assertEqual(close_calls, [handle, handle])
+            kernel.released[handle].set()
+            self.assertTrue(kernel.returned[handle].wait(timeout=1.0))
+
+        self.assertEqual(close_calls, [handle, handle])
+
+    def test_force_closed_raw_reuse_write_candidate_is_closed_once(self) -> None:
+        self._assert_force_closed_raw_reuse_candidate_is_closed(
+            read_write_candidate=False
+        )
+
+    def test_force_closed_raw_reuse_rw_candidate_is_closed_once(self) -> None:
+        self._assert_force_closed_raw_reuse_candidate_is_closed(
+            read_write_candidate=True
+        )
+
     def test_concurrent_stop_and_read_handle_open_discards_open_candidate(self) -> None:
         open_entered = threading.Event()
         allow_open_return = threading.Event()
