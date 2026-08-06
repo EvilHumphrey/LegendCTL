@@ -2031,7 +2031,10 @@ class DiagnosticsDeadzoneWriteTests(unittest.TestCase):
         self.assertEqual(service.read_calls, 0)  # no read on the leading edge
         self.assertEqual(shell._diag_deadzone_status_key, "sending")  # before the window
         self.assertEqual(shell._slider_throttle._pending.get("deadzones"), None)  # no pending
-        self.assertEqual(shell._deadzone_pending_verify, dz)  # deferred verify armed
+        self.assertEqual(
+            shell._deadzone_pending_verify.written,
+            dz,
+        )  # deferred verify armed with its controller token
         # Age the leading write past the throttle quiet window so the deferred
         # verify is due, then drain one render tick's flush (sync mode -> the
         # read-back verify runs inline and firms the status).

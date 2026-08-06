@@ -176,6 +176,10 @@ class RestorePointsScreenState:
     hide_routine_captures: bool = True
     status_text: str = ""
     status_kind: str = "info"
+    # The confirm/preview belongs to the controller that opened it. A visible
+    # A preview must never recapture a fresh B token when Restore is clicked.
+    presence_key: Optional[tuple[str, str, str]] = None
+    presence_generation: Optional[int] = None
 
 
 def _ensure_state(shell) -> RestorePointsScreenState:
@@ -715,7 +719,14 @@ def _build_confirm(shell, service, state: RestorePointsScreenState) -> None:
     # so an unexpected store/HID failure mid-build still lets the modal
     # render (user can Cancel out).
     preview: Optional[RestorePreview] = None
-    if not getattr(shell, "hid_busy", False):
+    token_check = getattr(shell, "_controller_presence_token_is_current", None)
+    preview_token_current = (
+        state.presence_key is None
+        or state.presence_generation is None
+        or not callable(token_check)
+        or token_check(state.presence_key, state.presence_generation)
+    )
+    if not getattr(shell, "hid_busy", False) and preview_token_current:
         try:
             preview = service.compute_restore_preview(rp.id)
         except Exception:  # noqa: BLE001
@@ -1000,6 +1011,12 @@ def _on_open_confirm(shell, rp_id: str) -> None:
     state.view = VIEW_CONFIRM
     state.selected_rp_id = rp_id
     state.status_text = ""
+    presence_key = getattr(shell, "_controller_presence_key", None)
+    if callable(presence_key):
+        state.presence_key = presence_key()
+        state.presence_generation = getattr(
+            shell, "_controller_presence_generation", None
+        )
     shell.rebuild_current_screen()
 
 
@@ -1021,6 +1038,20 @@ def _on_back_to_list(shell) -> None:
 
 def _on_confirm_restore(shell) -> None:
     state = _ensure_state(shell)
+    token_check = getattr(shell, "_controller_presence_token_is_current", None)
+    if (
+        state.presence_key is not None
+        and state.presence_generation is not None
+        and callable(token_check)
+        and not token_check(state.presence_key, state.presence_generation)
+    ):
+        discard = getattr(shell, "_discard_stale_controller_operation", None)
+        if callable(discard):
+            discard(state.presence_key, state.presence_generation)
+        state.status_text = t("apply.device_changed")
+        state.status_kind = "warn"
+        shell.rebuild_current_screen()
+        return
     if getattr(shell, "_hid_job_in_flight", False):
         # Another HID flow is mid-job (threaded shells only; the confirm
         # button is also disabled for the duration). Entering IN_PROGRESS
@@ -1082,12 +1113,30 @@ def _execute_restore(shell) -> None:
         return
 
     rp_id = state.selected_rp_id
-    presence_key = None
-    presence_generation = None
+    presence_key = state.presence_key
+    presence_generation = state.presence_generation
     token_check = getattr(shell, "_controller_presence_token_is_current", None)
-    if callable(token_check):
+    if callable(token_check) and (
+        presence_key is None or presence_generation is None
+    ):
         presence_key = shell._controller_presence_key()
         presence_generation = shell._controller_presence_generation
+
+    if (
+        presence_key is not None
+        and presence_generation is not None
+        and callable(token_check)
+        and not token_check(presence_key, presence_generation)
+    ):
+        discard = getattr(shell, "_discard_stale_controller_operation", None)
+        if callable(discard):
+            discard(presence_key, presence_generation)
+        state.view = VIEW_CONFIRM
+        state.status_text = t("apply.device_changed")
+        state.status_kind = "warn"
+        state.result = None
+        shell.rebuild_current_screen()
+        return
 
     def presence_guard() -> bool:
         if presence_key is None or presence_generation is None:

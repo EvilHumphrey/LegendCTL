@@ -153,6 +153,18 @@ def _capture_widget_state(callback):
     ), patch(
         "zd_app.ui.app_shell.dpg.configure_item",
         side_effect=configure_item,
+    ), patch(
+        "zd_app.ui.app_shell.dpg.get_viewport_client_width",
+        return_value=1180,
+    ), patch(
+        "zd_app.ui.app_shell.dpg.get_viewport_width",
+        return_value=1180,
+    ), patch(
+        "zd_app.ui.app_shell.dpg.get_viewport_client_height",
+        return_value=760,
+    ), patch(
+        "zd_app.ui.app_shell.dpg.get_viewport_height",
+        return_value=760,
     ):
         callback()
     return values, config
@@ -408,6 +420,11 @@ class _BusyWindowTestCase(unittest.TestCase):
         )
         service = _RecordingService(snapshot, gate_read=True)
         shell = _make_shell(service, hid_executor=threaded_hid_executor)
+        # This harness marks DPG ready only so its patched status-widget calls
+        # exercise the real busy-refusal path.  A successful refresh drain also
+        # owns the unrelated first-connect trust card; suppress that surface so
+        # no real DearPyGui call can escape the otherwise hermetic widget shim.
+        shell._show_first_readable_connect_card = MagicMock()
         shell._dpg_context_ready = True
         shell._polling_rate_hydrated = True
         shell._step_size_hydrated = True
@@ -572,7 +589,9 @@ class EntryPointBusyRefusalTests(_BusyWindowTestCase):
         with patch(
             "zd_app.ui.app_shell.dpg.get_value",
             side_effect={safe_import_screen.NAME_INPUT: "Imported Profile"}.__getitem__,
-        ), patch("zd_app.ui.app_shell.safe_import.open_result"):
+        ), patch("zd_app.ui.app_shell.safe_import.open_result"), patch(
+            "zd_app.ui.app_shell.dpg.delete_item"
+        ):
             _capture_widget_state(
                 lambda: shell.safe_import_apply(apply_to_controller=False)
             )
@@ -639,6 +658,61 @@ class SliderTrailingFlushTests(_BusyWindowTestCase):
         self.assertEqual(service.write_calls["set_step_size"], 1)
         self.assertEqual(sum(service.write_calls.values()), 1)
         self.assertIsNone(shell._slider_throttle._pending.get("step_size"))
+
+    def test_pending_drag_is_dropped_across_same_unit_reconnect_generation(self) -> None:
+        service = _RecordingService(empty_snapshot(), gate_read=True)
+        shell = _make_shell(service, hid_executor=threaded_hid_executor)
+        state = shell.device_service.state
+        state.connection_state = "connected"
+        state.device_class = "zd_ultimate_legend"
+        state.stable_identifier = "zd-unit-a"
+        shell._observed_controller_presence_key = shell._controller_presence_key()
+
+        _capture_widget_state(shell.refresh_from_controller)
+        self.assertTrue(service.started.wait(_GATE_TIMEOUT_S))
+        now = monotonic()
+        shell._slider_throttle._last_write_ts["step_size"] = now
+        shell._slider_throttle.should_write_now(
+            "step_size",
+            141,
+            now=now + 0.001,
+            no_restore_point=False,
+            stable_identifier="zd-unit-a",
+        )
+
+        state.connection_state = "no_device"
+        shell._observe_controller_presence()
+        state.connection_state = "connected"
+        shell._observe_controller_presence()
+        service.release.set()
+        _drain_queued_completions(shell, 1)
+        _capture_widget_state(shell._drain_hid_job_completions)
+        _capture_widget_state(shell._flush_slider_throttle)
+
+        self.assertEqual(sum(service.write_calls.values()), 0)
+        self.assertEqual(shell._slider_throttle._pending, {})
+
+    def test_deadzone_verify_is_not_read_from_replacement_controller(self) -> None:
+        service = _RecordingService(empty_snapshot())
+        shell = _make_shell(service)
+        state = shell.device_service.state
+        state.connection_state = "connected"
+        state.device_class = "zd_ultimate_legend"
+        state.stable_identifier = "zd-unit-a"
+        shell._observed_controller_presence_key = shell._controller_presence_key()
+        written = empty_snapshot().deadzones
+
+        _capture_widget_state(
+            lambda: shell._do_write_deadzones(written, verify=False)
+        )
+        self.assertIsNotNone(shell._deadzone_pending_verify)
+        state.stable_identifier = "zd-unit-b"
+        shell._observe_controller_presence()
+        shell._slider_throttle._last_write_ts["deadzones"] = monotonic() - 60.0
+        _capture_widget_state(shell._flush_slider_throttle)
+
+        self.assertEqual(service.read_calls, 0)
+        self.assertIsNone(shell._deadzone_pending_verify)
 
 
 # ---------------------------------------------------------------------------
@@ -886,6 +960,18 @@ class SafeImportApplyJobbingTests(unittest.TestCase):
 
         return MagicMock(side_effect=apply_fn), started, release
 
+    def test_safe_import_diff_ignores_snapshot_from_other_controller(self) -> None:
+        shell = _make_shell(_RecordingService(empty_snapshot()))
+        shell.device_service.state.stable_identifier = "zd-unit-b"
+        shell.last_controller_snapshot = empty_snapshot(polling_rate=PollingRate.HZ_1000)
+        shell.last_snapshot_identity = "zd-unit-a"
+        change = SimpleNamespace(key="polling_rate", current_value=None)
+        result = SimpleNamespace(categories={"device": [change]})
+
+        shell._fill_safe_import_current_values(result)
+
+        self.assertIsNone(change.current_value)
+
     def test_threaded_save_apply_jobs_device_sequence_ui_after_drain(self) -> None:
         snapshot = empty_snapshot(polling_rate=PollingRate.HZ_8000)
         service = _RecordingService(snapshot)
@@ -989,6 +1075,8 @@ class SafeImportApplyJobbingTests(unittest.TestCase):
             "zd_app.ui.app_shell.time.sleep"
         ), patch(
             "zd_app.ui.app_shell.dpg.delete_item"
+        ), patch(
+            "zd_app.ui.app_shell.dpg.does_item_exist", return_value=False
         ):
             _capture_widget_state(
                 lambda: shell.safe_import_apply(apply_to_controller=True)
@@ -1013,6 +1101,86 @@ class SafeImportApplyJobbingTests(unittest.TestCase):
             recorded.args[1],
             i18n.t("apply.device_changed_after_write"),
         )
+
+    def test_stale_preview_refuses_before_profile_restore_point_or_device_write(self) -> None:
+        service = _RecordingService(empty_snapshot())
+        shell = _make_shell(service)
+        shell._dpg_context_ready = True
+        state = shell.device_service.state
+        state.connection_state = "connected"
+        state.device_class = "zd_ultimate_legend"
+        state.stable_identifier = "zd-unit-a"
+        shell._observed_controller_presence_key = shell._controller_presence_key()
+        self._plant_import(shell)
+        shell._safe_import_presence_key = shell._controller_presence_key()
+        shell._safe_import_presence_generation = shell._controller_presence_generation
+        shell._apply_snapshot_to_controller = MagicMock()
+
+        state.stable_identifier = "zd-unit-b"
+        shell._observe_controller_presence()
+        with patch("zd_app.ui.app_shell.dpg.get_value") as get_value, patch(
+            "zd_app.ui.app_shell.dpg.delete_item"
+        ) as delete_item:
+            _values, config = _capture_widget_state(
+                lambda: shell.safe_import_apply(apply_to_controller=True)
+            )
+
+        get_value.assert_not_called()
+        shell.wrapper_profile_store.save.assert_not_called()
+        shell.restore_point_service.capture.assert_not_called()
+        shell._apply_snapshot_to_controller.assert_not_called()
+        deleted = {call.args[0] for call in delete_item.call_args_list}
+        self.assertIn(safe_import_screen.PREVIEW_MODAL, deleted)
+        self.assertIn(safe_import_screen.CONFIRM_MODAL, deleted)
+        self.assertFalse(config["footer_apply_readback_details_button"]["show"])
+        recorded = shell.device_service.record_apply_result.call_args
+        self.assertEqual(recorded.args[1], i18n.t("apply.device_changed"))
+
+    def test_safe_import_publication_waits_for_render_completion(self) -> None:
+        queued_jobs = []
+
+        def queue_only(job, deliver) -> None:
+            queued_jobs.append((job, deliver))
+
+        service = _RecordingService(empty_snapshot())
+        shell = _make_shell(service, hid_executor=queue_only)
+        shell._dpg_context_ready = True
+        self._plant_import(shell)
+        shell._apply_snapshot_to_controller = MagicMock(
+            return_value=SimpleNamespace(
+                failed=[],
+                succeeded=1,
+                total_attempted=1,
+                retry_recoveries=0,
+            )
+        )
+        shell._verify_safe_import_write = MagicMock(return_value=True)
+        shell._record_last_applied_safe = MagicMock()
+
+        with patch(
+            "zd_app.ui.app_shell.dpg.get_value",
+            side_effect={safe_import_screen.NAME_INPUT: "Imported Profile"}.__getitem__,
+        ), patch("zd_app.ui.app_shell.dpg.delete_item"):
+            _capture_widget_state(
+                lambda: shell.safe_import_apply(apply_to_controller=True)
+            )
+            job, deliver = queued_jobs.pop()
+            outcome = job()
+
+        shell._record_last_applied_safe.assert_not_called()
+        self.assertIsNone(shell._last_apply_result)
+
+        shell.device_service.state.stable_identifier = "zd-unit-b"
+        shell._observe_controller_presence()
+        deliver(outcome)
+        _drain_queued_completions(shell, 1)
+        with patch("zd_app.ui.app_shell.safe_import.open_result"), patch(
+            "zd_app.ui.app_shell.dpg.delete_item"
+        ):
+            _capture_widget_state(shell._drain_hid_job_completions)
+
+        shell._record_last_applied_safe.assert_not_called()
+        self.assertIsNone(shell._last_apply_result)
 
     def test_threaded_failed_apply_failure_modal_from_on_done_audit_as_today(
         self,
