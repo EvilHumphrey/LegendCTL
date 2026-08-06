@@ -1041,7 +1041,7 @@ class ApplyOriginPresenceBindingTests(unittest.TestCase):
 
         self.assertEqual(service.write_calls, 1)
         self.assertEqual(service.read_calls, 0)
-        shell.last_applied_store.save.assert_not_called()
+        shell.last_applied_store.save_for_controller.assert_not_called()
         shell._record_wear_event.assert_not_called()
         self.assertIsNone(shell._last_apply_result)
         self.assertIsNone(shell.last_controller_snapshot)
@@ -1578,7 +1578,7 @@ class RetryFailedSettingsJobbingTests(unittest.TestCase):
 
         self.assertEqual(retry_calls, ["retry"])
         self.assertEqual(service.read_calls, 0)
-        shell.last_applied_store.load.assert_not_called()
+        shell.last_applied_store.load_for_controller.assert_not_called()
         shell.last_applied_store.save.assert_not_called()
         self.assertIsNone(shell._last_apply_result)
         recorded = shell.device_service.record_apply_result.call_args

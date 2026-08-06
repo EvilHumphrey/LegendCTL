@@ -3534,6 +3534,7 @@ class AppShell:
         apply_result,
         *,
         include_device: bool,
+        controller_stable_identifier: str | None = None,
     ) -> None:
         """Best-effort Last-Applied record write (Device-vs-Profile Phase 2).
 
@@ -3560,7 +3561,12 @@ class AppShell:
                     profile_name,
                 )
                 return
-            store.save(
+            stable_identifier = (
+                controller_stable_identifier
+                if controller_stable_identifier is not None
+                else self._manual_write_stable_identifier()
+            )
+            store.save_for_controller(
                 LastAppliedRecord(
                     profile_name=profile_name,
                     applied_at=utc_now_iso_z(),
@@ -3569,7 +3575,8 @@ class AppShell:
                         failure.setting_label for failure in apply_result.failed
                     ),
                     snapshot=snapshot_as_sent(snapshot, apply_result),
-                )
+                ),
+                stable_identifier,
             )
         except Exception:
             logger.exception(
@@ -3578,7 +3585,11 @@ class AppShell:
             )
 
     def _update_last_applied_after_retry_safe(
-        self, attempted_failures, retry_result
+        self,
+        attempted_failures,
+        retry_result,
+        *,
+        controller_stable_identifier: str | None = None,
     ) -> None:
         """Best-effort: drop retry-recovered labels from the stored record.
 
@@ -3594,7 +3605,12 @@ class AppShell:
         if store is None:
             return
         try:
-            record = store.load()
+            stable_identifier = (
+                controller_stable_identifier
+                if controller_stable_identifier is not None
+                else self._manual_write_stable_identifier()
+            )
+            record = store.load_for_controller(stable_identifier)
             if record is None:
                 return
             still_failed = {f.setting_label for f in retry_result.failed}
@@ -4164,10 +4180,15 @@ class AppShell:
                 # Phase 2: persist what was actually sent (best-effort, never
                 # affects the apply). ``snapshot`` is post device-field
                 # filtering; any downgraded 8-point rider is stripped by the
-                # record seam. LastAppliedRecord has no controller identity,
-                # so a stale A operation must never become B's baseline.
+                # record seam. The schema-v2 HMAC is derived from this job's
+                # immutable A token; a stale A operation must never become B's
+                # baseline even if persistence is delayed.
                 self._record_last_applied_safe(
-                    name, snapshot, apply_result, include_device=include_device
+                    name,
+                    snapshot,
+                    apply_result,
+                    include_device=include_device,
+                    controller_stable_identifier=apply_presence_key[2],
                 )
 
                 self._record_wear_event(
@@ -4999,9 +5020,13 @@ class AppShell:
                     True,
                 )
             # Phase 2: labels that just recovered are no longer "failed at
-            # apply" — amend the identity-less stored Last-Applied record only
-            # after the whole retry job still belongs to its origin token.
-            self._update_last_applied_after_retry_safe(retry_failures, retry_result)
+            # apply" — amend only the stored Last-Applied record whose binding
+            # matches this retry's immutable origin token.
+            self._update_last_applied_after_retry_safe(
+                retry_failures,
+                retry_result,
+                controller_stable_identifier=retry_presence_key[2],
+            )
             return retry_result
 
         completed: list[ApplyResult] = []
@@ -7444,13 +7469,14 @@ class AppShell:
             if not presence_guard():
                 return "device_changed_after_write", None
             # Safe Import has now completed every device read/write phase under
-            # the original token. Only now may its identity-less Last Applied
-            # baseline and live result become visible.
+            # the original token. Only now may its controller-bound Last
+            # Applied baseline and live result become visible.
             self._record_last_applied_safe(
                 name,
                 snapshot,
                 apply_result,
                 include_device=has_device_settings(snapshot),
+                controller_stable_identifier=import_presence_key[2],
             )
             self._last_apply_result = apply_result
 

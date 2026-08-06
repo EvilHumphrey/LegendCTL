@@ -18,6 +18,10 @@ Honesty notes (mirrors the apply pipeline's claims, never exceeds them):
   presented as on-device truth.
 * Storage is **best-effort** at the call sites: a write failure here must never
   affect an apply result (see ``AppShell._record_last_applied_safe``).
+* Schema v2 binds the record to the controller through an installation-keyed
+  HMAC of DeviceService's stable identifier. The raw identifier is never
+  persisted. Legacy v1, unknown/mismatched v2, and unusable live identity all
+  suppress the record; the screen never falls back to model-level evidence.
 
 On-disk layout: one ``last_applied.json`` in the user-data root (a sibling of
 ``settings.json`` / ``wrapper_profiles/`` — deliberately NOT inside
@@ -25,7 +29,9 @@ On-disk layout: one ``last_applied.json`` in the user-data root (a sibling of
 skipped file). Atomic temp-then-replace writes mirroring
 :meth:`RestorePointStore.save` / :meth:`WrapperProfileStore.save`; a corrupt or
 missing file loads as ``None`` with a logged warning, never a crash and never a
-disclosure card.
+disclosure card. ``controller_identity_key_v1.bin`` is a local,
+installation-scoped HMAC key; losing or rotating it makes old records
+non-comparable and therefore suppressed.
 """
 
 from __future__ import annotations
@@ -33,12 +39,19 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from zd_app.services.settings_service import ControllerSnapshot
 from zd_app.storage._import_guards import read_guarded_json
+from zd_app.storage.last_applied_identity import (
+    STABLE_IDENTIFIER_DIGEST_VERSION,
+    DigestComparison,
+    LastAppliedIdentity,
+    compare_bindings,
+)
 from zd_app.storage.settings_store import initialize_user_data_dir
 from zd_app.storage.snapshot_codec import snapshot_from_dict, snapshot_to_dict
 
@@ -46,15 +59,28 @@ from zd_app.storage.snapshot_codec import snapshot_from_dict, snapshot_to_dict
 logger = logging.getLogger(__name__)
 
 
-SCHEMA_VERSION = 1
+LEGACY_SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 FILENAME = "last_applied.json"
 TEMP_SUFFIX = ".tmp"
+_HEX_64 = re.compile(r"[0-9a-f]{64}\Z")
+_HEX_12 = re.compile(r"[0-9a-f]{12}\Z")
+_UNUSABLE_STABLE_IDENTIFIERS = frozenset({"", "unknown", "none"})
 
 
 def utc_now_iso_z() -> str:
     """ISO-8601 UTC with ``Z`` suffix — same shape the Restore Points rows show."""
 
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@dataclass(frozen=True)
+class LastAppliedControllerBinding:
+    """Privacy-safe equality evidence for one installation/controller pair."""
+
+    instance_digest: str
+    digest_scope_id: str
+    digest_version: str = STABLE_IDENTIFIER_DIGEST_VERSION
 
 
 @dataclass(frozen=True)
@@ -66,9 +92,16 @@ class LastAppliedRecord:
     include_device: bool  # device-global fields (polling/step) were part of it
     failed_fields: tuple[str, ...]  # coordinator setting_labels whose write did not succeed
     snapshot: ControllerSnapshot  # as-sent (post filtering and fallback)
+    # ``None`` exists only for a decoded legacy-v1 record. Schema-v2 writes
+    # reject it, and controller-scoped reads suppress it.
+    controller_binding: LastAppliedControllerBinding | None = None
 
 
 def record_to_dict(record: LastAppliedRecord) -> dict:
+    binding = record.controller_binding
+    if binding is None:
+        raise ValueError("last-applied schema v2 requires a controller binding")
+    _validate_binding(binding)
     return {
         "schema_version": SCHEMA_VERSION,
         "profile_name": record.profile_name,
@@ -76,6 +109,11 @@ def record_to_dict(record: LastAppliedRecord) -> dict:
         "include_device": record.include_device,
         "failed_fields": list(record.failed_fields),
         "snapshot": snapshot_to_dict(record.snapshot),
+        "controller_binding": {
+            "instance_digest": binding.instance_digest,
+            "digest_scope_id": binding.digest_scope_id,
+            "digest_version": binding.digest_version,
+        },
     }
 
 
@@ -89,6 +127,11 @@ def record_from_dict(payload: dict) -> LastAppliedRecord:
 
     if not isinstance(payload, dict):
         raise ValueError(f"last-applied record must be a JSON object, got {type(payload).__name__}")
+    schema_version = payload.get("schema_version")
+    if schema_version not in (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION):
+        raise ValueError(
+            f"unsupported last-applied schema_version: {schema_version!r}"
+        )
     profile_name = payload.get("profile_name")
     applied_at = payload.get("applied_at")
     if not isinstance(profile_name, str) or not profile_name:
@@ -101,12 +144,60 @@ def record_from_dict(payload: dict) -> LastAppliedRecord:
     snapshot_payload = payload.get("snapshot")
     if not isinstance(snapshot_payload, dict):
         raise ValueError("last-applied record has no snapshot object")
+    binding = None
+    if schema_version == SCHEMA_VERSION:
+        binding = _binding_from_dict(payload.get("controller_binding"))
     return LastAppliedRecord(
         profile_name=profile_name,
         applied_at=applied_at,
         include_device=bool(payload.get("include_device", False)),
         failed_fields=tuple(failed_raw),
         snapshot=snapshot_from_dict(snapshot_payload),
+        controller_binding=binding,
+    )
+
+
+def _binding_from_dict(payload: object) -> LastAppliedControllerBinding:
+    if not isinstance(payload, dict):
+        raise ValueError("last-applied schema v2 has no controller_binding object")
+    binding = LastAppliedControllerBinding(
+        instance_digest=payload.get("instance_digest"),
+        digest_scope_id=payload.get("digest_scope_id"),
+        digest_version=payload.get("digest_version"),
+    )
+    _validate_binding(binding)
+    return binding
+
+
+def _validate_binding(binding: LastAppliedControllerBinding) -> None:
+    if (
+        not isinstance(binding.instance_digest, str)
+        or _HEX_64.fullmatch(binding.instance_digest) is None
+    ):
+        raise ValueError(
+            "last-applied controller digest must be 64 lowercase hex characters"
+        )
+    if (
+        not isinstance(binding.digest_scope_id, str)
+        or _HEX_12.fullmatch(binding.digest_scope_id) is None
+    ):
+        raise ValueError(
+            "last-applied digest scope must be 12 lowercase hex characters"
+        )
+    if binding.digest_version != STABLE_IDENTIFIER_DIGEST_VERSION:
+        raise ValueError(
+            "unsupported last-applied controller digest version: "
+            f"{binding.digest_version!r}"
+        )
+
+
+def _stable_identifier_is_usable(stable_identifier: object) -> bool:
+    if not isinstance(stable_identifier, str):
+        return False
+    normalized = stable_identifier.strip().casefold()
+    return (
+        normalized not in _UNUSABLE_STABLE_IDENTIFIERS
+        and not normalized.startswith("xinput-slot-")
     )
 
 
@@ -148,6 +239,50 @@ class LastAppliedStore:
         temp_path.replace(final_path)
         return final_path
 
+    def binding_for_controller(
+        self, stable_identifier: object
+    ) -> LastAppliedControllerBinding | None:
+        """Derive local equality evidence, or abstain for weak identities."""
+
+        if not _stable_identifier_is_usable(stable_identifier):
+            return None
+        try:
+            digest, scope_id = LastAppliedIdentity(self.base_dir).binding(
+                stable_identifier
+            )
+            return LastAppliedControllerBinding(
+                instance_digest=digest,
+                digest_scope_id=scope_id,
+            )
+        except Exception:  # noqa: BLE001 - identity evidence is best-effort
+            logger.warning(
+                "could not derive last-applied controller binding; suppressing record"
+            )
+            logger.debug("last-applied controller binding failure", exc_info=True)
+            return None
+
+    def save_for_controller(
+        self,
+        record: LastAppliedRecord,
+        stable_identifier: object,
+    ) -> Path | None:
+        """Bind and save ``record``; unknown/slot identities record nothing."""
+
+        binding = self.binding_for_controller(stable_identifier)
+        if binding is None:
+            logger.info("last-applied record suppressed: controller identity unavailable")
+            return None
+        return self.save(
+            LastAppliedRecord(
+                profile_name=record.profile_name,
+                applied_at=record.applied_at,
+                include_device=record.include_device,
+                failed_fields=record.failed_fields,
+                snapshot=record.snapshot,
+                controller_binding=binding,
+            )
+        )
+
     def load(self) -> LastAppliedRecord | None:
         """Return the stored record, or ``None`` when there isn't a usable one.
 
@@ -174,10 +309,35 @@ class LastAppliedStore:
             logger.warning("corrupt last-applied record %s: %s", path, exc)
             return None
 
+    def load_for_controller(
+        self, stable_identifier: object
+    ) -> LastAppliedRecord | None:
+        """Load only when schema-v2 evidence matches the current controller."""
+
+        record = self.load()
+        if record is None or record.controller_binding is None:
+            return None
+        live = self.binding_for_controller(stable_identifier)
+        if live is None:
+            return None
+        stored = record.controller_binding
+        if compare_bindings(
+            stored_digest=stored.instance_digest,
+            stored_scope_id=stored.digest_scope_id,
+            stored_version=stored.digest_version,
+            live_digest=live.instance_digest,
+            live_scope_id=live.digest_scope_id,
+            live_version=live.digest_version,
+        ) is not DigestComparison.SAME:
+            return None
+        return record
+
 
 __all__ = [
     "FILENAME",
+    "LEGACY_SCHEMA_VERSION",
     "SCHEMA_VERSION",
+    "LastAppliedControllerBinding",
     "LastAppliedRecord",
     "LastAppliedStore",
     "record_from_dict",

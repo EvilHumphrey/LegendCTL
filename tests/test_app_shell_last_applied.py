@@ -48,13 +48,21 @@ from zd_app.ui.app_shell import AppShell
 from zd_app.ui.screens import safe_import as safe_import_screen
 
 
+_UNIT_A = r"USB\VID_413D&PID_2104\UNIT-A"
+_UNIT_B = r"USB\VID_413D&PID_2104\UNIT-B"
+
+
 def _make_shell(settings_service=None, *, last_applied_store=None) -> AppShell:
     """Sync-mode shell (mirrors the busy-guard helper + the Phase-2 store)."""
 
     settings_store = MagicMock()
     settings_store.load.return_value = AppSettings()
     device_service = MagicMock()
-    device_service.state = DeviceState()
+    device_service.state = DeviceState(
+        connection_state="connected",
+        device_class="zd_ultimate_legend",
+        stable_identifier=_UNIT_A,
+    )
     device_service.recent_events.return_value = []
     device_service.summary_source_summary.return_value = "Not verified"
     device_service.last_read_duration_ms = None
@@ -102,11 +110,11 @@ class _ExplodingStore:
     def __init__(self) -> None:
         self.save_attempts = 0
 
-    def save(self, record) -> None:
+    def save_for_controller(self, record, stable_identifier) -> None:
         self.save_attempts += 1
         raise OSError("disk full")
 
-    def load(self):
+    def load_for_controller(self, stable_identifier):
         return None
 
 
@@ -269,6 +277,35 @@ class NamedApplyRecordingTests(unittest.TestCase):
             self._apply(shell)
             self.assertIsNone(store.load())
 
+    def test_unknown_controller_identity_abstains_without_recording(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = LastAppliedStore(base_dir=tmp)
+            shell = _make_shell(
+                _RecordingService(empty_snapshot()), last_applied_store=store
+            )
+            shell.device_service.state.stable_identifier = "unknown"
+            self._apply(shell)
+            self.assertIsNone(store.load())
+
+    def test_explicit_origin_identity_binds_record_even_if_live_state_moves(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = LastAppliedStore(base_dir=tmp)
+            shell = _make_shell(
+                _RecordingService(empty_snapshot()), last_applied_store=store
+            )
+            shell.device_service.state.stable_identifier = _UNIT_B
+
+            shell._record_last_applied_safe(
+                "origin-a",
+                _APPLY_SNAPSHOT,
+                ApplyResult(total_attempted=1),
+                include_device=True,
+                controller_stable_identifier=_UNIT_A,
+            )
+
+            self.assertIsNotNone(store.load_for_controller(_UNIT_A))
+            self.assertIsNone(store.load_for_controller(_UNIT_B))
+
     def test_per_field_write_does_not_record(self) -> None:
         # Manual per-field writes are deliberately outside the record's claim.
         # (apply_polling_rate writes immediately — no slider throttle.)
@@ -344,7 +381,9 @@ class SafeImportRecordingTests(unittest.TestCase):
                 side_effect={
                     safe_import_screen.NAME_INPUT: "Imported Profile"
                 }.__getitem__,
-            ), patch("zd_app.ui.app_shell.safe_import.open_result"):
+            ), patch("zd_app.ui.app_shell.safe_import.open_result"), patch(
+                "zd_app.ui.app_shell.dpg.delete_item"
+            ):
                 _capture_widget_state(
                     lambda: shell.safe_import_apply(apply_to_controller=False)
                 )
@@ -361,7 +400,7 @@ class RetryRecordUpdateTests(unittest.TestCase):
             failed_fields=tuple(failed),
             snapshot=_APPLY_SNAPSHOT,
         )
-        store.save(seeded)
+        store.save_for_controller(seeded, _UNIT_A)
         return seeded
 
     @staticmethod
@@ -440,7 +479,7 @@ class RetryRecordUpdateTests(unittest.TestCase):
 
     def test_retry_storage_failure_never_breaks_the_retry(self) -> None:
         class _ExplodingLoadStore(_ExplodingStore):
-            def load(self):
+            def load_for_controller(self, stable_identifier):
                 raise OSError("unreadable")
 
         store = _ExplodingLoadStore()
