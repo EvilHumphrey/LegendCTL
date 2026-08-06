@@ -100,6 +100,7 @@ from zd_app.services.settings_service import (
     SetBackPaddleBindingOutcome,
     SetButtonBindingOutcome,
     SetDeadzoneOutcome,
+    SetPollingRateResult,
     SetPollingRateOutcome,
     SetSensitivityCurveOutcome,
     SetStepSizeOutcome,
@@ -1456,9 +1457,21 @@ class TestLightingPayload(unittest.TestCase):
 
 
 class TestMi02PathSelection(unittest.TestCase):
-    def test_choose_mi02_path_prefers_hid_prefix(self) -> None:
+    # Same physical controller as _FAKE_PATH -- identical device-instance
+    # component (``7&fake``) -- but without the ``\\?\hid#`` prefix.
+    _SAME_UNIT_NON_HID = (
+        r"\\?\foo#vid_413d&pid_2104&mi_02#7&fake"
+        r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+    )
+    # A genuinely different physical unit: different instance component.
+    _SECOND_UNIT = (
+        r"\\?\hid#vid_413d&pid_2104&mi_02#7&second"
+        r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+    )
+
+    def test_choose_mi02_path_prefers_hid_prefix_within_one_instance(self) -> None:
         self.assertEqual(
-            _choose_mi02_path([r"\\?\foo#x", _FAKE_PATH]),
+            _choose_mi02_path([self._SAME_UNIT_NON_HID, _FAKE_PATH]),
             _FAKE_PATH,
         )
 
@@ -1467,6 +1480,377 @@ class TestMi02PathSelection(unittest.TestCase):
 
     def test_choose_mi02_path_returns_none_for_empty(self) -> None:
         self.assertIsNone(_choose_mi02_path([]))
+
+    def test_choose_mi02_path_keeps_one_unit_with_several_collections(self) -> None:
+        """Collection paths sharing one device-instance key are one unit."""
+
+        col01 = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02&col01#7&fake"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        col02 = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02&col02#7&fake"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        self.assertEqual(_choose_mi02_path([col01, col02]), col01)
+
+    def test_choose_mi02_path_deduplicates_identical_paths(self) -> None:
+        self.assertEqual(_choose_mi02_path([_FAKE_PATH, _FAKE_PATH]), _FAKE_PATH)
+
+    def test_choose_mi02_path_abstains_across_two_physical_units(self) -> None:
+        """Fail closed when two distinct controllers are attached.
+
+        Nothing correlates the handle a write burst uses with the unit the UI
+        is displaying, reading, or verifying against, and the handle is then
+        cached for the session -- so guessing is a silent wrong-unit write.
+        ``None`` becomes a distinct ``AMBIGUOUS_DEVICE`` write outcome and no
+        write is attempted. This is the abstention-only first
+        safety milestone from the multi-controller identity design; the
+        read-only ``model_fingerprint._choose_mi02_path`` already abstained
+        for the same reason.
+        """
+
+        self.assertIsNone(_choose_mi02_path([_FAKE_PATH, self._SECOND_UNIT]))
+        # Order must not matter.
+        self.assertIsNone(_choose_mi02_path([self._SECOND_UNIT, _FAKE_PATH]))
+
+    def test_ambiguous_paths_open_neither_write_nor_read_handle(self) -> None:
+        rec = _Recorder(paths=[_FAKE_PATH, self._SECOND_UNIT])
+        service = _make_service(rec)
+
+        write_result = service.set_polling_rate(PollingRate.HZ_8000)
+        read_result = service.get_polling_rate()
+
+        self.assertEqual(write_result.outcome, SetPollingRateOutcome.AMBIGUOUS_DEVICE)
+        self.assertIsNone(read_result)
+        self.assertEqual(
+            [event for event in rec.events if event[0].startswith("open_")],
+            [],
+        )
+        self.assertEqual(
+            [event for event in rec.events if event[0] in {"write_file", "read_file"}],
+            [],
+        )
+
+
+class _UnitSwapRecorder(_Recorder):
+    """Recorder whose enumeration swaps to a DIFFERENT physical unit.
+
+    Models the real hazard: controller A is mid-write, A disconnects, and
+    controller B is now the only device matching the MI_02 filter. The write
+    path invalidates A's cached handle on a disconnect Win32 code and then
+    re-enumerates, so without an identity check the retry lands on B.
+    """
+
+    def __init__(self, second_unit: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._second_unit = second_unit
+        self.swapped = False
+
+    def write_file(self, handle: int, payload: bytes) -> tuple[bool, int, int]:
+        result = super().write_file(handle, payload)
+        if not result[0] and not self.swapped:
+            # A is gone; only B answers the next enumeration.
+            self.paths = [self._second_unit]
+            self.swapped = True
+        return result
+
+
+class _ReadDisconnectSwapRecorder(_Recorder):
+    """Expose replacement B exactly when A's verify read disconnects."""
+
+    def __init__(self, second_unit: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._second_unit = second_unit
+        self.swapped = False
+
+    def read_file(self, handle: int, length: int, timeout_ms: int) -> bytes:
+        try:
+            return super().read_file(handle, length, timeout_ms)
+        except BaseException:
+            self.paths = [self._second_unit]
+            self.swapped = True
+            raise
+
+
+class TestWriteRetryIdentityPinning(unittest.TestCase):
+    """A disconnect mid-write must not silently move the write to another unit.
+
+    Wrong-device HID writes are this codebase's highest-stakes failure class:
+    the bytes land on hardware the user never authorised. The retry path
+    re-enumerates through ``_choose_mi02_path``, so a second attached Legend
+    can inherit an in-flight transaction. The slider trailing-write path
+    already enforces this identity boundary; the apply/retry path did not.
+    """
+
+    _SECOND_UNIT = (
+        r"\\?\hid#vid_413d&pid_2104&mi_02#7&second"
+        r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+    )
+
+    def test_read_target_refuses_first_write_handle_on_replacement(self) -> None:
+        rec = _Recorder(
+            paths=[_FAKE_PATH],
+            read_results=[_make_read_response(value=PollingRate.HZ_4000.value)],
+        )
+        service = _make_service(rec)
+
+        self.assertEqual(service.get_polling_rate(), PollingRate.HZ_4000)
+        writes_after_read = len([event for event in rec.events if event[0] == "write_file"])
+        rec.paths = [self._SECOND_UNIT]
+
+        result = service.set_polling_rate(PollingRate.HZ_8000)
+
+        self.assertEqual(result.outcome, SetPollingRateOutcome.DEVICE_NOT_FOUND)
+        self.assertNotIn(("open_write_handle", self._SECOND_UNIT), rec.events)
+        self.assertEqual(
+            len([event for event in rec.events if event[0] == "write_file"]),
+            writes_after_read,
+        )
+
+    def test_read_target_allows_first_write_handle_on_same_path(self) -> None:
+        rec = _Recorder(
+            paths=[_FAKE_PATH],
+            read_results=[_make_read_response(value=PollingRate.HZ_4000.value)],
+        )
+        service = _make_service(rec)
+
+        self.assertEqual(service.get_polling_rate(), PollingRate.HZ_4000)
+        result = service.set_polling_rate(PollingRate.HZ_8000)
+
+        self.assertEqual(result.outcome, SetPollingRateOutcome.OK)
+        self.assertIn(("open_write_handle", _FAKE_PATH), rec.events)
+
+    def test_write_target_pins_first_read_handle_to_same_path(self) -> None:
+        rec = _Recorder(paths=[_FAKE_PATH])
+        service = _make_service(rec)
+        self.assertEqual(service.start(), SetPollingRateOutcome.OK)
+        rec.paths = [self._SECOND_UNIT]
+        rec.open_read_write_result = (None, 1167)
+
+        self.assertIsNone(service.get_polling_rate())
+
+        self.assertIn(("open_read_write_handle", _FAKE_PATH), rec.events)
+        self.assertNotIn(("open_read_write_handle", self._SECOND_UNIT), rec.events)
+
+    def test_stop_wins_while_cached_target_enumeration_is_in_flight(self) -> None:
+        enumerate_entered = threading.Event()
+        allow_enumeration = threading.Event()
+        rec = _Recorder(paths=[_FAKE_PATH])
+        service = _make_service(rec)
+        self.assertEqual(service.get_polling_rate(), PollingRate.HZ_8000)
+
+        def enumerate_replacement() -> list[str]:
+            enumerate_entered.set()
+            if not allow_enumeration.wait(timeout=1.0):
+                raise AssertionError("test failed to release blocked enumeration")
+            return [self._SECOND_UNIT]
+
+        service._enumerate_paths = enumerate_replacement
+        results: list[SetPollingRateResult] = []
+        opener = threading.Thread(
+            target=lambda: results.append(
+                service.set_polling_rate(PollingRate.HZ_8000)
+            ),
+            name="test-cached-target-write-open",
+        )
+
+        opener.start()
+        self.addCleanup(opener.join, 1.0)
+        self.addCleanup(allow_enumeration.set)
+        self.assertTrue(enumerate_entered.wait(timeout=1.0))
+        service.stop()
+        allow_enumeration.set()
+        opener.join(timeout=1.0)
+
+        self.assertFalse(opener.is_alive())
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].outcome, SetPollingRateOutcome.DEVICE_NOT_FOUND)
+        # stop() advanced the generation, so the stale opener did not re-latch.
+        rec.paths = [_FAKE_PATH]
+        self.assertEqual(service.start(), SetPollingRateOutcome.OK)
+
+    def test_disconnect_failure_never_opens_or_writes_replacement_controller(self) -> None:
+        rec = _UnitSwapRecorder(
+            self._SECOND_UNIT,
+            paths=[_FAKE_PATH],
+            # ERROR_DEVICE_NOT_CONNECTED: a disconnect code, so the cached
+            # handle is invalidated and the retry must re-open.
+            write_results=[(False, 1167, 0)],
+        )
+        service = _make_service(rec)
+        self.assertEqual(service.start(), SetPollingRateOutcome.OK)
+        self.assertEqual(service.target_path, _FAKE_PATH)
+
+        result = service.set_polling_rate(PollingRate.HZ_8000)
+
+        # The hazard was actually reached: enumeration did swap to unit B.
+        self.assertTrue(rec.swapped, "test did not exercise the swap")
+
+        writes = [e for e in rec.events if e[0] == "write_file"]
+        self.assertEqual(
+            len(writes),
+            1,
+            "the payload was written more than once -- the retry proceeded "
+            f"after the controller changed. events={rec.events}",
+        )
+
+        self.assertEqual(result.outcome, SetPollingRateOutcome.WRITE_FAILED)
+        self.assertEqual(result.error_code, 1167)
+        self.assertNotIn(("open_write_handle", self._SECOND_UNIT), rec.events)
+        self.assertEqual(
+            [event for event in rec.events if event[0] == "sleep"],
+            [],
+            f"disconnect failure entered the retry path. events={rec.events}",
+        )
+
+    def test_later_burst_fields_never_reach_the_replacement(self) -> None:
+        """The boundary is the BURST, not just the retried payload.
+
+        ``_ensure_handle`` installs the replacement controller before the
+        mismatch is noticed, so refusing only the retried payload leaves it
+        cached -- and even closing it is not enough, because the next field
+        would simply re-enumerate the same replacement. An Apply / Restore /
+        Safe Import writes many fields, so without a burst-level boundary the
+        wrong-device write just happens one field later.
+        """
+
+        rec = _UnitSwapRecorder(
+            self._SECOND_UNIT,
+            paths=[_FAKE_PATH],
+            # Only the FIRST write fails; every later write would succeed, so
+            # any leak shows up as an extra write_file rather than an error.
+            write_results=[(False, 1167, 0)],
+        )
+        service = _make_service(rec)
+        self.assertEqual(service.start(), SetPollingRateOutcome.OK)
+
+        service.set_polling_rate(PollingRate.HZ_8000)
+        self.assertTrue(rec.swapped, "test did not exercise the swap")
+        writes_after_first_field = len(
+            [e for e in rec.events if e[0] == "write_file"]
+        )
+
+        # Two more fields of the same burst.
+        service.set_polling_rate(PollingRate.HZ_2000)
+        service.set_polling_rate(PollingRate.HZ_1000)
+
+        writes = [e for e in rec.events if e[0] == "write_file"]
+        self.assertEqual(
+            len(writes),
+            writes_after_first_field,
+            "a later field in the burst wrote after the controller changed. "
+            f"events={rec.events}",
+        )
+
+    def test_read_write_handle_is_also_refused_after_an_identity_change(self) -> None:
+        """The read+write handle must honour the latch too.
+
+        ``_ensure_read_write_handle`` enumerates independently of
+        ``_ensure_handle``, and its open is ``GENERIC_READ|GENERIC_WRITE``. If it
+        ignored the latch, a read-back sweep would run against a DIFFERENT
+        controller and report the write as verified off the wrong unit -- a
+        false trust result, which is worse here than an honest failure.
+        """
+
+        rec = _UnitSwapRecorder(
+            self._SECOND_UNIT,
+            paths=[_FAKE_PATH],
+            write_results=[(False, 1167, 0)],
+        )
+        service = _make_service(rec)
+        self.assertEqual(service.start(), SetPollingRateOutcome.OK)
+        service.set_polling_rate(PollingRate.HZ_8000)
+        self.assertTrue(rec.swapped, "test did not exercise the swap")
+
+        self.assertIsNone(
+            service._ensure_read_write_handle(),
+            "a read+write handle was opened after the controller changed",
+        )
+        opened_rw_on_second = [
+            e
+            for e in rec.events
+            if e[0] == "open_read_write_handle" and e[1] == self._SECOND_UNIT
+        ]
+        self.assertEqual(
+            opened_rw_on_second,
+            [],
+            f"a read+write handle was opened on the replacement. events={rec.events}",
+        )
+
+    def test_disconnect_failure_does_not_retry_even_if_same_path_reappears(self) -> None:
+        """A disconnect destroys identity continuity even when the path text recurs."""
+
+        rec = _Recorder(
+            paths=[_FAKE_PATH],
+            write_results=[(False, 1167, 0), (True, 0, HID_FEATURE_REPORT_SIZE)],
+        )
+        service = _make_service(rec)
+        self.assertEqual(service.start(), SetPollingRateOutcome.OK)
+
+        result = service.set_polling_rate(PollingRate.HZ_8000)
+
+        writes = [e for e in rec.events if e[0] == "write_file"]
+        self.assertEqual(
+            len(writes),
+            1,
+            f"a disconnect-class write was retried. events={rec.events}",
+        )
+        self.assertEqual(result.outcome, SetPollingRateOutcome.WRITE_FAILED)
+        self.assertEqual(result.error_code, 1167)
+
+    def test_step_size_verify_disconnect_returns_unverified_without_opening_b(self) -> None:
+        rec = _ReadDisconnectSwapRecorder(
+            self._SECOND_UNIT,
+            paths=[_FAKE_PATH],
+            read_results=[
+                SettingsServiceError(
+                    "ReadFile failed (Win32 err 1167)",
+                    win32_error=1167,
+                )
+            ],
+        )
+        service = _make_service(rec)
+
+        result = service.set_step_size_verified(73, attempts=3, settle_s=0.0)
+
+        self.assertTrue(rec.swapped, "test did not reach the disconnecting verify read")
+        self.assertEqual(result.outcome, SetStepSizeOutcome.OK)
+        self.assertTrue(result.verify_inconclusive)
+        self.assertNotIn(("open_write_handle", self._SECOND_UNIT), rec.events)
+        self.assertNotIn(("open_read_write_handle", self._SECOND_UNIT), rec.events)
+
+    def test_lighting_verify_disconnect_returns_unverified_without_opening_b(self) -> None:
+        rec = _ReadDisconnectSwapRecorder(
+            self._SECOND_UNIT,
+            paths=[_FAKE_PATH],
+            read_results=[
+                SettingsServiceError(
+                    "ReadFile failed (Win32 err 1167)",
+                    win32_error=1167,
+                )
+            ],
+        )
+        service = _make_service(rec)
+        settings = LightingSettings(
+            light_on=True,
+            mode=LightingMode.ALWAYS_ON,
+            brightness_byte=50,
+            color=RgbColor(10, 20, 30),
+        )
+
+        result = service.set_zone_lighting_verified(
+            LightingZone.HOME,
+            settings,
+            attempts=3,
+            settle_s=0.0,
+        )
+
+        self.assertTrue(rec.swapped, "test did not reach the disconnecting verify read")
+        self.assertEqual(result.outcome, SetLightingOutcome.OK)
+        self.assertTrue(result.verify_inconclusive)
+        self.assertNotIn(("open_write_handle", self._SECOND_UNIT), rec.events)
+        self.assertNotIn(("open_read_write_handle", self._SECOND_UNIT), rec.events)
 
 
 class TestSettingsServiceLifecycle(unittest.TestCase):
@@ -1733,7 +2117,7 @@ class TestGetPollingRate(unittest.TestCase):
         self.assertIsNone(service.target_path)
         self.assertIn(("close_handle", _READ_WRITE_HANDLE), rec.events)
 
-    def test_read_after_handle_invalidation_reopens(self) -> None:
+    def test_read_after_disconnect_requires_stop_before_reopen(self) -> None:
         rec = _Recorder(
             write_results=[(False, 1167, 0)],
             read_results=[_make_read_response(value=PollingRate.HZ_4000.value)],
@@ -1748,6 +2132,8 @@ class TestGetPollingRate(unittest.TestCase):
         service = _make_service(rec)
 
         self.assertIsNone(service.get_polling_rate())
+        self.assertIsNone(service.get_polling_rate())
+        service.stop()
         self.assertEqual(service.get_polling_rate(), PollingRate.HZ_4000)
 
         self.assertIn(("close_handle", _READ_WRITE_HANDLE), rec.events)
@@ -3673,6 +4059,14 @@ class _SnapshotProbe(SettingsService):
         self.supports_8point_result: bool = False
         self.sensitivity_8point_results: dict[int, tuple | None] = {}
 
+    def admit_read_batch(self):
+        # This test double replaces every device-touching getter, so give the
+        # aggregate continuity guard a stable synthetic session as well.
+        return object()
+
+    def session_admission_is_current(self, _admission) -> bool:
+        return True
+
     def get_polling_rate(self) -> PollingRate | None:
         self.calls.append(("get_polling_rate",))
         return self.polling_rate_result
@@ -4362,6 +4756,36 @@ class TestBackPaddleBinding(unittest.TestCase):
             if event[0] == "write_file" and event[2] == binding_payload
         ]
         self.assertEqual(len(binding_writes), 2)
+
+    def test_back_paddle_disconnect_does_not_retry_pair_on_replacement(self) -> None:
+        second_unit = TestWriteRetryIdentityPinning._SECOND_UNIT
+        rec = _UnitSwapRecorder(
+            second_unit,
+            paths=[_FAKE_PATH],
+            write_results=[
+                (True, 0, HID_FEATURE_REPORT_SIZE),
+                (False, 1167, 0),
+            ],
+        )
+        service = _make_service(rec)
+
+        result = service.set_back_paddle_binding(
+            MacroSlot.M1,
+            ControllerButtonTarget.A,
+        )
+
+        self.assertTrue(rec.swapped, "test did not expose replacement B")
+        self.assertEqual(result.outcome, SetBackPaddleBindingOutcome.WRITE_FAILED)
+        self.assertEqual(result.error_code, 1167)
+        self.assertEqual(
+            len([event for event in rec.events if event[0] == "write_file"]),
+            2,
+        )
+        self.assertNotIn(("open_write_handle", second_unit), rec.events)
+        self.assertEqual(
+            [event for event in rec.events if event[0] == "sleep"],
+            [],
+        )
 
     def test_get_back_paddle_binding_returns_none_when_read_unsupported(self) -> None:
         service = _make_service(_Recorder())
@@ -5468,6 +5892,12 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
             self.assertIn(("get_last_error", 1168), kernel.events)
             self.assertEqual(closed, [self._FIRST_HANDLE])
 
+            # The unreaped reader latches this session, so refresh cannot open
+            # and strand a growing sequence of replacement handles.
+            with self.assertRaises(SettingsServiceError):
+                self._read_once(service)
+            self.assertEqual(opened, [self._FIRST_HANDLE])
+            service.stop()
             response = self._read_once(service)
 
         self.assertEqual(response[7], PollingRate.HZ_8000.value)
@@ -5500,6 +5930,10 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
             self.assertIn(("get_last_error", 0), kernel.events)
             self.assertEqual(closed, [self._FIRST_HANDLE])
 
+            with self.assertRaises(SettingsServiceError):
+                self._read_once(service)
+            self.assertEqual(opened, [self._FIRST_HANDLE])
+            service.stop()
             response = self._read_once(service)
 
         self.assertEqual(response[7], PollingRate.HZ_4000.value)
@@ -5534,7 +5968,7 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
         self.assertEqual(closed, [])
         self.assertEqual(kernel.read_handles, [self._FIRST_HANDLE, self._FIRST_HANDLE])
 
-    def test_two_sequential_stranded_timeouts_isolate_late_old_completion(self) -> None:
+    def test_stranded_timeout_latches_and_cannot_accumulate_readers(self) -> None:
         from zd_app.services import settings_service as ss
 
         old_response = _make_read_response(value=PollingRate.HZ_2000.value)
@@ -5543,32 +5977,28 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
             ss,
             plans={
                 self._FIRST_HANDLE: [("block", old_response)],
-                self._SECOND_HANDLE: [("block", None)],
-                self._THIRD_HANDLE: [("response", fresh_response)],
+                self._SECOND_HANDLE: [("response", fresh_response)],
             },
-            cancel_results={self._FIRST_HANDLE: False, self._SECOND_HANDLE: False},
-            cancel_errors={self._FIRST_HANDLE: 1168, self._SECOND_HANDLE: 1168},
+            cancel_results={self._FIRST_HANDLE: False},
+            cancel_errors={self._FIRST_HANDLE: 1168},
         )
         self.addCleanup(kernel.release_all)
         service, opened, closed = self._make_service(
             kernel,
-            [self._FIRST_HANDLE, self._SECOND_HANDLE, self._THIRD_HANDLE],
+            [self._FIRST_HANDLE, self._SECOND_HANDLE],
         )
 
         with mock.patch.object(ss._Win32, "kernel32", return_value=kernel):
             with self.assertRaises(ss.StrandedReadTimeout):
                 self._read_once(service)
-            with self.assertRaises(ss.StrandedReadTimeout):
+            with self.assertRaises(SettingsServiceError):
                 self._read_once(service)
 
-            self.assertEqual(opened, [self._FIRST_HANDLE, self._SECOND_HANDLE])
-            self.assertEqual(closed, [self._FIRST_HANDLE, self._SECOND_HANDLE])
+            self.assertEqual(opened, [self._FIRST_HANDLE])
+            self.assertEqual(closed, [self._FIRST_HANDLE])
             self.assertEqual(kernel.max_live_reads[self._FIRST_HANDLE], 1)
-            self.assertEqual(kernel.max_live_reads[self._SECOND_HANDLE], 1)
 
-            # Deliver a valid response to the old, poisoned worker before the
-            # next read. Its closure-local result must stay discarded; only the
-            # fresh handle's response may satisfy the new request.
+            service.stop()
             kernel.released[self._FIRST_HANDLE].set()
             self.assertTrue(kernel.returned[self._FIRST_HANDLE].wait(timeout=1.0))
             response = self._read_once(service)
@@ -5576,7 +6006,7 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
         self.assertEqual(response, fresh_response)
         self.assertEqual(
             kernel.read_handles,
-            [self._FIRST_HANDLE, self._SECOND_HANDLE, self._THIRD_HANDLE],
+            [self._FIRST_HANDLE, self._SECOND_HANDLE],
         )
 
     def test_stop_cancels_joins_then_closes_an_unreaped_current_reader(self) -> None:
@@ -5620,6 +6050,55 @@ class TestSettingsServiceHidReadCancellation(unittest.TestCase):
 
         self.assertFalse(caller.is_alive())
         self.assertEqual(len(failures), 1)
+
+    def test_stop_in_registration_gap_prevents_read_and_retires_lease(self) -> None:
+        from zd_app.services import settings_service as ss
+
+        kernel = _StrictReadKernel32(
+            ss,
+            plans={
+                self._FIRST_HANDLE: [
+                    ("response", _make_read_response(value=PollingRate.HZ_8000.value))
+                ]
+            },
+            cancel_results={},
+            cancel_errors={},
+        )
+        service, opened, closed = self._make_service(kernel, [self._FIRST_HANDLE])
+        registration_entered = threading.Event()
+        release_registration = threading.Event()
+        original_register = service._register_active_reader
+
+        def blocked_register(reader, handle, generation):
+            registration_entered.set()
+            if not release_registration.wait(timeout=1.0):
+                raise AssertionError("test failed to release reader registration")
+            return original_register(reader, handle, generation)
+
+        service._register_active_reader = blocked_register  # type: ignore[method-assign]
+        failures: list[BaseException] = []
+
+        def read_on_worker() -> None:
+            try:
+                self._read_once(service)
+            except BaseException as exc:
+                failures.append(exc)
+
+        caller = threading.Thread(target=read_on_worker)
+        with mock.patch.object(ss._Win32, "kernel32", return_value=kernel):
+            caller.start()
+            self.addCleanup(caller.join, 1.0)
+            self.addCleanup(release_registration.set)
+            self.assertTrue(registration_entered.wait(timeout=1.0))
+            service.stop()
+            release_registration.set()
+            caller.join(timeout=1.0)
+
+        self.assertFalse(caller.is_alive())
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(opened, [self._FIRST_HANDLE])
+        self.assertEqual(kernel.read_handles, [])
+        self.assertEqual(closed, [self._FIRST_HANDLE])
 
     def test_concurrent_stop_and_read_handle_open_discards_open_candidate(self) -> None:
         open_entered = threading.Event()

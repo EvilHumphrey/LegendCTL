@@ -894,7 +894,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         self.assertEqual(len(result.failed), 1)
         self.assertEqual(result.failed[0].setting_label, "vibration")
         self.assertTrue(result.failed[0].is_transient)
-        self.assertIn("HID write failed after retry", result.failed[0].error)
+        self.assertIn("HID write failed", result.failed[0].error)
 
     def test_apply_snapshot_modal_shown_on_failure(self) -> None:
         settings_service = MagicMock()
@@ -2311,7 +2311,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
 
         self.assertEqual(
             rendered["settings_v2_status_text"],
-            "Apply failed: vibration settings: HID write failed after retry (error 995)",
+            "Apply failed: vibration settings: HID write failed (error 995)",
         )
         self.assertIsNotNone(shell._apply_status_clear_after)
 

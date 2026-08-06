@@ -22,6 +22,7 @@ from zd_app.services.settings_service import (
     LightingZone,
     SensitivityAnchorTuple8,
     SettingsService,
+    empty_controller_snapshot,
 )
 from zd_app.storage.restore_point_models import RestoreFieldOutcome, RestoreResultLabel
 
@@ -53,6 +54,7 @@ WRITE_ONLY_FIELDS: frozenset[str] = frozenset({"back_paddle_bindings"})
 # Marker for a getter skipped because the batch budget ran out.  Consumers use
 # the ``skipped:`` prefix to distinguish unreadable from legitimately absent.
 BATCH_BUDGET_SKIP_ERROR = "skipped: batch read budget exhausted"
+CONTROLLER_IDENTITY_CHANGED_ERROR = "controller identity changed during read batch"
 
 
 @dataclass(frozen=True)
@@ -153,6 +155,42 @@ def fresh_read(
     read_errors: dict[str, str] = {}
     active_log = log or logger
 
+    admit_batch = getattr(type(service), "admit_read_batch", None)
+    admission_is_current = getattr(type(service), "session_admission_is_current", None)
+    guard_identity = callable(admit_batch) and callable(admission_is_current)
+    batch_admission = admit_batch(service) if guard_identity else None
+    identity_lost = guard_identity and batch_admission is None
+
+    def _identity_failure_result():
+        field_names = (
+            "polling_rate",
+            "step_size",
+            "vibration",
+            "deadzones",
+            "axis_inversion_left",
+            "axis_inversion_right",
+            "sensitivity_left",
+            "sensitivity_right",
+            "sensitivity_left_8point",
+            "sensitivity_right_8point",
+            "trigger_left",
+            "trigger_right",
+            "motion_settings",
+            "button_bindings",
+            "back_paddle_bindings",
+            "lighting_zones",
+        )
+        errors = {name: CONTROLLER_IDENTITY_CHANGED_ERROR for name in field_names}
+        success: dict[str, object] = {
+            name: (set() if name in COLLECTION_FIELD_NAMES else False)
+            for name in field_names
+            if name not in {"sensitivity_left_8point", "sensitivity_right_8point"}
+        }
+        return empty_controller_snapshot(), success, errors
+
+    if identity_lost:
+        return _identity_failure_result()
+
     deadline = (clock() + batch_read_budget_s) if batch_read_budget_s > 0 else None
     issued = 0
     skipped = 0
@@ -161,7 +199,14 @@ def fresh_read(
     def _within_budget() -> bool:
         # One guard per getter call. Once the deadline passes, stay exhausted
         # so the whole remaining tail is skipped uniformly.
-        nonlocal issued, skipped, exhausted
+        nonlocal issued, skipped, exhausted, identity_lost
+        if (
+            guard_identity
+            and not identity_lost
+            and not admission_is_current(service, batch_admission)
+        ):
+            identity_lost = True
+            exhausted = True
         if not exhausted and deadline is not None and clock() >= deadline:
             exhausted = True
         if exhausted:
@@ -285,6 +330,19 @@ def fresh_read(
     else:
         back_paddles = {}
         _mark_skipped("back_paddle_bindings")
+
+    if (
+        guard_identity
+        and (
+            identity_lost
+            or not admission_is_current(service, batch_admission)
+        )
+    ):
+        active_log.warning(
+            "%s fresh read: controller identity changed; discarding all values",
+            log_prefix,
+        )
+        return _identity_failure_result()
 
     if skipped:
         active_log.warning(

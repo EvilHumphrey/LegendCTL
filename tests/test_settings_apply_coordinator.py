@@ -7,6 +7,7 @@ seam: aggregation, retry-bookkeeping, callback ordering, and DPG-freedom.
 from __future__ import annotations
 
 import sys
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -132,6 +133,183 @@ class CoordinatorAggregationTests(unittest.TestCase):
         self.assertEqual(len(result.failed), 1)
         self.assertFalse(result.failed[0].is_transient)
 
+    def test_disconnect_aborts_remaining_fields_without_opening_replacement(self) -> None:
+        path_a = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02#7&a"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        path_b = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02#7&b"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        handle_a = 0xA001
+        handle_b = 0xB001
+        paths = [path_a]
+        events: list[tuple] = []
+
+        def enumerate_paths() -> list[str]:
+            events.append(("enumerate_paths", tuple(paths)))
+            return list(paths)
+
+        def open_write_handle(path: str) -> tuple[int | None, int]:
+            events.append(("open_write_handle", path))
+            return (handle_a if path == path_a else handle_b), 0
+
+        def write_file(handle: int, payload: bytes) -> tuple[bool, int, int]:
+            events.append(("write_file", handle, payload))
+            if handle == handle_a:
+                paths[:] = [path_b]
+                return False, 1167, 0
+            return True, 0, len(payload)
+
+        service = SettingsService(
+            enumerate_paths=enumerate_paths,
+            open_write_handle=open_write_handle,
+            write_file=write_file,
+            close_handle=lambda handle: events.append(("close_handle", handle)) or True,
+            sleep=lambda _seconds: None,
+        )
+        coordinator = SettingsApplyCoordinator(
+            service,
+            field_trailer_delay_s=0.0,
+            step_size_trailer_delay_s=0.0,
+        )
+
+        result = coordinator.apply_snapshot(
+            _empty_snapshot(
+                polling_rate=PollingRate.HZ_1000,
+                vibration=_vibration_delta(),
+            )
+        )
+
+        self.assertEqual(result.total_attempted, 1)
+        self.assertEqual(len(result.failed), 1)
+        self.assertEqual(result.failed[0].setting_label, "polling")
+        self.assertNotIn(("open_write_handle", path_b), events)
+        self.assertEqual(
+            [event[1] for event in events if event[0] == "write_file"],
+            [handle_a],
+        )
+
+    def test_capability_probe_transition_does_not_admit_replacement(self) -> None:
+        path_a = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02#7&a"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        path_b = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02#7&b"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        paths = [path_a]
+        events: list[tuple] = []
+        service = SettingsService(
+            enumerate_paths=lambda: list(paths),
+            open_write_handle=lambda path: (0xA001 if path == path_a else 0xB001, 0),
+            write_file=lambda handle, payload: events.append(
+                ("write_file", handle, payload)
+            )
+            or (True, 0, len(payload)),
+            close_handle=lambda _handle: True,
+        )
+        self.assertEqual(service.start(), SetPollingRateOutcome.OK)
+
+        def probe_a_then_replace_with_b() -> bool:
+            service.stop()
+            paths[:] = [path_b]
+            self.assertEqual(service.start(), SetPollingRateOutcome.OK)
+            return True
+
+        service.supports_8point_sensitivity = probe_a_then_replace_with_b  # type: ignore[method-assign]
+        curve_3 = (
+            SensitivityAnchor(0, 0),
+            SensitivityAnchor(50, 50),
+            SensitivityAnchor(100, 100),
+        )
+        curve_8 = tuple(SensitivityAnchor(i * 10, i * 10) for i in range(8))
+        result = SettingsApplyCoordinator(
+            service,
+            field_trailer_delay_s=0.0,
+        ).apply_snapshot(
+            _empty_snapshot(
+                sensitivity_left=curve_3,
+                sensitivity_left_8point=curve_8,
+            )
+        )
+
+        self.assertEqual(result.succeeded, 0)
+        self.assertEqual([failure.setting_label for failure in result.failed], ["sens_left"])
+        self.assertEqual(events, [])
+
+    def test_first_setter_gap_cannot_independently_admit_replacement(self) -> None:
+        path_a = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02#7&a"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        path_b = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02#7&b"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        paths = [path_a]
+        events: list[tuple] = []
+        service = SettingsService(
+            enumerate_paths=lambda: list(paths),
+            open_write_handle=lambda path: (0xA001 if path == path_a else 0xB001, 0),
+            write_file=lambda handle, payload: events.append(
+                ("write_file", handle, payload)
+            )
+            or (True, 0, len(payload)),
+            close_handle=lambda _handle: True,
+        )
+        self.assertEqual(service.start(), SetPollingRateOutcome.OK)
+        original_set = service.set_polling_rate
+
+        def transition_in_precheck_to_setter_gap(rate):
+            service.stop()
+            paths[:] = [path_b]
+            # The operation token is already bound around this callback, so
+            # even start() cannot independently admit B on this thread.
+            self.assertEqual(service.start(), SetPollingRateOutcome.DEVICE_NOT_FOUND)
+            return original_set(rate)
+
+        service.set_polling_rate = transition_in_precheck_to_setter_gap  # type: ignore[method-assign]
+        result = SettingsApplyCoordinator(service).apply_snapshot(
+            _polling_only_snapshot()
+        )
+
+        self.assertEqual(result.succeeded, 0)
+        self.assertEqual([failure.setting_label for failure in result.failed], ["polling"])
+        self.assertEqual(events, [])
+
+    def test_mid_burst_disconnect_skips_every_later_setter(self) -> None:
+        settings_service = mock.Mock()
+        settings_service.set_polling_rate.return_value = _polling_result(
+            SetPollingRateOutcome.OK
+        )
+        settings_service.set_vibration.return_value = _polling_result(
+            SetPollingRateOutcome.WRITE_FAILED,
+            error_code=1167,
+        )
+        coordinator = SettingsApplyCoordinator(
+            settings_service,
+            field_trailer_delay_s=0.0,
+            step_size_trailer_delay_s=0.0,
+        )
+        snapshot = _empty_snapshot(
+            polling_rate=PollingRate.HZ_1000,
+            vibration=_vibration_delta(),
+            deadzones=StickDeadzones(1, 2, 3, 4),
+            step_size=73,
+        )
+
+        result = coordinator.apply_snapshot(snapshot)
+
+        self.assertEqual(result.total_attempted, 2)
+        self.assertEqual([failure.setting_label for failure in result.failed], ["vibration"])
+        settings_service.set_polling_rate.assert_called_once()
+        settings_service.set_vibration.assert_called_once()
+        settings_service.set_all_deadzones.assert_not_called()
+        settings_service.set_step_size_verified.assert_not_called()
+
 
 class CoordinatorBackPaddleTests(unittest.TestCase):
     def test_legacy_snapshot_without_back_paddle_skips_those_writes(self) -> None:
@@ -233,6 +411,97 @@ class CoordinatorRetryTests(unittest.TestCase):
         retry_result = coordinator.retry_failures([])
         self.assertEqual(retry_result.total_attempted, 0)
         self.assertEqual(retry_result.failed, [])
+
+    def test_retry_burst_transition_never_invokes_later_callback_on_b(self) -> None:
+        path_a = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02#7&a"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        path_b = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02#7&b"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        paths = [path_a]
+        events: list[tuple] = []
+        service = SettingsService(
+            enumerate_paths=lambda: list(paths),
+            open_write_handle=lambda path: (0xA001 if path == path_a else 0xB001, 0),
+            write_file=lambda handle, payload: events.append(
+                ("write_file", handle, payload)
+            )
+            or (True, 0, len(payload)),
+            close_handle=lambda _handle: True,
+        )
+        self.assertEqual(service.start(), SetPollingRateOutcome.OK)
+
+        def retry_a_then_replace_with_b():
+            result = service.set_polling_rate(PollingRate.HZ_1000)
+            transition_failures: list[BaseException] = []
+
+            def replace_on_lifecycle_thread() -> None:
+                try:
+                    service.stop()
+                    paths[:] = [path_b]
+                    self.assertEqual(service.start(), SetPollingRateOutcome.OK)
+                except BaseException as exc:
+                    transition_failures.append(exc)
+
+            transition = threading.Thread(target=replace_on_lifecycle_thread)
+            transition.start()
+            transition.join(timeout=1.0)
+            self.assertFalse(transition.is_alive())
+            if transition_failures:
+                raise transition_failures[0]
+            return result
+
+        b_retry = mock.Mock(return_value=_polling_result(SetPollingRateOutcome.OK))
+        result = SettingsApplyCoordinator(service).retry_failures(
+            [
+                ApplyFailure("polling", "transient", True, retry_a_then_replace_with_b),
+                ApplyFailure("vibration", "transient", True, b_retry),
+            ]
+        )
+
+        self.assertEqual(result.succeeded, 1)
+        self.assertEqual([failure.setting_label for failure in result.failed], ["vibration"])
+        b_retry.assert_not_called()
+        self.assertEqual([event[1] for event in events], [0xA001])
+
+    def test_first_retry_gap_cannot_independently_admit_replacement(self) -> None:
+        path_a = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02#7&a"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        path_b = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02#7&b"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        paths = [path_a]
+        events: list[tuple] = []
+        service = SettingsService(
+            enumerate_paths=lambda: list(paths),
+            open_write_handle=lambda path: (0xA001 if path == path_a else 0xB001, 0),
+            write_file=lambda handle, payload: events.append(
+                ("write_file", handle, payload)
+            )
+            or (True, 0, len(payload)),
+            close_handle=lambda _handle: True,
+        )
+        self.assertEqual(service.start(), SetPollingRateOutcome.OK)
+
+        def transition_then_retry():
+            service.stop()
+            paths[:] = [path_b]
+            self.assertEqual(service.start(), SetPollingRateOutcome.DEVICE_NOT_FOUND)
+            return service.set_polling_rate(PollingRate.HZ_1000)
+
+        result = SettingsApplyCoordinator(service).retry_failures(
+            [ApplyFailure("polling", "transient", True, transition_then_retry)]
+        )
+
+        self.assertEqual(result.succeeded, 0)
+        self.assertEqual([failure.setting_label for failure in result.failed], ["polling"])
+        self.assertEqual(events, [])
 
     def test_retry_merges_originating_disclosure_context(self) -> None:
         coordinator = SettingsApplyCoordinator(mock.Mock())
