@@ -18,6 +18,7 @@ from zd_app.i18n import t
 from zd_app.services.markdown_safety import escape_markdown
 from zd_app.services.model_fingerprint import ModelFingerprint, fingerprint_display_rows
 from zd_app.services.path_scrub import scrub_paths
+from zd_app.storage._import_guards import read_guarded_json
 from zd_app.storage.settings_store import _default_user_data_dir
 
 
@@ -27,6 +28,7 @@ VIRTUAL_DEVICE_NAME_TOKENS = ("vigem", "virtualhid", "vhid", "hidguardian")
 BOUNDARY_TEXT_KEY = "trust_self_check.boundary.session"
 TRUST_MANIFEST_FILENAME = "trust_manifest.json"
 TRUST_MANIFEST_SCHEMA = 1
+MAX_TRUST_MANIFEST_BYTES = 1 * 1024 * 1024
 _PATH_ELLIPSIS = "\u2026"
 
 
@@ -406,15 +408,20 @@ def load_trust_manifest(package_root: str | Path) -> TrustManifest | None:
 
     manifest_path = Path(package_root) / TRUST_MANIFEST_FILENAME
     try:
-        raw = manifest_path.read_text(encoding="utf-8")
+        data = read_guarded_json(
+            manifest_path,
+            max_bytes=MAX_TRUST_MANIFEST_BYTES,
+        )
     except FileNotFoundError:
         return None
     except (OSError, UnicodeDecodeError) as exc:
         return _invalid_manifest(manifest_path, f"unreadable: {exc.__class__.__name__}")
-    try:
-        data = json.loads(raw)
     except json.JSONDecodeError:
         return _invalid_manifest(manifest_path, "invalid JSON")
+    except RecursionError:
+        return _invalid_manifest(manifest_path, "JSON nesting is too deep")
+    except ValueError:
+        return _invalid_manifest(manifest_path, "JSON exceeds size or nesting limits")
     return _parse_trust_manifest(manifest_path, data)
 
 

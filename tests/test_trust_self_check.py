@@ -652,6 +652,35 @@ class FrozenTrustManifestWiringTests(unittest.TestCase):
         self.assertIn("Static scan of zd_app", _row(dev_result, "network").evidence)
         self.assertIn("Static scan of zd_app", _row(frozen_live_result, "network").evidence)
 
+    def test_deep_frozen_manifest_degrades_to_invalid_diagnostics_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package_root = Path(temporary) / "zd_app"
+            package_root.mkdir()
+            depth = 1100
+            (package_root / trust_self_check.TRUST_MANIFEST_FILENAME).write_text(
+                "[" * depth + "0" + "]" * depth,
+                encoding="utf-8",
+            )
+
+            result = trust_self_check.build_trust_self_check(
+                package_root=package_root,
+                executable_path=Path(temporary) / "LegendCTL.exe",
+                frozen=True,
+                now=_NOW,
+            )
+
+        self.assertTrue(result.manifest_present)
+        self.assertFalse(result.manifest_valid)
+        self.assertIsNone(result.payload_verification)
+        self.assertEqual(
+            _row(result, "network").claim,
+            "Network scan did not run: no networking claim is made for this run.",
+        )
+        self.assertIn(
+            "the build record is unreadable or invalid",
+            _row(result, "network").evidence,
+        )
+
 
 class TrustSelfCheckI18nTests(unittest.TestCase):
     def test_en_zh_cn_have_matching_trust_self_check_keys(self) -> None:
