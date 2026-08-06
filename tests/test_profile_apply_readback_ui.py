@@ -25,14 +25,16 @@ def _outcome(
     field_name: str,
     *,
     verify_matched: bool | None,
+    write_succeeded: bool = True,
+    write_error: str | None = None,
     expected_value: str | None = None,
     observed_value: str | None = None,
     verify_note: str | None = None,
 ) -> RestoreFieldOutcome:
     return RestoreFieldOutcome(
         field_name=field_name,
-        write_succeeded=True,
-        write_error=None,
+        write_succeeded=write_succeeded,
+        write_error=write_error,
         verify_matched=verify_matched,
         verify_note=verify_note,
         expected_value=expected_value,
@@ -456,6 +458,59 @@ class ProfileApplyReadbackUiTests(unittest.TestCase):
         self.assertIn("Back paddle bindings: write=ok verify=unverified", rendered)
         self.assertIn("expected: 131, observed: 146", rendered)
         self.assertIn("(write-only)", rendered)
+
+    def test_detail_renderer_rerenders_shared_state_in_zh_and_ko(self) -> None:
+        verification = _verification(
+            _outcome("step_size", verify_matched=True),
+            _outcome(
+                "vibration",
+                verify_matched=False,
+                expected_value="RAW_EXPECTED",
+                observed_value="RAW_OBSERVED",
+            ),
+            _outcome(
+                "back_paddle_bindings",
+                verify_matched=None,
+                verify_note="verify-read failed: OS_ERROR_121",
+            ),
+            _outcome(
+                "deadzones",
+                verify_matched=None,
+                write_succeeded=False,
+                write_error="RAW_WRITE_ERROR",
+            ),
+        )
+        shell = SimpleNamespace(COLORS={"text": (1, 1, 1), "muted": (2, 2, 2)})
+        expected_by_locale = {
+            "zh-CN": (
+                "摇杆步进：写入=成功 验证=匹配",
+                "振动：写入=成功 验证=不匹配",
+                "预期：RAW_EXPECTED，实际：RAW_OBSERVED",
+                "后置侧键绑定：写入=成功 验证=未验证",
+                "验证回读失败：OS_ERROR_121",
+                "死区：写入=失败 验证=未验证",
+            ),
+            "ko": (
+                "스텝 크기: 쓰기=성공 검증=일치",
+                "진동: 쓰기=성공 검증=불일치",
+                "예상: RAW_EXPECTED, 관찰값: RAW_OBSERVED",
+                "후면 패들 바인딩: 쓰기=성공 검증=검증되지 않음",
+                "검증 읽기 실패: OS_ERROR_121",
+                "데드존: 쓰기=실패 검증=검증되지 않음",
+            ),
+        }
+
+        for locale, expected_fragments in expected_by_locale.items():
+            with self.subTest(locale=locale):
+                i18n.set_locale(locale)
+                with _DpgTextRecorder() as recorder:
+                    AppShell._render_profile_apply_readback_details(shell, verification)
+                rendered = "\n".join(recorder.texts)
+                for fragment in expected_fragments:
+                    self.assertIn(fragment, rendered)
+                self.assertIn("RAW_WRITE_ERROR", rendered)
+                self.assertNotIn("write=ok", rendered)
+                self.assertNotIn("verify=matched", rendered)
 
     def test_status_action_tracks_sweep_and_opens_through_the_modal_swap(self) -> None:
         shell = make_shell()

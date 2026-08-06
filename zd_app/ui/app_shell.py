@@ -65,7 +65,6 @@ from zd_app.services.settings_apply_coordinator import (
     snapshot_as_sent,
 )
 from zd_app.services.write_verification import (
-    SENSITIVITY_8POINT_RIDERS,
     all_unverified_outcomes,
     attempted_fields_as_sent,
     attempted_fields_from_snapshot,
@@ -121,6 +120,10 @@ from zd_app.ui import (
 from zd_app.ui.choice_labels import to_canonical, to_display
 from zd_app.ui.fonts import bind_default_font, register_fonts
 from zd_app.ui.typography import screen_title
+from zd_app.ui.verification_details import (
+    format_verification_outcome,
+    verification_field_label,
+)
 from zd_app.ui.localized_dpg import install_dearpygui_i18n
 from zd_app.ui.widgets import trust_ritual as trust_ritual_widget
 from zd_app.ui.safe_import_model import (
@@ -786,16 +789,10 @@ def _translate_or_raw(key: str, raw: str) -> str:
     return raw if translated == f"[{key}]" else translated
 
 
-_PROFILE_APPLY_READBACK_8POINT_HOSTS = dict(SENSITIVITY_8POINT_RIDERS)
-
-
 def _profile_apply_readback_field_label(field_name: str) -> str:
     """Return the readable label for a profile-Apply read-back field."""
 
-    host_name = _PROFILE_APPLY_READBACK_8POINT_HOSTS.get(field_name)
-    if host_name is not None:
-        return f"{_translate_or_raw(f'field.label.{host_name}', host_name)} (8-point)"
-    return _translate_or_raw(f"field.label.{field_name}", field_name)
+    return verification_field_label(field_name)
 
 
 def _format_apply_failure_row(failure: "ApplyFailure") -> str:
@@ -4522,30 +4519,11 @@ class AppShell:
                 color=self.COLORS["text"],
             )
             for outcome in verification.fields:
-                write_marker = "ok" if outcome.write_succeeded else "FAIL"
-                if outcome.verify_matched is True:
-                    verify_marker = "matched"
-                elif outcome.verify_matched is False:
-                    verify_marker = "mismatch"
-                else:
-                    verify_marker = "unverified"
-                row = (
-                    f"  {_profile_apply_readback_field_label(outcome.field_name)}: "
-                    f"write={write_marker} verify={verify_marker}"
-                )
-                if outcome.write_error:
-                    row += f"  ({outcome.write_error})"
-                if outcome.verify_matched is None and outcome.verify_note:
-                    row += f"  ({outcome.verify_note})"
+                row, expected_observed = format_verification_outcome(outcome)
                 dpg.add_text(row, color=self.COLORS["muted"])
-                if (
-                    outcome.verify_matched is False
-                    and outcome.expected_value is not None
-                    and outcome.observed_value is not None
-                ):
+                if expected_observed is not None:
                     dpg.add_text(
-                        f"      expected: {outcome.expected_value}, "
-                        f"observed: {outcome.observed_value}",
+                        expected_observed,
                         color=self.COLORS["muted"],
                     )
 

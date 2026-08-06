@@ -63,6 +63,7 @@ from zd_app.ui.components import (
 )
 from zd_app.ui.themes import SPACE_LG, SPACE_MD
 from zd_app.ui.typography import helper_text, screen_title, section_title
+from zd_app.ui.verification_details import format_verification_outcome
 
 
 logger = logging.getLogger(__name__)
@@ -889,27 +890,11 @@ def _build_result(shell, service, state: RestorePointsScreenState) -> None:
                 color=shell.COLORS["text"],
             )
             for outcome in result.fields:
-                write_marker = "ok" if outcome.write_succeeded else "FAIL"
-                if outcome.verify_matched is True:
-                    verify_marker = "matched"
-                elif outcome.verify_matched is False:
-                    verify_marker = "mismatch"
-                else:
-                    verify_marker = "unverified"
-                row = f"  {outcome.field_name}: write={write_marker} verify={verify_marker}"
-                if outcome.write_error:
-                    row += f"  ({outcome.write_error})"
-                if outcome.verify_matched is None and outcome.verify_note:
-                    row += f"  ({outcome.verify_note})"
+                row, expected_observed = format_verification_outcome(outcome)
                 dpg.add_text(row, color=shell.COLORS["muted"])
-                if (
-                    outcome.verify_matched is False
-                    and outcome.expected_value is not None
-                    and outcome.observed_value is not None
-                ):
+                if expected_observed is not None:
                     dpg.add_text(
-                        f"      expected: {outcome.expected_value}, "
-                        f"observed: {outcome.observed_value}",
+                        expected_observed,
                         color=shell.COLORS["muted"],
                     )
 

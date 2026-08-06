@@ -994,6 +994,9 @@ class InProgressViewTests(unittest.TestCase):
 
 
 class ResultViewTests(unittest.TestCase):
+    def setUp(self) -> None:
+        i18n.set_locale("en")
+
     def test_result_view_renders_counts_first(self) -> None:
         state = screen.RestorePointsScreenState(
             view=screen.VIEW_RESULT,
@@ -1136,7 +1139,7 @@ class ResultViewTests(unittest.TestCase):
         with _PatchedScreen(shell) as ps:
             ps.build()
         all_text = " ".join(ps.text_strings())
-        self.assertIn("step_size", all_text)
+        self.assertIn("Step size", all_text)
         self.assertIn("expected: 131", all_text)
         self.assertIn("observed: 146", all_text)
 
@@ -1186,7 +1189,7 @@ class ResultViewTests(unittest.TestCase):
         with _PatchedScreen(shell) as ps:
             ps.build()
         all_text = " ".join(ps.text_strings())
-        self.assertIn("vibration", all_text)
+        self.assertIn("Vibration", all_text)
         self.assertIn("Grips 10/20; Triggers 30/40; Native", all_text)
         self.assertIn("Grips 99/99; Triggers 99/99; Stereo resonance", all_text)
         # Critical: the class-name prefix must NOT appear anywhere on the
@@ -1230,7 +1233,7 @@ class ResultViewTests(unittest.TestCase):
         with _PatchedScreen(shell) as ps:
             ps.build()
         all_text = " ".join(ps.text_strings())
-        self.assertIn("step_size", all_text)
+        self.assertIn("Step size", all_text)
         self.assertNotIn("expected:", all_text)
         self.assertNotIn("observed:", all_text)
 
@@ -1274,10 +1277,84 @@ class ResultViewTests(unittest.TestCase):
         with _PatchedScreen(shell) as ps:
             ps.build()
         all_text = " ".join(ps.text_strings())
-        self.assertIn("polling_rate", all_text)
+        self.assertIn("Polling rate", all_text)
         self.assertIn("unverified", all_text)
         self.assertIn("HID read timed out after 967ms", all_text)
         self.assertIn("TimeoutError", all_text)
+
+    def test_result_view_localizes_shared_detail_state_in_zh_and_ko(self) -> None:
+        result = RestoreResult(
+            label=RestoreResultLabel.MISMATCH_AFTER_RESTORE,
+            attempted=3,
+            wrote_succeeded=3,
+            write_failed=0,
+            verified_matched=1,
+            could_not_verify=1,
+            mismatched=1,
+            fields=(
+                RestoreFieldOutcome(
+                    field_name="button_bindings[A]",
+                    write_succeeded=True,
+                    write_error=None,
+                    verify_matched=True,
+                ),
+                RestoreFieldOutcome(
+                    field_name="lighting_zones[LEFT]",
+                    write_succeeded=True,
+                    write_error=None,
+                    verify_matched=False,
+                    verify_note="read-back value differs from expected",
+                    expected_value="RAW_TARGET",
+                    observed_value="RAW_DEVICE",
+                ),
+                RestoreFieldOutcome(
+                    field_name="step_size",
+                    write_succeeded=True,
+                    write_error=None,
+                    verify_matched=None,
+                    verify_note="verify-read failed: OS_TIMEOUT_121",
+                ),
+            ),
+            before_restore_point_id=None,
+            completed_at="2026-08-06T12:00:00Z",
+        )
+        state = screen.RestorePointsScreenState(
+            view=screen.VIEW_RESULT,
+            selected_rp_id="rp_test",
+            result=result,
+        )
+        expected_by_locale = {
+            "zh-CN": (
+                "按键绑定 A：写入=成功 验证=匹配",
+                "灯光区域 左侧灯：写入=成功 验证=不匹配",
+                "预期：RAW_TARGET，实际：RAW_DEVICE",
+                "摇杆步进：写入=成功 验证=未验证",
+                "验证回读失败：OS_TIMEOUT_121",
+            ),
+            "ko": (
+                "버튼 바인딩 A: 쓰기=성공 검증=일치",
+                "조명 영역 왼쪽: 쓰기=성공 검증=불일치",
+                "예상: RAW_TARGET, 관찰값: RAW_DEVICE",
+                "스텝 크기: 쓰기=성공 검증=검증되지 않음",
+                "검증 읽기 실패: OS_TIMEOUT_121",
+            ),
+        }
+
+        for locale, expected_fragments in expected_by_locale.items():
+            with self.subTest(locale=locale):
+                i18n.set_locale(locale)
+                shell = _shell_with(
+                    _FakeService(valid=[_rp(id="rp_test")]),
+                    screen_state=state,
+                )
+                with _PatchedScreen(shell) as ps:
+                    ps.build()
+                all_text = " ".join(ps.text_strings())
+                for fragment in expected_fragments:
+                    self.assertIn(fragment, all_text)
+                self.assertNotIn("button_bindings[A]", all_text)
+                self.assertNotIn("lighting_zones[LEFT]", all_text)
+                self.assertNotIn("write=ok", all_text)
 
 
 class ScreenStateTests(unittest.TestCase):
