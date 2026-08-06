@@ -1071,7 +1071,11 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
 
         # Headless apply (no DPG context) bypasses the device-confirm modal and
         # applies the full snapshot — include_device=True is the default.
-        shell.refresh_from_controller.assert_called_once_with(include_device=True)
+        shell.refresh_from_controller.assert_called_once_with(
+            include_device=True,
+            _presence_key=("no_device", "zd_ultimate_legend", "unknown"),
+            _presence_generation=0,
+        )
 
     def test_apply_selected_wrapper_profile_no_settings_service(self) -> None:
         store = MagicMock()

@@ -42,6 +42,10 @@ from zd_app.services.restore_points import (
     CLAIM_BOUNDARY_PARAGRAPH,
     CLAIM_BOUNDARY_SHORT_UI,
 )
+from zd_app.services.restore_point_service import (
+    ControllerPresenceChangedError,
+    RestorePointService,
+)
 from zd_app.storage.restore_point_models import (
     CaptureSource,
     CoverageCategory,
@@ -1078,11 +1082,49 @@ def _execute_restore(shell) -> None:
         return
 
     rp_id = state.selected_rp_id
+    presence_key = None
+    presence_generation = None
+    token_check = getattr(shell, "_controller_presence_token_is_current", None)
+    if callable(token_check):
+        presence_key = shell._controller_presence_key()
+        presence_generation = shell._controller_presence_generation
+
+    def presence_guard() -> bool:
+        if presence_key is None or presence_generation is None:
+            return True
+        return token_check(presence_key, presence_generation)
 
     def job():
+        if isinstance(service, RestorePointService):
+            return service.restore(rp_id, presence_guard=presence_guard)
         return service.restore(rp_id)
 
+    def finish_presence_changed(*, writes_may_have_occurred: bool) -> None:
+        if presence_key is not None and presence_generation is not None:
+            discard_name = (
+                "_discard_stale_controller_operation_after_write"
+                if writes_may_have_occurred
+                else "_discard_stale_controller_operation"
+            )
+            discard = getattr(shell, discard_name, None)
+            if callable(discard):
+                discard(presence_key, presence_generation)
+        state.view = VIEW_CONFIRM
+        state.status_text = t(
+            "apply.device_changed_after_write"
+            if writes_may_have_occurred
+            else "apply.device_changed"
+        )
+        state.status_kind = "warn"
+        state.result = None
+        shell.rebuild_current_screen()
+
     def on_done(outcome) -> None:
+        if isinstance(outcome, ControllerPresenceChangedError):
+            finish_presence_changed(
+                writes_may_have_occurred=outcome.writes_may_have_occurred
+            )
+            return
         if isinstance(outcome, BaseException):
             if not isinstance(outcome, Exception):
                 raise outcome  # keep today's `except Exception` scope
@@ -1092,6 +1134,12 @@ def _execute_restore(shell) -> None:
             state.status_kind = "warn"
             state.result = None
             shell.rebuild_current_screen()
+            return
+        if not presence_guard():
+            # A completed Restore necessarily crossed its write burst. If B
+            # became current before the render-side completion, discard the
+            # result rather than presenting A's verification as B's.
+            finish_presence_changed(writes_may_have_occurred=True)
             return
         state.view = VIEW_RESULT
         state.result = outcome

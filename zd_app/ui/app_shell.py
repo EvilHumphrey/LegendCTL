@@ -95,6 +95,7 @@ from zd_app.services.settings_service import (
     TriggerVibrationMode,
     VibrationSettings,
 )
+from zd_app.services.official_app_summary_service import OfficialAppSummary
 from zd_app.services.xinput_poll_service import XInputPollService
 from zd_app.storage.last_applied_store import (
     LastAppliedRecord,
@@ -284,6 +285,7 @@ class _RefreshReadResult:
     skipped_fields: int
     presence_key: tuple[str, str, str]
     presence_generation: int
+    official_summary: OfficialAppSummary | None = None
 
     def __iter__(self):
         """Keep the established three-value job-result test/helper contract."""
@@ -300,6 +302,23 @@ class _RefreshReadFailure:
     error: BaseException
     presence_key: tuple[str, str, str]
     presence_generation: int
+
+
+@dataclass(frozen=True)
+class _RefreshReadDiscard:
+    """A refresh refused before touching handles because its token is stale."""
+
+    presence_key: tuple[str, str, str]
+    presence_generation: int
+
+
+@dataclass(frozen=True)
+class _ControllerOperationDiscard:
+    """A token-bound controller job that must not publish a normal result."""
+
+    presence_key: tuple[str, str, str]
+    presence_generation: int
+    writes_may_have_occurred: bool
 
 
 class _SliderWriteThrottle:
@@ -2506,7 +2525,13 @@ class AppShell:
                 t("apply.busy_long", seconds=seconds), False
             )
 
-    def refresh_from_controller(self, *, include_device: bool = True) -> None:
+    def refresh_from_controller(
+        self,
+        *,
+        include_device: bool = True,
+        _presence_key: tuple[str, str, str] | None = None,
+        _presence_generation: int | None = None,
+    ) -> None:
         """Read current controller settings and hydrate Wrapper Settings widgets.
 
         ``include_device`` defaults to True (normal read / Read button / startup
@@ -2529,8 +2554,17 @@ class AppShell:
             self.refresh_shell()
             return
 
-        presence_key = self._controller_presence_key()
-        presence_generation = self._controller_presence_generation
+        if _presence_key is None and _presence_generation is None:
+            presence_key = self._controller_presence_key()
+            presence_generation = self._controller_presence_generation
+        elif _presence_key is not None and _presence_generation is not None:
+            # Internal chained flows (notably profile Apply) carry the token
+            # that owned their write rather than re-binding to mutable live
+            # state after the write completes.
+            presence_key = _presence_key
+            presence_generation = _presence_generation
+        else:
+            raise ValueError("controller presence key and generation must be paired")
         self._run_hid_job(
             lambda: self._refresh_read_job_bound(
                 presence_key,
@@ -2545,9 +2579,14 @@ class AppShell:
         self,
         presence_key: tuple[str, str, str],
         presence_generation: int,
-    ) -> _RefreshReadResult | _RefreshReadFailure:
+    ) -> _RefreshReadResult | _RefreshReadFailure | _RefreshReadDiscard:
         """Run a refresh while preserving its immutable controller ownership."""
 
+        if not self._controller_presence_token_is_current(
+            presence_key,
+            presence_generation,
+        ):
+            return _RefreshReadDiscard(presence_key, presence_generation)
         try:
             return self._refresh_read_job(presence_key, presence_generation)
         except BaseException as exc:  # noqa: BLE001 - render-side handler preserves scope
@@ -2591,35 +2630,65 @@ class AppShell:
             presence_generation,
         )
         first_connect_identity = (
-            self._capture_first_readable_connect() if token_is_current else None
+            self._capture_first_readable_connect(
+                presence_guard=lambda: self._controller_presence_token_is_current(
+                    presence_key,
+                    presence_generation,
+                )
+            )
+            if token_is_current
+            else None
         )
         # Best-effort official-app summary enrichment. Firmware + active profile
         # are NOT protocol-readable from the controller (proven by the 2026-07-06
         # RE investigation); the only in-app source is the official ZD app's
         # "Controller Settings" window, scraped here so a Read populates them
         # honestly (source "official_app_ui" -> the trust matrix's amber
-        # "From the official app" chip). Runs job-side because it spawns a short
-        # PowerShell UIA probe; it degrades silently and never delays/fails the
-        # primary settings snapshot above. The common case (vendor app closed)
-        # fast-returns (~0.27s, well under the probe's 3s ceiling).
+        # "From the official app" chip). Only the read-only PowerShell UIA probe
+        # runs job-side. Its result is folded into DeviceState on the render-side
+        # completion *after* the immutable controller token is checked again.
+        # Mutating DeviceState here would let an A-started probe overwrite B if
+        # the connected controller changed during the probe's 0.27-3s window.
+        official_summary = None
         if token_is_current:
-            self.device_service.read_official_summary_into_state()
+            try:
+                probed_summary = (
+                    self.device_service.official_app_summary_service.read_summary(
+                        force_refresh=True
+                    )
+                )
+                if isinstance(probed_summary, OfficialAppSummary):
+                    official_summary = probed_summary
+            except Exception:  # noqa: BLE001 - enrichment never fails the read
+                logger.debug("Official app summary scrape failed", exc_info=True)
         return _RefreshReadResult(
             snapshot,
             first_connect_identity,
             skipped_fields,
             presence_key,
             presence_generation,
+            official_summary,
         )
 
     def _refresh_read_on_done(self, outcome, *, include_device: bool) -> None:
         """DPG on_done half of :meth:`refresh_from_controller`."""
 
-        if isinstance(outcome, (_RefreshReadResult, _RefreshReadFailure)):
+        if isinstance(
+            outcome,
+            (_RefreshReadResult, _RefreshReadFailure, _RefreshReadDiscard),
+        ):
             if not self._controller_presence_token_is_current(
                 outcome.presence_key,
                 outcome.presence_generation,
             ):
+                self._discard_stale_refresh_result(
+                    outcome.presence_key,
+                    outcome.presence_generation,
+                )
+                return
+            if isinstance(outcome, _RefreshReadDiscard):
+                # A generation cannot become current again, but keep this
+                # fail-closed if a synthetic/direct caller constructs one.
                 self._discard_stale_refresh_result(
                     outcome.presence_key,
                     outcome.presence_generation,
@@ -2653,11 +2722,14 @@ class AppShell:
             first_connect_identity = outcome.first_connect_identity
             skipped_fields = outcome.skipped_fields
             snapshot_identity = outcome.presence_key[2]
+            official_summary = outcome.official_summary
         elif len(outcome) == 2:
             snapshot, first_connect_identity = outcome
             skipped_fields = 0
+            official_summary = None
         else:
             snapshot, first_connect_identity, skipped_fields = outcome
+            official_summary = None
         # Hydrate from what the store actually folded in (under the lock), NOT the
         # pre-fold local: a worker-thread back-paddle landing in the merge->store
         # gap is folded into last_controller_snapshot but is absent from this
@@ -2678,6 +2750,15 @@ class AppShell:
         if stored is None:  # snapshot is non-None here; keep the type checker happy
             stored = snapshot
         self.last_snapshot_ts = time.time()
+
+        if official_summary is not None:
+            retained = self.device_service._apply_official_app_summary(official_summary)
+            if retained:
+                self.device_service.log_i18n_event(
+                    "log.read.official_summary_protocol_retained"
+                )
+            else:
+                self.device_service.log_i18n_event("log.read.official_summary")
 
         self._show_first_readable_connect_card(first_connect_identity)
 
@@ -3339,6 +3420,7 @@ class AppShell:
         *,
         title: str | None = None,
         record_shell_state: bool = True,
+        presence_guard: Callable[[], bool] | None = None,
     ):
         """Capture a restore point without ever crashing the calling flow.
 
@@ -3363,17 +3445,21 @@ class AppShell:
         if service is None:
             return None
         identity = self._current_device_identity()
+        capture_stable_identifier = str(
+            getattr(self.device_service.state, "stable_identifier", "unknown")
+            or "unknown"
+        )
         try:
-            rp = service.capture(
-                trigger,
-                title=title,
-                device_identity=identity,
-            )
+            capture_kwargs = {
+                "title": title,
+                "device_identity": identity,
+            }
+            if presence_guard is not None:
+                capture_kwargs["presence_guard"] = presence_guard
+            rp = service.capture(trigger, **capture_kwargs)
             if rp is not None and record_shell_state:
                 self.setup_drawer_restore_point_created = True
-                self.setup_drawer_restore_point_identity = (
-                    self.device_service.state.stable_identifier
-                )
+                self.setup_drawer_restore_point_identity = capture_stable_identifier
             return rp
         except Exception:
             logger.exception(
@@ -3542,7 +3628,11 @@ class AppShell:
 
         self._show_first_readable_connect_card(self._capture_first_readable_connect())
 
-    def _capture_first_readable_connect(self) -> DeviceIdentity | None:
+    def _capture_first_readable_connect(
+        self,
+        *,
+        presence_guard: Callable[[], bool] | None = None,
+    ) -> DeviceIdentity | None:
         """Job-side half: capture the RP; HID work only, no DearPyGui.
 
         Returns the device identity when a NEW restore point was captured —
@@ -3564,6 +3654,7 @@ class AppShell:
                     f"{key} this session"
                 ),
             ),
+            presence_guard=presence_guard,
         )
         if rp is None:
             return None
@@ -3713,6 +3804,41 @@ class AppShell:
             self._controller_presence_generation,
         )
         self._record_settings_apply_result(False, t("apply.device_changed"))
+
+    def _discard_stale_controller_operation_after_write(
+        self,
+        presence_key: tuple[str, str, str],
+        presence_generation: int,
+        *,
+        no_restore_point: bool = False,
+    ) -> None:
+        """Clear A-owned state after a write job finishes stale against B."""
+
+        _previous, _current, newly_observed = self._observe_controller_presence()
+        # Re-clear only after the outer worker fully completes. Coordinator
+        # callbacks can repopulate the write-only paddle cache after the normal
+        # presence-transition clear while A's write is still returning.
+        self._invalidate_cached_controller_settings(
+            status=t("apply.read.discarded_device_changed")
+        )
+        if newly_observed:
+            self._restart_settings_service_for_current_presence()
+            self._request_presence_rebuild()
+        logger.info(
+            "Discarded stale post-write controller operation for presence=%r "
+            "generation=%s; current=%r generation=%s",
+            presence_key,
+            presence_generation,
+            self._controller_presence_key(),
+            self._controller_presence_generation,
+        )
+        self._render_settings_snapshot_status()
+        self.refresh_shell()
+        self._record_settings_apply_result(
+            False,
+            t("apply.device_changed_after_write"),
+            no_restore_point=no_restore_point,
+        )
 
     def _sync_manual_write_windows_to_device_state(self) -> None:
         """Discard manual-write windows at a disconnect or identity boundary.
@@ -3935,6 +4061,10 @@ class AppShell:
                 ),
                 title=f"Before Device settings apply — {name}",
                 record_shell_state=False,
+                presence_guard=lambda: self._controller_presence_token_is_current(
+                    presence_key,
+                    presence_generation,
+                ),
             )
 
         def on_done(outcome) -> None:
@@ -3997,6 +4127,8 @@ class AppShell:
             return
         if not self._consent_pending_write_allowed_or_refuse():
             return
+        apply_presence_key = self._controller_presence_key()
+        apply_presence_generation = self._controller_presence_generation
         # ``include_device=False`` flows through the post-write
         # refresh_from_controller so the step-size slider and polling-rate
         # combo do not snap to the post-write read; the user's live-write value
@@ -4024,37 +4156,63 @@ class AppShell:
                 # Preserve the prior quiet interval when the optional sweep is
                 # disabled or there is no live SettingsService to read.
                 time.sleep(POST_APPLY_READ_SETTLE_S)
-            # Phase 2: persist what was actually sent (best-effort, never
-            # affects the apply). ``snapshot`` is post device-field filtering;
-            # any 8-point rider the coordinator downgraded is stripped by the
-            # record seam so the stored curve is the 3-point fallback it wrote.
             apply_result.no_restore_point = no_restore_point
-            self._record_last_applied_safe(
-                name, snapshot, apply_result, include_device=include_device
-            )
+            if self._controller_presence_token_is_current(
+                apply_presence_key,
+                apply_presence_generation,
+            ):
+                # Phase 2: persist what was actually sent (best-effort, never
+                # affects the apply). ``snapshot`` is post device-field
+                # filtering; any downgraded 8-point rider is stripped by the
+                # record seam. LastAppliedRecord has no controller identity,
+                # so a stale A operation must never become B's baseline.
+                self._record_last_applied_safe(
+                    name, snapshot, apply_result, include_device=include_device
+                )
 
-            self._record_wear_event(
-                PROFILE_APPLY,
-                summary=f"Applied profile: {name}",
-                details={
-                    "profile_name": name,
-                    "device_settings_included": include_device,
-                    "succeeded": apply_result.succeeded,
-                    "total_attempted": apply_result.total_attempted,
-                    "failed_count": len(apply_result.failed),
-                },
-            )
+                self._record_wear_event(
+                    PROFILE_APPLY,
+                    summary=f"Applied profile: {name}",
+                    details={
+                        "profile_name": name,
+                        "device_settings_included": include_device,
+                        "succeeded": apply_result.succeeded,
+                        "total_attempted": apply_result.total_attempted,
+                        "failed_count": len(apply_result.failed),
+                    },
+                )
+            else:
+                logger.info(
+                    "Skipped Last Applied and wear records for stale profile "
+                    "operation presence=%r generation=%s",
+                    apply_presence_key,
+                    apply_presence_generation,
+                )
 
             # The post-apply read is itself a jobbed flow: inline under the
             # sync default, inline-on-this-worker when threaded (its DPG
             # hydration on_done drains on the render thread either way).
-            self.refresh_from_controller(include_device=include_device)
+            self.refresh_from_controller(
+                include_device=include_device,
+                _presence_key=apply_presence_key,
+                _presence_generation=apply_presence_generation,
+            )
             return apply_result
 
         def on_done(outcome) -> None:
             if isinstance(outcome, BaseException):
                 raise outcome  # today's path has no catch at this level
             apply_result: ApplyResult = outcome
+            if not self._controller_presence_token_is_current(
+                apply_presence_key,
+                apply_presence_generation,
+            ):
+                self._discard_stale_controller_operation_after_write(
+                    apply_presence_key,
+                    apply_presence_generation,
+                    no_restore_point=no_restore_point,
+                )
+                return
             self._last_apply_result = apply_result
             self._sync_profile_apply_readback_details_action()
             if not apply_result.failed:
@@ -4798,22 +4956,52 @@ class AppShell:
             return None
 
         originating_result = originating_result or self._last_apply_result
+        retry_presence_key = self._controller_presence_key()
+        retry_presence_generation = self._controller_presence_generation
 
         if self._dpg_context_ready and dpg.does_item_exist("apply_failure_modal"):
             dpg.delete_item("apply_failure_modal")
 
-        def job() -> ApplyResult:
+        def job() -> ApplyResult | _ControllerOperationDiscard:
+            if not self._controller_presence_token_is_current(
+                retry_presence_key,
+                retry_presence_generation,
+            ):
+                return _ControllerOperationDiscard(
+                    retry_presence_key,
+                    retry_presence_generation,
+                    False,
+                )
             retry_result = self._apply_coordinator.retry_failures(
                 retry_failures,
                 originating_result=originating_result,
             )
-            # Phase 2: labels that just recovered are no longer "failed at
-            # apply" — amend the stored Last-Applied record (best-effort).
-            self._update_last_applied_after_retry_safe(retry_failures, retry_result)
+            if not self._controller_presence_token_is_current(
+                retry_presence_key,
+                retry_presence_generation,
+            ):
+                return _ControllerOperationDiscard(
+                    retry_presence_key,
+                    retry_presence_generation,
+                    True,
+                )
             # Same post-write-burst quiet interval as
             # _apply_wrapper_profile_snapshot (see POST_APPLY_READ_SETTLE_S);
             # the chained refresh starts only after this settle.
             time.sleep(POST_APPLY_READ_SETTLE_S)
+            if not self._controller_presence_token_is_current(
+                retry_presence_key,
+                retry_presence_generation,
+            ):
+                return _ControllerOperationDiscard(
+                    retry_presence_key,
+                    retry_presence_generation,
+                    True,
+                )
+            # Phase 2: labels that just recovered are no longer "failed at
+            # apply" — amend the identity-less stored Last-Applied record only
+            # after the whole retry job still belongs to its origin token.
+            self._update_last_applied_after_retry_safe(retry_failures, retry_result)
             return retry_result
 
         completed: list[ApplyResult] = []
@@ -4821,6 +5009,30 @@ class AppShell:
         def on_done(outcome) -> None:
             if isinstance(outcome, BaseException):
                 raise outcome  # today's path has no catch at this level
+            if isinstance(outcome, _ControllerOperationDiscard):
+                if outcome.writes_may_have_occurred:
+                    self._discard_stale_controller_operation_after_write(
+                        outcome.presence_key,
+                        outcome.presence_generation,
+                    )
+                else:
+                    self._discard_stale_controller_operation(
+                        outcome.presence_key,
+                        outcome.presence_generation,
+                    )
+                return
+            if not self._controller_presence_token_is_current(
+                retry_presence_key,
+                retry_presence_generation,
+            ):
+                # The retry burst completed under A, but its render-side result
+                # arrived after B became current. Do not claim the recovery for
+                # B or let late write-only callbacks survive into B hydration.
+                self._discard_stale_controller_operation_after_write(
+                    retry_presence_key,
+                    retry_presence_generation,
+                )
+                return
             retry_result: ApplyResult = outcome
             completed.append(retry_result)
             self._last_apply_result = retry_result
@@ -4853,7 +5065,10 @@ class AppShell:
             # Chained post-retry refresh, itself a jobbed read: the drain
             # clears the busy flag before invoking on_done, so this starts
             # its own job instead of being refused by its predecessor.
-            self.refresh_from_controller()
+            self.refresh_from_controller(
+                _presence_key=retry_presence_key,
+                _presence_generation=retry_presence_generation,
+            )
 
         self._run_hid_job(job, on_done)
         return completed[0] if completed else None
@@ -5441,8 +5656,8 @@ class AppShell:
                 # before any hydration can label it as B.
                 self._invalidate_cached_controller_settings()
                 self._restart_settings_service_for_current_presence()
-                self.device_service.log_event(
-                    "Connected controller changed; refreshing Wrapper Settings."
+                self.device_service.log_i18n_event(
+                    "log.controller.connected_changed"
                 )
                 self._request_presence_rebuild()
             self._last_connection_state = current_connection_state
@@ -6474,6 +6689,8 @@ class AppShell:
         """
 
         settle = self._hid_executor is not None
+        verify_presence_key = self._controller_presence_key()
+        verify_presence_generation = self._controller_presence_generation
 
         def job():
             # Give the firmware a quiet interval to settle after the write burst
@@ -6487,6 +6704,15 @@ class AppShell:
             return self.settings_service.get_deadzones()
 
         def on_done(result):
+            if not self._controller_presence_token_is_current(
+                verify_presence_key,
+                verify_presence_generation,
+            ):
+                # The write landed before this confirm read. A controller swap
+                # makes either a match or mismatch non-attributable, so retain
+                # only the honest "sent, could not verify" statement.
+                self._diag_deadzone_status_key = "sent_unverified"
+                return
             self._diag_deadzone_status_key = _deadzone_verify_status_key(
                 result, written
             )
@@ -7157,36 +7383,46 @@ class AppShell:
 
         audit.restore_point_name = None
         audit.aborted_no_restore_point = False
+        import_presence_key = self._controller_presence_key()
+        import_presence_generation = self._controller_presence_generation
+
+        def presence_guard() -> bool:
+            return self._controller_presence_token_is_current(
+                import_presence_key,
+                import_presence_generation,
+            )
 
         def job() -> tuple[str, WrapperProfileError | None]:
             # Safe Import's checkpoint is a hard precondition. The same worker
             # owns capture, the now-post-capture profile save, and the device
             # sequence, so no other HID flow can interleave between them.
-            audit.restore_point_name = self._create_safe_import_restore_point()
+            if not presence_guard():
+                return "device_changed_before_write", None
+            audit.restore_point_name = self._create_safe_import_restore_point(
+                presence_guard=presence_guard
+            )
             if audit.restore_point_name is None:
+                if not presence_guard():
+                    return "device_changed_before_write", None
                 audit.controller_write = "aborted"
                 audit.verified = False
                 audit.aborted_no_restore_point = True
                 return "aborted", None
+            if not presence_guard():
+                return "device_changed_before_write", None
             try:
                 self.wrapper_profile_store.save(profile)
             except WrapperProfileError as exc:
                 return "save_failed", exc
 
+            if not presence_guard():
+                return "device_changed_before_write", None
+
             # Audit / _last_apply_result writes are plain Python state — allowed
             # on the worker; everything DearPyGui is in on_done.
             apply_result = self._apply_snapshot_to_controller(snapshot)
-            # Phase 2: a Safe Import apply is a profile apply — record it
-            # under the saved profile name (best-effort, never affects the
-            # apply). include_device is derived: the import's category
-            # selection decided whether device-global fields rode along.
-            self._record_last_applied_safe(
-                name,
-                snapshot,
-                apply_result,
-                include_device=has_device_settings(snapshot),
-            )
-            self._last_apply_result = apply_result
+            if not presence_guard():
+                return "device_changed_after_write", None
             audit.sensitivity_downgrades = tuple(
                 getattr(apply_result, "sensitivity_downgrades", ())
             )
@@ -7197,7 +7433,26 @@ class AppShell:
                 audit.controller_write = "sent"
                 audit.verified = False
             else:
-                self._verify_safe_import_write(snapshot, audit, apply_result)
+                if not self._verify_safe_import_write(
+                    snapshot,
+                    audit,
+                    apply_result,
+                    presence_guard=presence_guard,
+                ):
+                    return "device_changed_after_write", None
+
+            if not presence_guard():
+                return "device_changed_after_write", None
+            # Safe Import has now completed every device read/write phase under
+            # the original token. Only now may its identity-less Last Applied
+            # baseline and live result become visible.
+            self._record_last_applied_safe(
+                name,
+                snapshot,
+                apply_result,
+                include_device=has_device_settings(snapshot),
+            )
+            self._last_apply_result = apply_result
 
             return "applied", None
 
@@ -7205,6 +7460,34 @@ class AppShell:
             if isinstance(outcome, BaseException):
                 raise outcome  # today's path has no catch at this level
             state, save_error = outcome
+            if state == "device_changed_before_write":
+                self._discard_stale_controller_operation(
+                    import_presence_key,
+                    import_presence_generation,
+                )
+                return
+            if state == "device_changed_after_write":
+                audit.controller_write = "sent"
+                audit.verified = False
+                self._discard_stale_controller_operation_after_write(
+                    import_presence_key,
+                    import_presence_generation,
+                )
+                return
+            if not presence_guard():
+                if state == "applied":
+                    audit.controller_write = "sent"
+                    audit.verified = False
+                    self._discard_stale_controller_operation_after_write(
+                        import_presence_key,
+                        import_presence_generation,
+                    )
+                else:
+                    self._discard_stale_controller_operation(
+                        import_presence_key,
+                        import_presence_generation,
+                    )
+                return
             if state == "aborted":
                 self._finish_safe_import_abort()
                 return
@@ -7270,7 +7553,11 @@ class AppShell:
         self.rebuild_current_screen()
         safe_import.open_result(self)
 
-    def _create_safe_import_restore_point(self) -> str | None:
+    def _create_safe_import_restore_point(
+        self,
+        *,
+        presence_guard: Callable[[], bool] | None = None,
+    ) -> str | None:
         """Capture a real Restore Point before Safe Import applies to the controller.
 
         Migrated from the old WrapperProfileStore-based bridge to the
@@ -7294,6 +7581,7 @@ class AppShell:
                 source_label="Safe Import",
                 reason="Created automatically before applying imported profile to controller",
             ),
+            presence_guard=presence_guard,
         )
         return rp.title if rp is not None else None
 
@@ -7332,7 +7620,9 @@ class AppShell:
         snapshot: ControllerSnapshot,
         audit: safe_import_model.ImportAudit,
         apply_result: ApplyResult,
-    ) -> None:
+        *,
+        presence_guard: Callable[[], bool] | None = None,
+    ) -> bool:
         """Earn ``audit.controller_write = "verified"`` by read-back, never by
         a write outcome alone.
 
@@ -7345,6 +7635,9 @@ class AppShell:
         must never crash the apply flow.
         """
 
+        if presence_guard is not None and not presence_guard():
+            return False
+
         audit.verify_mismatched = []
         audit.verify_unverifiable = []
         audit.verify_read_failed = False
@@ -7353,6 +7646,8 @@ class AppShell:
         # feature-report read batch (same rationale as the post-apply refresh
         # in _apply_wrapper_profile_snapshot).
         time.sleep(POST_APPLY_READ_SETTLE_S)
+        if presence_guard is not None and not presence_guard():
+            return False
         try:
             if self.restore_point_service is not None:
                 readback, _read_success, _read_errors = (
@@ -7361,13 +7656,18 @@ class AppShell:
             else:
                 readback = self.settings_service.get_all_settings()
         except Exception:  # noqa: BLE001 - best-effort: downgrade, never raise
+            if presence_guard is not None and not presence_guard():
+                return False
             logger.warning(
                 "safe import: post-apply verify read failed", exc_info=True
             )
             audit.controller_write = "sent"
             audit.verified = False
             audit.verify_read_failed = True
-            return
+            return True
+
+        if presence_guard is not None and not presence_guard():
+            return False
 
         mismatched, unverifiable = verify_applied_snapshot(
             snapshot_as_sent(snapshot, apply_result), readback
@@ -7385,6 +7685,7 @@ class AppShell:
         else:
             audit.controller_write = "verified"
             audit.verified = True
+        return True
 
     def open_support_guide(self, topic: str) -> None:
         guide = support_reference.get_guide(topic)

@@ -1930,6 +1930,30 @@ class DiagnosticsDeadzoneWriteTests(unittest.TestCase):
         _capture(shell._drain_hid_job_completions)
         self.assertEqual(shell._diag_deadzone_status_key, "verified")
 
+    def test_verify_match_degrades_when_connected_controller_changes(self) -> None:
+        service = _DeadzoneService(StickDeadzones(0, 0, 0, 0))
+        shell = _make_write_shell(settings_service=service)
+        shell._diag_deadzone_hydrated = True
+        state = shell.device_service.state
+        state.connection_state = "connected"
+        state.device_class = "zd_ultimate_legend"
+        state.stable_identifier = "zd-unit-a"
+        shell._observe_controller_presence()
+        recorded: list = []
+        shell._hid_executor = lambda job, deliver: recorded.append((job, deliver))
+        dz = StickDeadzones(3, 3, 3, 3)
+        service.readback = dz
+        self._queue_elapsed_deadzone_write(shell, dz)
+        _capture(shell._flush_slider_throttle)
+
+        state.stable_identifier = "zd-unit-b"
+        shell._observe_controller_presence()
+        job, deliver = recorded[0]
+        deliver(job())
+        _capture(shell._drain_hid_job_completions)
+
+        self.assertEqual(shell._diag_deadzone_status_key, "sent_unverified")
+
     def test_trailing_flush_during_in_flight_verify_reaches_final_state(self) -> None:
         # Item L: a deadzone trailing flush that comes due WHILE a prior
         # read-back verify still holds the gate must not strand the inline

@@ -61,6 +61,7 @@ class _RecordingService:
         fresh_read_max_age_s: float = 30.0,
         cached_snapshot=None,
         cached_snapshot_ts=None,
+        presence_guard=None,
     ):
         self._counter += 1
         rp_id = f"rp_recorded_{self._counter}"

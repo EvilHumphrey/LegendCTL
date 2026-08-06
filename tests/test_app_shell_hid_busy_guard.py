@@ -965,6 +965,55 @@ class SafeImportApplyJobbingTests(unittest.TestCase):
             self.assertIs(recorded.args[0], True)
             shell._show_apply_failure_modal.assert_not_called()
 
+    def test_controller_swap_after_safe_import_write_discards_attribution(self) -> None:
+        service = _RecordingService(empty_snapshot())
+        shell = _make_shell(service, hid_executor=threaded_hid_executor)
+        shell._dpg_context_ready = True
+        state = shell.device_service.state
+        state.connection_state = "connected"
+        state.device_class = "zd_ultimate_legend"
+        state.stable_identifier = "zd-unit-a"
+        shell._observe_controller_presence()
+        audit = self._plant_import(shell)
+        apply_mock, started, release = self._gated_apply()
+        shell._apply_snapshot_to_controller = apply_mock
+        shell._record_last_applied_safe = MagicMock()
+        shell._last_apply_result = None
+
+        with patch(
+            "zd_app.ui.app_shell.dpg.get_value",
+            side_effect={safe_import_screen.NAME_INPUT: "Imported Profile"}.__getitem__,
+        ), patch(
+            "zd_app.ui.app_shell.safe_import.open_result"
+        ) as open_result, patch(
+            "zd_app.ui.app_shell.time.sleep"
+        ), patch(
+            "zd_app.ui.app_shell.dpg.delete_item"
+        ):
+            _capture_widget_state(
+                lambda: shell.safe_import_apply(apply_to_controller=True)
+            )
+            self.assertTrue(started.wait(_GATE_TIMEOUT_S))
+            state.stable_identifier = "zd-unit-b"
+            shell._observe_controller_presence()
+            shell._invalidate_cached_controller_settings()
+            release.set()
+            _drain_queued_completions(shell, 1)
+            _capture_widget_state(shell._drain_hid_job_completions)
+
+        shell._record_last_applied_safe.assert_not_called()
+        self.assertIsNone(shell._last_apply_result)
+        self.assertEqual(audit.controller_write, "sent")
+        self.assertFalse(audit.verified)
+        self.assertEqual(service.read_calls, 0)
+        open_result.assert_not_called()
+        recorded = shell.device_service.record_apply_result.call_args
+        self.assertIs(recorded.args[0], False)
+        self.assertEqual(
+            recorded.args[1],
+            i18n.t("apply.device_changed_after_write"),
+        )
+
     def test_threaded_failed_apply_failure_modal_from_on_done_audit_as_today(
         self,
     ) -> None:
@@ -1086,7 +1135,7 @@ class SafeImportApplyJobbingTests(unittest.TestCase):
             or SimpleNamespace(failed=[])
         )
 
-        def record_capture():
+        def record_capture(**_kwargs):
             order.append("capture")
             return "Sync test restore point"
 

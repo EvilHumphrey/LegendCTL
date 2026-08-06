@@ -34,12 +34,20 @@ from tests.r2_shell_test_helpers import empty_snapshot
 from zd_app import i18n
 from zd_app.models import AppSettings, DeviceState, WrapperProfile
 from zd_app.services.settings_apply_coordinator import ApplyFailure
+from zd_app.services.restore_point_service import (
+    ControllerPresenceChangedError,
+    RestorePointService,
+)
 from zd_app.services.settings_service import (
     BackPaddleBinding,
     MacroSlot,
     PollingRate,
+    SetBackPaddleBindingOutcome,
     SetPollingRateOutcome,
+    SetVibrationOutcome,
     SettingsServiceError,
+    TriggerVibrationMode,
+    VibrationSettings,
 )
 from zd_app.ui.app_shell import (
     _HID_FLOW_BUTTON_TAGS,
@@ -469,6 +477,19 @@ class _GatedService:
         self._pass_gate(self._gate_write)
         return SimpleNamespace(outcome=SetPollingRateOutcome.OK, error_code=None)
 
+    def set_vibration(self, settings):
+        self.write_calls += 1
+        self._pass_gate(self._gate_write)
+        return SimpleNamespace(outcome=SetVibrationOutcome.OK, error_code=None)
+
+    def set_back_paddle_binding(self, slot, target):
+        self.write_calls += 1
+        self._pass_gate(self._gate_write)
+        return SimpleNamespace(
+            outcome=SetBackPaddleBindingOutcome.OK,
+            error_code=None,
+        )
+
 
 class _StubRestoreService:
     """RestorePointService stub for the restore flow: gated or raising."""
@@ -489,6 +510,29 @@ class _StubRestoreService:
                 raise AssertionError("test gate never released")
         if self._raises is not None:
             raise self._raises
+        return self.result
+
+
+class _TokenAwareStubRestoreService(RestorePointService):
+    """Minimal real-type stub so the screen passes its presence guard."""
+
+    def __init__(self, *, writes_started: bool) -> None:
+        self.writes_started = writes_started
+        self.write_calls = 0
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.result = SimpleNamespace(label="verified")
+
+    def restore(self, rp_id, *, presence_guard=None, **_kwargs):
+        if self.writes_started:
+            self.write_calls += 1
+        self.started.set()
+        if not self.release.wait(timeout=_GATE_TIMEOUT_S):
+            raise AssertionError("test restore gate never released")
+        if presence_guard is not None and not presence_guard():
+            raise ControllerPresenceChangedError(
+                writes_may_have_occurred=self.writes_started
+            )
         return self.result
 
 
@@ -677,6 +721,46 @@ class ThreadedExecutorLifecycleTests(unittest.TestCase):
         self.assertIs(state.result, service.result)
         self.assertFalse(shell._hid_job_in_flight)
         rebuilds.assert_called_once()
+
+    def _assert_restore_swap_copy(self, *, writes_started: bool) -> None:
+        service = _TokenAwareStubRestoreService(writes_started=writes_started)
+        shell = _make_shell(
+            MagicMock(),
+            hid_executor=threaded_hid_executor,
+            restore_point_service=service,
+        )
+        _set_connected_identity(shell, "zd-unit-a")
+        shell.restore_points_screen_state = rp_screen.RestorePointsScreenState(
+            view=rp_screen.VIEW_IN_PROGRESS,
+            selected_rp_id="rp1",
+        )
+
+        rp_screen._execute_restore(shell)
+        self.assertTrue(service.started.wait(_GATE_TIMEOUT_S))
+        shell.device_service.state.stable_identifier = "zd-unit-b"
+        shell._observe_controller_presence()
+        service.release.set()
+        _drain_queued_completions(shell, 1)
+        _capture_widget_state(shell._drain_hid_job_completions)
+
+        state = shell.restore_points_screen_state
+        self.assertEqual(state.view, rp_screen.VIEW_CONFIRM)
+        self.assertIsNone(state.result)
+        expected = i18n.t(
+            "apply.device_changed_after_write"
+            if writes_started
+            else "apply.device_changed"
+        )
+        self.assertEqual(state.status_text, expected)
+        recorded = shell.device_service.record_apply_result.call_args
+        self.assertIs(recorded.args[0], False)
+        self.assertEqual(recorded.args[1], expected)
+
+    def test_restore_swap_before_write_uses_nothing_applied_copy(self) -> None:
+        self._assert_restore_swap_copy(writes_started=False)
+
+    def test_restore_swap_after_write_uses_may_have_applied_copy(self) -> None:
+        self._assert_restore_swap_copy(writes_started=True)
 
 
 # ---------------------------------------------------------------------------
@@ -907,6 +991,127 @@ class ThreadedApplyCompositionTests(unittest.TestCase):
         self.assertTrue(values["footer_status_text"].startswith("OK"))
 
 
+class ApplyOriginPresenceBindingTests(unittest.TestCase):
+    def _assert_swap_after_write_discards_nested_read(
+        self,
+        *,
+        include_device: bool,
+        snapshot,
+    ) -> None:
+        controller_a_snapshot = empty_snapshot(polling_rate=PollingRate.HZ_8000)
+        service = _StoppableGatedService(
+            controller_a_snapshot,
+            gate_write=True,
+        )
+        shell = _make_shell(service, hid_executor=threaded_hid_executor)
+        shell._dpg_context_ready = True
+        shell._profile_apply_readback_verification_enabled = False
+        _set_connected_identity(shell, "zd-unit-a")
+        shell.last_controller_snapshot = controller_a_snapshot
+        shell.last_snapshot_identity = "zd-unit-a"
+        shell.last_applied_store = MagicMock()
+        shell._record_wear_event = MagicMock()
+
+        with patch("zd_app.ui.app_shell.time.sleep"):
+            _capture_widget_state(
+                lambda: shell._apply_wrapper_profile_snapshot(
+                    "swap-after-write",
+                    snapshot,
+                    include_device=include_device,
+                )
+            )
+            self.assertTrue(service.started.wait(_GATE_TIMEOUT_S))
+            self.assertTrue(shell._hid_job_in_flight)
+
+            # The write owns unit A. Before it returns and chains the refresh,
+            # the render-side presence path observes unit B and defers closing
+            # A's handles until this worker drains.
+            shell.device_service.state.stable_identifier = "zd-unit-b"
+            _previous, _current, changed = shell._observe_controller_presence()
+            self.assertTrue(changed)
+            shell._invalidate_cached_controller_settings()
+            shell._restart_settings_service_for_current_presence()
+            self.assertTrue(shell._needs_service_restart)
+
+            service.release.set()
+            entries = _drain_queued_completions(shell, 2)
+            self.assertFalse(entries[0][2])
+            self.assertTrue(entries[1][2])
+            _capture_widget_state(shell._drain_hid_job_completions)
+
+        self.assertEqual(service.write_calls, 1)
+        self.assertEqual(service.read_calls, 0)
+        shell.last_applied_store.save.assert_not_called()
+        shell._record_wear_event.assert_not_called()
+        self.assertIsNone(shell._last_apply_result)
+        self.assertIsNone(shell.last_controller_snapshot)
+        self.assertIsNone(shell.last_snapshot_identity)
+        self.assertEqual(
+            shell.last_snapshot_status,
+            i18n.t("apply.read.discarded_device_changed"),
+        )
+        shell.device_service._apply_official_app_summary.assert_not_called()
+        recorded = shell.device_service.record_apply_result.call_args
+        self.assertIs(recorded.args[0], False)
+        self.assertEqual(recorded.args[1], i18n.t("apply.device_changed_after_write"))
+        self.assertTrue(shell._needs_service_restart)
+        self.assertFalse(shell._hid_job_in_flight)
+
+    def test_device_apply_swap_after_write_refuses_nested_read(self) -> None:
+        self._assert_swap_after_write_discards_nested_read(
+            include_device=True,
+            snapshot=empty_snapshot(polling_rate=PollingRate.HZ_8000),
+        )
+
+    def test_profile_only_apply_swap_after_write_refuses_nested_read(self) -> None:
+        self._assert_swap_after_write_discards_nested_read(
+            include_device=False,
+            snapshot=empty_snapshot(
+                vibration=VibrationSettings(
+                    10,
+                    20,
+                    30,
+                    40,
+                    TriggerVibrationMode.NATIVE,
+                )
+            ),
+        )
+
+    def test_late_unit_a_paddle_callback_is_cleared_after_outer_completion(self) -> None:
+        snapshot = empty_snapshot(
+            back_paddle_bindings={MacroSlot.M1: BackPaddleBinding(None)}
+        )
+        service = _StoppableGatedService(empty_snapshot(), gate_write=True)
+        shell = _make_shell(service, hid_executor=threaded_hid_executor)
+        shell._dpg_context_ready = True
+        shell._profile_apply_readback_verification_enabled = False
+        _set_connected_identity(shell, "zd-unit-a")
+
+        with patch("zd_app.ui.app_shell.time.sleep"):
+            _capture_widget_state(
+                lambda: shell._apply_wrapper_profile_snapshot(
+                    "paddle-swap",
+                    snapshot,
+                    include_device=False,
+                )
+            )
+            self.assertTrue(service.started.wait(_GATE_TIMEOUT_S))
+            shell.device_service.state.stable_identifier = "zd-unit-b"
+            shell._observe_controller_presence()
+            shell._invalidate_cached_controller_settings()
+            shell._restart_settings_service_for_current_presence()
+
+            service.release.set()
+            _drain_queued_completions(shell, 2)
+            # The coordinator's A-owned callback has already repopulated the
+            # cache, but render-side outer completion has not re-cleared it.
+            self.assertIn(MacroSlot.M1, shell._last_back_paddle_bindings)
+            _capture_widget_state(shell._drain_hid_job_completions)
+
+        self.assertEqual(shell._last_back_paddle_bindings, {})
+        self.assertIsNone(shell.last_controller_snapshot)
+
+
 # ---------------------------------------------------------------------------
 # Reconnect stop() deferral — a USB bounce mid-job must not
 # close the HID handles out from under the running worker: the reconnect
@@ -942,6 +1147,24 @@ class _GatedCaptureService:
         return SimpleNamespace(id="rp-before-apply")
 
 
+class _PresenceGuardedCaptureService:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.guard_seen = False
+        self.persisted = False
+
+    def capture(self, *_args, presence_guard=None, **_kwargs):
+        self.guard_seen = presence_guard is not None
+        self.started.set()
+        if not self.release.wait(timeout=_GATE_TIMEOUT_S):
+            raise AssertionError("test capture gate never released")
+        if presence_guard is not None and not presence_guard():
+            return None
+        self.persisted = True
+        return SimpleNamespace(id="rp-first-connect", title="first")
+
+
 def _set_connected_identity(shell: AppShell, stable_identifier: str) -> None:
     state = shell.device_service.state
     state.connection_state = "connected"
@@ -962,7 +1185,7 @@ class DeviceConfirmedApplyThreadBoundaryTests(unittest.TestCase):
             restore_point_service=capture,
         )
         shell._dpg_context_ready = True
-        shell._capture_first_readable_connect = lambda: None
+        shell._capture_first_readable_connect = lambda **_kwargs: None
         _set_connected_identity(shell, "zd-unit-a")
         profile = WrapperProfile(name="thread-boundary", snapshot=snapshot)
         render_thread = threading.get_ident()
@@ -1021,7 +1244,7 @@ class DeviceConfirmedApplyThreadBoundaryTests(unittest.TestCase):
             restore_point_service=capture,
         )
         shell._dpg_context_ready = True
-        shell._capture_first_readable_connect = lambda: None
+        shell._capture_first_readable_connect = lambda **_kwargs: None
         _set_connected_identity(shell, "zd-unit-a")
         profile = WrapperProfile(name="swap-refusal", snapshot=snapshot)
 
@@ -1049,6 +1272,32 @@ class DeviceConfirmedApplyThreadBoundaryTests(unittest.TestCase):
 
 
 class RefreshIdentityBindingTests(unittest.TestCase):
+    def test_first_connect_capture_commit_is_guarded_against_swap(self) -> None:
+        capture = _PresenceGuardedCaptureService()
+        service = _StoppableGatedService(empty_snapshot())
+        shell = _make_shell(
+            service,
+            hid_executor=threaded_hid_executor,
+            restore_point_service=capture,
+        )
+        shell._dpg_context_ready = True
+        _set_connected_identity(shell, "zd-unit-a")
+
+        _capture_widget_state(shell.refresh_from_controller)
+        self.assertTrue(capture.started.wait(_GATE_TIMEOUT_S))
+        shell.device_service.state.stable_identifier = "zd-unit-b"
+        shell._observe_controller_presence()
+        shell._invalidate_cached_controller_settings()
+        shell._restart_settings_service_for_current_presence()
+        capture.release.set()
+        _drain_queued_completions(shell, 1)
+        _capture_widget_state(shell._drain_hid_job_completions)
+
+        self.assertTrue(capture.guard_seen)
+        self.assertFalse(capture.persisted)
+        self.assertEqual(shell._first_connect_captured, set())
+        self.assertIsNone(shell.last_controller_snapshot)
+
     def test_unit_a_read_is_discarded_after_connected_swap_to_unit_b(self) -> None:
         snapshot_a = empty_snapshot(polling_rate=PollingRate.HZ_8000)
         service = _StoppableGatedService(snapshot_a, gate_read=True)
@@ -1078,7 +1327,7 @@ class RefreshIdentityBindingTests(unittest.TestCase):
         )
         self.assertEqual(service.stop_calls, 1)
         self.assertTrue(shell._needs_hydration)
-        shell.device_service.read_official_summary_into_state.assert_not_called()
+        shell.device_service._apply_official_app_summary.assert_not_called()
 
     def test_same_identity_new_generation_also_discards_old_read(self) -> None:
         snapshot = empty_snapshot(polling_rate=PollingRate.HZ_8000)
@@ -1132,6 +1381,9 @@ class RefreshIdentityBindingTests(unittest.TestCase):
         self.assertIsNone(shell.last_controller_snapshot)
         self.assertIsNone(shell.last_snapshot_identity)
         self.assertEqual(shell._last_back_paddle_bindings, {})
+        shell.device_service.log_i18n_event.assert_called_once_with(
+            "log.controller.connected_changed"
+        )
         shell.rebuild_current_screen.assert_called_once_with()
 
 
@@ -1302,6 +1554,36 @@ class RetryFailedSettingsJobbingTests(unittest.TestCase):
         self.assertFalse(shell._hid_job_in_flight)
         self.assertIsNotNone(shell._last_apply_result)
         self.assertEqual(shell._last_apply_result.succeeded, 1)
+
+    def test_retry_swap_after_write_skips_baseline_and_normal_result(self) -> None:
+        service = _StoppableGatedService(empty_snapshot())
+        shell = _make_shell(service, hid_executor=threaded_hid_executor)
+        shell._dpg_context_ready = True
+        _set_connected_identity(shell, "zd-unit-a")
+        shell.last_applied_store = MagicMock()
+        failure, started, release, retry_calls = self._gated_failure()
+
+        with patch("zd_app.ui.app_shell.time.sleep"), patch(
+            "zd_app.ui.app_shell.dpg.delete_item"
+        ):
+            _capture_widget_state(lambda: shell._retry_failed_settings([failure]))
+            self.assertTrue(started.wait(_GATE_TIMEOUT_S))
+            shell.device_service.state.stable_identifier = "zd-unit-b"
+            shell._observe_controller_presence()
+            shell._invalidate_cached_controller_settings()
+            shell._restart_settings_service_for_current_presence()
+            release.set()
+            _drain_queued_completions(shell, 1)
+            _capture_widget_state(shell._drain_hid_job_completions)
+
+        self.assertEqual(retry_calls, ["retry"])
+        self.assertEqual(service.read_calls, 0)
+        shell.last_applied_store.load.assert_not_called()
+        shell.last_applied_store.save.assert_not_called()
+        self.assertIsNone(shell._last_apply_result)
+        recorded = shell.device_service.record_apply_result.call_args
+        self.assertIs(recorded.args[0], False)
+        self.assertEqual(recorded.args[1], i18n.t("apply.device_changed_after_write"))
 
     def test_retry_refused_while_busy_keeps_modal_open(self) -> None:
         snapshot = empty_snapshot(polling_rate=PollingRate.HZ_8000)
