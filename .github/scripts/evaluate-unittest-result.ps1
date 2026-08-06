@@ -4,7 +4,9 @@ param(
   [string] $LogPath,
 
   [Parameter(Mandatory = $true)]
-  [int64] $ProcessExitCode
+  [int64] $ProcessExitCode,
+
+  [int64] $MinimumTestCount = 1
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,10 +28,20 @@ if ($log -match '(?m)^FAILED \(') {
 # summary shape instead: `Ran <N> tests ...`, a blank line, then `OK (...)`.
 $okSummary = [regex]::Matches(
   $log,
-  '(?s)(?:^|\r?\n)Ran\s+\d+\s+tests?\s+in\s+[^\r\n]+\r?\n\r?\nOK(?: \([^\r\n]*\))?(?:\r?\n)?\z'
+  '(?s)(?:^|\r?\n)Ran\s+(?<test_count>\d+)\s+tests?\s+in\s+[^\r\n]+\r?\n\r?\nOK(?: \([^\r\n]*\))?(?:\r?\n)?\z'
 )
 if ($okSummary.Count -eq 0) {
   Write-Host "::error::No complete unittest 'Ran ...' + 'OK' summary found (exit code $ProcessExitCode)."
+  exit 1
+}
+
+if ($MinimumTestCount -lt 1) {
+  Write-Host "::error::MinimumTestCount must be at least 1."
+  exit 1
+}
+$reportedTestCount = [int64] $okSummary[0].Groups['test_count'].Value
+if ($reportedTestCount -lt $MinimumTestCount) {
+  Write-Host "::error::unittest ran $reportedTestCount tests; expected at least $MinimumTestCount."
   exit 1
 }
 

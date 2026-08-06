@@ -24,6 +24,12 @@ class PublicWorkflowExitGateTests(unittest.TestCase):
                 text = workflow.read_text(encoding="utf-8")
                 self.assertEqual(text.count("evaluate-unittest-result.ps1"), 1)
                 self.assertNotIn("elseif ($log -match", text)
+                self.assertIn("-MinimumTestCount 3000", text)
+
+        render_workflow = (
+            REPO_ROOT / ".github" / "workflows" / "render-matrix.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("-MinimumTestCount 40", render_workflow)
 
     def test_evaluator_matrix(self) -> None:
         pwsh = shutil.which("pwsh")
@@ -37,43 +43,52 @@ class PublicWorkflowExitGateTests(unittest.TestCase):
             "OK (skipped=2, expected failures=1)\n"
         )
         cases = (
-            ("success", good_summary, 0, 0),
-            ("known teardown", good_summary, 139, 0),
-            ("known Windows teardown signed", good_summary, -1073741819, 0),
-            ("known Windows teardown unsigned", good_summary, 3221225477, 0),
-            ("unexpected exit", good_summary, 7, 1),
-            ("early fake OK", "OK\nthen stopped\n", 0, 1),
+            ("success", good_summary, 0, None, 0),
+            ("known teardown", good_summary, 139, None, 0),
+            ("known Windows teardown signed", good_summary, -1073741819, None, 0),
+            ("known Windows teardown unsigned", good_summary, 3221225477, None, 0),
+            ("zero tests", "Ran 0 tests in 0.001s\n\nOK\n", 0, None, 1),
+            ("explicit floor met", good_summary, 0, 32, 0),
+            ("explicit floor missed", good_summary, 0, 33, 1),
+            ("invalid floor", good_summary, 0, 0, 1),
+            ("unexpected exit", good_summary, 7, None, 1),
+            ("early fake OK", "OK\nthen stopped\n", 0, None, 1),
             (
                 "nonterminal fake summary",
                 good_summary + "post-summary process failure\n",
                 0,
+                None,
                 1,
             ),
             (
                 "failed summary",
                 "Ran 1 test in 0.1s\n\nFAILED (failures=1)\n",
                 0,
+                None,
                 1,
             ),
-            ("missing summary", "test process stopped\n", 139, 1),
+            ("missing summary", "test process stopped\n", 139, None, 1),
         )
 
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "test-output.txt"
-            for name, log, process_code, expected in cases:
+            for name, log, process_code, minimum, expected in cases:
                 with self.subTest(case=name):
                     log_path.write_text(log, encoding="utf-8", newline="\n")
+                    command = [
+                        pwsh,
+                        "-NoProfile",
+                        "-File",
+                        str(EVALUATOR),
+                        "-LogPath",
+                        str(log_path),
+                        "-ProcessExitCode",
+                        str(process_code),
+                    ]
+                    if minimum is not None:
+                        command.extend(("-MinimumTestCount", str(minimum)))
                     proc = subprocess.run(
-                        [
-                            pwsh,
-                            "-NoProfile",
-                            "-File",
-                            str(EVALUATOR),
-                            "-LogPath",
-                            str(log_path),
-                            "-ProcessExitCode",
-                            str(process_code),
-                        ],
+                        command,
                         capture_output=True,
                         text=True,
                         check=False,

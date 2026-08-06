@@ -188,7 +188,8 @@ jobs:
           $code = $LASTEXITCODE
           & .\.github\scripts\evaluate-unittest-result.ps1 `
             -LogPath test_output.txt `
-            -ProcessExitCode $code
+            -ProcessExitCode $code `
+            -MinimumTestCount 3000
           exit $LASTEXITCODE
 
       - name: Audit dependencies for known CVEs before building (pip-audit)

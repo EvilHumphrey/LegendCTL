@@ -42,7 +42,8 @@ jobs:
           $code = $LASTEXITCODE
           & .\.github\scripts\evaluate-unittest-result.ps1 `
             -LogPath render_matrix_output.txt `
-            -ProcessExitCode $code
+            -ProcessExitCode $code `
+            -MinimumTestCount 40
           exit $LASTEXITCODE
 
       - name: Upload render log
