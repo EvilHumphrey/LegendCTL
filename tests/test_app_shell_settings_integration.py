@@ -4109,11 +4109,13 @@ class PollingRate8000FirmwareHonestyTests(unittest.TestCase):
 
         self.assertIs(returned, result)
         success, message = shell.device_service.record_apply_result.call_args.args
-        self.assertTrue(success)
+        self.assertFalse(success)
         self.assertIsInstance(message, LogEntry)
         self.assertEqual(message.key, "apply.result.write_unverified")
         self.assertNotEqual(message.key, "apply.polling_rate.success")
         self.assertEqual(render_log_message(message), i18n.t("apply.result.write_unverified"))
+        self.assertEqual(shell.device_service.state.data_freshness, "write_failed")
+        self.assertEqual(shell.device_service.state.sync_status, "Apply Failed")
 
     def test_8000_readback_exception_is_reported_unverified(self) -> None:
         # Fail-on-base: an exception used to emit apply.polling_rate.success.
@@ -4131,11 +4133,13 @@ class PollingRate8000FirmwareHonestyTests(unittest.TestCase):
 
         self.assertIs(returned, result)
         success, message = shell.device_service.record_apply_result.call_args.args
-        self.assertTrue(success)
+        self.assertFalse(success)
         self.assertIsInstance(message, LogEntry)
         self.assertEqual(message.key, "apply.result.write_unverified")
         self.assertNotEqual(message.key, "apply.polling_rate.success")
         self.assertEqual(render_log_message(message), i18n.t("apply.result.write_unverified"))
+        self.assertEqual(shell.device_service.state.data_freshness, "write_failed")
+        self.assertEqual(shell.device_service.state.sync_status, "Apply Failed")
 
     def test_sub_8000_selection_never_reads_back(self) -> None:
         # Only 8000 Hz pays the confirmation read — every other rate is

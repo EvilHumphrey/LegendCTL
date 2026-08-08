@@ -6187,7 +6187,7 @@ class AppShell:
             if committed is None:
                 message = _make_log_entry("apply.result.write_unverified")
                 self._record_settings_apply_result(
-                    True,
+                    False,
                     message,
                     no_restore_point=no_restore_point,
                 )

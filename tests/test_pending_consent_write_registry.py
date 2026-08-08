@@ -59,6 +59,49 @@ _WRITE_ROOTS = {
     "safe_import_apply": ("self._run_hid_job",),
 }
 
+_MODELED_CONTROLLER_SINKS = frozenset(
+    {
+        "self._apply_coordinator.apply_snapshot",
+        "self._apply_coordinator.retry_failures",
+        "self._run_hid_job",
+    }
+)
+_DIRECTLY_GUARDED_SINK_OWNERS = frozenset(
+    {
+        "_retry_failed_settings",
+        "apply_back_paddle_binding_from_combo",
+        "apply_vibration_settings",
+        "_apply_trigger_settings",
+        "apply_deadzone_settings",
+        "_apply_sensitivity_curve",
+        "_apply_sensitivity_curve_8point",
+        "_apply_axis_inversion",
+        "apply_button_binding",
+        "apply_lighting",
+        "safe_import_apply",
+    }
+)
+_SEPARATELY_GUARDED_SINK_OWNERS = frozenset({"_apply_wrapper_profile_snapshot"})
+_INTERNAL_GUARDED_SINK_CALLERS = {
+    "_apply_snapshot_to_controller": {
+        "_apply_wrapper_profile_snapshot",
+        "safe_import_apply",
+    },
+    "_do_write_polling_rate": {"apply_polling_rate", "_flush_slider_throttle"},
+    "_do_write_step_size": {"apply_step_size", "_flush_slider_throttle"},
+    "_do_write_deadzones": {
+        "apply_diagnostics_deadzone",
+        "_flush_slider_throttle",
+    },
+}
+_EXEMPT_READ_JOB_OWNERS = frozenset(
+    {
+        "refresh_from_controller",
+        "_apply_wrapper_profile_resolved",
+        "_schedule_deadzone_readback_verify",
+    }
+)
+
 _BLOCKED_CALLBACKS = (
     ("apply_polling_rate", ("1000Hz",)),
     ("apply_step_size", (120,)),
@@ -115,12 +158,78 @@ def _calls(function: ast.AST) -> dict[str, list[int]]:
     return found
 
 
+def _controller_sinks(calls: dict[str, list[int]]) -> set[str]:
+    return {
+        name
+        for name in calls
+        if name.startswith("self.settings_service.set_")
+        or name in _MODELED_CONTROLLER_SINKS
+    }
+
+
 class PendingConsentWriteRegistryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.methods = _functions(
             Path(app_shell_module.__file__).resolve(), AppShell.__name__
         )
+
+    def test_discovered_sink_owners_match_guarded_and_exempt_inventory(self) -> None:
+        discovered = {
+            method_name: sinks
+            for method_name, method in self.methods.items()
+            if (sinks := _controller_sinks(_calls(method)))
+        }
+        expected = (
+            _DIRECTLY_GUARDED_SINK_OWNERS
+            | _SEPARATELY_GUARDED_SINK_OWNERS
+            | set(_INTERNAL_GUARDED_SINK_CALLERS)
+            | _EXEMPT_READ_JOB_OWNERS
+        )
+        self.assertTrue(discovered)
+        self.assertEqual(set(discovered), expected)
+
+        for method_name in _DIRECTLY_GUARDED_SINK_OWNERS:
+            calls = _calls(self.methods[method_name])
+            guard = calls.get("self._hid_write_available_or_refuse", [])
+            self.assertEqual(len(guard), 1, method_name)
+            first_sink = min(
+                line
+                for sink in discovered[method_name]
+                for line in calls[sink]
+            )
+            self.assertLess(guard[0], first_sink, method_name)
+
+        for method_name in _SEPARATELY_GUARDED_SINK_OWNERS:
+            calls = _calls(self.methods[method_name])
+            for guard_name in (
+                "self._zd_write_allowed_or_refuse",
+                "self._consent_pending_write_allowed_or_refuse",
+            ):
+                guard = calls.get(guard_name, [])
+                self.assertEqual(len(guard), 1, method_name)
+                first_sink = min(
+                    line
+                    for sink in discovered[method_name]
+                    for line in calls[sink]
+                )
+                self.assertLess(guard[0], first_sink, method_name)
+
+        for sink_owner, expected_callers in _INTERNAL_GUARDED_SINK_CALLERS.items():
+            call_name = f"self.{sink_owner}"
+            actual_callers = {
+                method_name
+                for method_name, method in self.methods.items()
+                if call_name in _calls(method)
+            }
+            self.assertEqual(actual_callers, expected_callers, sink_owner)
+
+        for method_name in _EXEMPT_READ_JOB_OWNERS:
+            self.assertEqual(
+                discovered[method_name],
+                {"self._run_hid_job"},
+                method_name,
+            )
 
     def test_every_registered_root_gates_before_positive_sink_twins(self) -> None:
         self.assertEqual(len(_WRITE_ROOTS), 16)
