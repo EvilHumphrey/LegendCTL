@@ -43,10 +43,10 @@ not network sockets and will not show up in TCPView.
 > show network activity in TCPView. This test is specifically about the
 > **LegendCTL process row** — that's the one that should stay quiet.
 
-> ℹ️ **One deliberate handoff:** the About screen's GitHub buttons (repository
-> and issue tracker) hand a URL to your **default browser** (`webbrowser.open`).
-> The LegendCTL process itself opens no socket; any traffic that follows belongs
-> to the browser process, not to the LegendCTL row you're watching here.
+> ℹ️ **Deliberate browser handoffs:** the About and Compatibility Report
+> GitHub buttons hand a URL to your **default browser** (`webbrowser.open`). The
+> LegendCTL process itself opens no socket; any traffic that follows belongs to
+> the browser process, not to the LegendCTL row you're watching here.
 
 ## Quick check with PowerShell (built in — no download)
 

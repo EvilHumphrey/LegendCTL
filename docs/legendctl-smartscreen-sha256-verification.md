@@ -96,8 +96,8 @@ regardless of where the folder lives, so remove that separately if you want them
 ## After launch: verify no network activity
 
 The LegendCTL process makes **zero** network calls. You don't have to take that on faith — confirm it in a couple of
-minutes with the built-in check in [verifying-no-network.md](verifying-no-network.md) (the only outbound action
-anywhere is the About screen's GitHub links, which hand a URL to your default browser; the app opens no socket itself).
+minutes with the built-in check in [verifying-no-network.md](verifying-no-network.md) (the About and Compatibility
+Report GitHub buttons hand a URL to your default browser; the app opens no socket itself).
 
 ## Code signing is planned
 

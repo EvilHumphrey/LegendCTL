@@ -120,5 +120,5 @@ gh attestation verify .\ZDUltimateLegend-v<version>-windows.zip --repo EvilHumph
 
 See [install-windows-and-smartscreen.md](install-windows-and-smartscreen.md)
 for the full verification guide (including offline verification), and the
-README's "Distribution safety" section for what to expect from SmartScreen and
-antivirus in the meantime.
+README's ["First-run SmartScreen, and verifying your download"](../README.md#first-run-smartscreen-and-verifying-your-download)
+section for what to expect from SmartScreen and antivirus in the meantime.

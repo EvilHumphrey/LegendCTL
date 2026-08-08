@@ -39,10 +39,10 @@ Portable ZIP is the low-friction path — no admin, no installer:
 
 1. Download `ZDUltimateLegend-v<version>-windows.zip` from the
    [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest).
-2. The build is currently **unsigned**, so the first run shows Windows SmartScreen
-   ("Windows protected your PC"). That's expected for any new unsigned app — if
-   you like, verify the **SHA-256** against `SHA256SUMS.txt` in the release first,
-   then **More info → Run anyway**.
+2. The build is currently **unsigned**, so Windows SmartScreen may show
+   "Windows protected your PC" on first run. That can happen for unsigned or
+   low-reputation downloads — if you like, verify the **SHA-256** against
+   `SHA256SUMS.txt` in the release first, then **More info → Run anyway**.
 3. Extract anywhere and run `ZD Ultimate Legend.exe` (the window/exe still carry
    the project's legacy name — same program).
 
