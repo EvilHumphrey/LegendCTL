@@ -37,9 +37,11 @@ git diff -- requirements-release.in requirements-release.lock
 ```
 
 The refresh command bootstraps its pinned `pip-tools` version from the separate
-hash lock `requirements-lock-tools.lock`, resolves only the declared roots, and
-downloads the selected release wheels again with hash verification. Review the
-resulting lock diff and run the normal test gate before committing.
+hash lock `requirements-lock-tools.lock`, ignores ambient pip configuration,
+and forwards `--only-binary=:all:` to its resolver. It therefore resolves only
+the declared roots as wheels before downloading the selected release wheels
+again with hash verification. Review the resulting lock diff and run the normal
+test gate before committing.
 
 This patch does not change the independently tracked Inno Setup / Chocolatey
 installation path. That remains an explicit residual release-supply-chain risk

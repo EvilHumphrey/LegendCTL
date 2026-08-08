@@ -104,9 +104,15 @@ class ReleaseOfflineInstallationTests(unittest.TestCase):
         refresh = REFRESH.read_text(encoding="utf-8")
         self.assertIn("requirements-lock-tools.lock", refresh)
         self.assertIn("--no-index --find-links $toolWheelhouse", refresh)
-        self.assertIn("-m piptools compile --allow-unsafe --generate-hashes", refresh)
+        self.assertIn("-m piptools compile --no-config --allow-unsafe --generate-hashes", refresh)
+        self.assertIn("--pip-args '--only-binary=:all:'", refresh)
         self.assertIn("verify release lock wheel closure", refresh)
         self.assertIn("--require-hashes --dest $releaseWheelhouse", refresh)
+
+    def test_generated_lock_header_records_the_no_config_wheel_only_resolution(self) -> None:
+        header = "\n".join(LOCK.read_text(encoding="utf-8").splitlines()[:8])
+        self.assertIn("--no-config", header)
+        self.assertIn("--pip-args='--only-binary=:all:'", header)
 
 
 if __name__ == "__main__":

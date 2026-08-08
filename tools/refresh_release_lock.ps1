@@ -69,11 +69,26 @@ try {
         & $toolPython -m pip check
     }
 
-    # This is the intentional live resolution. It is explicit, deterministic
-    # for the pinned roots, and writes hashes fetched from PyPI into the lock.
+    # This is the intentional live resolution. Ignore ambient pip configuration
+    # and forward the wheel-only rule to pip so pip-tools cannot select an sdist
+    # or execute a build backend before the later wheelhouse proof. The command
+    # remains explicit and deterministic for the pinned roots, and writes hashes
+    # fetched from PyPI into the lock.
     Invoke-NativeCommand -Label "compile release dependency lock" -ScriptBlock {
-        & $toolPython -m piptools compile --allow-unsafe --generate-hashes --strip-extras `
+        & $toolPython -m piptools compile --no-config --allow-unsafe --generate-hashes --strip-extras `
+            --pip-args '--only-binary=:all:' `
             --output-file requirements-release.lock requirements-release.in
+    }
+    # pip-tools retains --pip-args in its generated command echo, but omits
+    # its own --no-config flag. Stamp that intentionally omitted safety input
+    # into the echo so the committed lock truthfully records both policies.
+    $lockContents = Get-Content -LiteralPath requirements-release.lock -Raw
+    if ($lockContents -notmatch '(?m)^#    pip-compile --no-config ') {
+        $lockContents = $lockContents -replace '(?m)^(#    pip-compile )', '$1--no-config '
+        # Use .NET rather than a PowerShell-specific encoding name: this script
+        # supports Windows PowerShell 5.1 as well as pwsh.
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText((Join-Path $repoRoot 'requirements-release.lock'), $lockContents, $utf8NoBom)
     }
 
     # Prove all selected wheels are present on PyPI and satisfy the generated
