@@ -2373,6 +2373,20 @@ class AppShell:
         self._show_first_run_acknowledgment_modal_if_needed()
         return False
 
+    def _hid_write_available_or_refuse(self) -> bool:
+        """Gate a synchronous UI write on device, busy, and consent state.
+
+        Keep this separate from :meth:`_hid_available_or_refuse`: that helper
+        also protects user-requested reads, which remain available while the
+        first-run acknowledgment is pending. Write roots use this composition
+        so a successful busy/device check cannot become a consent bypass.
+        """
+
+        return (
+            self._hid_available_or_refuse()
+            and self._consent_pending_write_allowed_or_refuse()
+        )
+
     def _set_hid_flow_buttons_enabled(self, enabled: bool) -> None:
         if not self._dpg_context_ready:
             return
@@ -5172,9 +5186,9 @@ class AppShell:
             )
             return None
         # Refuse BEFORE touching the modal: the failure modal stays open so
-        # the user can re-click Retry once the in-flight job drains (the
-        # busy banner is the refusal echo).
-        if not self._hid_available_or_refuse():
+        # the user can re-click Retry after a busy flow drains or after the
+        # pending first-run acknowledgment is resolved.
+        if not self._hid_write_available_or_refuse():
             return None
 
         retry_presence_key = (
@@ -6095,9 +6109,7 @@ class AppShell:
         except KeyError as exc:
             raise ValueError(f"Unsupported polling-rate label: {label!r}") from exc
 
-        if not self._hid_available_or_refuse():
-            return None
-        if not self._consent_pending_write_allowed_or_refuse():
+        if not self._hid_write_available_or_refuse():
             return None
 
         if self.settings_service is None:
@@ -6172,11 +6184,17 @@ class AppShell:
                     committed,
                     no_restore_point=no_restore_point,
                 )
-            # committed is HZ_8000 (capable device honoured it) or None
-            # (unverifiable — fail safe by relying on the successful write
-            # outcome rather than crying
-            # non-commit on a transient read miss). Either way, fall through to
-            # the normal success path below.
+            if committed is None:
+                message = _make_log_entry("apply.result.write_unverified")
+                self._record_settings_apply_result(
+                    True,
+                    message,
+                    no_restore_point=no_restore_point,
+                )
+                self.refresh_shell()
+                return result
+            # The only remaining 8K case is an equality-confirmed commit; it
+            # falls through to the normal success path below.
         if success:
             message = _make_log_entry("apply.polling_rate.success", label=label)
         else:
@@ -6196,10 +6214,9 @@ class AppShell:
         Reuses the service's existing ``get_polling_rate`` (one single-category
         HID read — not the full ~27-round-trip settings batch) and never lets a
         read failure crash the apply: any error or unreadable response yields
-        ``None``, which the caller treats as "could not confirm" and falls back
-        to relying on the successful WriteFile outcome. An unverifiable 8K
-        must never masquerade as a non-commit (fail-safe: unknown capability
-        never blocks a capable device).
+        ``None``, which the caller reports as sent-but-unverified. An
+        unverifiable 8K must not masquerade as either a confirmed commit or a
+        confirmed non-commit.
         """
 
         try:
@@ -6248,9 +6265,7 @@ class AppShell:
         skip_restore_point_capture: bool = False,
         no_restore_point: bool = False,
     ):
-        if not self._hid_available_or_refuse():
-            return None
-        if not self._consent_pending_write_allowed_or_refuse():
+        if not self._hid_write_available_or_refuse():
             return None
 
         if self.settings_service is None:
@@ -6596,7 +6611,7 @@ class AppShell:
             )
 
     def apply_back_paddle_binding_from_combo(self, slot: MacroSlot):
-        if not self._hid_available_or_refuse():
+        if not self._hid_write_available_or_refuse():
             return None
         if self.settings_service is None:
             message = t("apply.back_paddle.unavailable")
@@ -6649,7 +6664,7 @@ class AppShell:
         return result
 
     def apply_vibration_settings(self):
-        if not self._hid_available_or_refuse():
+        if not self._hid_write_available_or_refuse():
             return None
         if self.settings_service is None:
             message = t("apply.vibration.unavailable")
@@ -6701,7 +6716,7 @@ class AppShell:
         )
 
     def _apply_trigger_settings(self, side: str, min_tag: str, max_tag: str, mode_tag: str):
-        if not self._hid_available_or_refuse():
+        if not self._hid_write_available_or_refuse():
             return None
         if self.settings_service is None:
             message = t("apply.trigger.unavailable", side=_side_label(side))
@@ -6759,9 +6774,7 @@ class AppShell:
         skip_restore_point_capture: bool = False,
         no_restore_point: bool = False,
     ):
-        if not self._hid_available_or_refuse():
-            return None
-        if not self._consent_pending_write_allowed_or_refuse():
+        if not self._hid_write_available_or_refuse():
             return None
         if self.settings_service is None:
             message = t("apply.deadzone.unavailable")
@@ -6821,9 +6834,7 @@ class AppShell:
         the live panel and its circularity plot in real time.
         """
 
-        if not self._hid_available_or_refuse():
-            return None
-        if not self._consent_pending_write_allowed_or_refuse():
+        if not self._hid_write_available_or_refuse():
             return None
         if self.settings_service is None:
             self._diag_deadzone_status_key = "unavailable"
@@ -7028,7 +7039,7 @@ class AppShell:
         # Guard before the widget writes below, not just before the delegated
         # apply — otherwise a busy refusal would leave the sliders showing a
         # preset the device never received.
-        if not self._hid_available_or_refuse():
+        if not self._hid_write_available_or_refuse():
             return None
         anchors = SENSITIVITY_PRESETS.get(name)
         if anchors is None:
@@ -7055,7 +7066,7 @@ class AppShell:
         return None
 
     def _apply_sensitivity_curve(self, side: str, tag_prefix: str):
-        if not self._hid_available_or_refuse():
+        if not self._hid_write_available_or_refuse():
             return None
         if self.settings_service is None:
             message = t("apply.sensitivity.unavailable", side=_side_label(side))
@@ -7112,7 +7123,7 @@ class AppShell:
         # cat-0x86 service writer. No client-side monotonic clamp: the service
         # layer's _validate_sensitivity_anchors_8point raises on a non-monotonic
         # curve, surfaced here as an apply.sensitivity_8point.failed log entry.
-        if not self._hid_available_or_refuse():
+        if not self._hid_write_available_or_refuse():
             return None
         if self.settings_service is None:
             message = t("apply.sensitivity.unavailable", side=_side_label(side))
@@ -7157,7 +7168,7 @@ class AppShell:
         # preset curves are pre-validated monotonic, so the apply won't trip the
         # service-layer non-decreasing check.
         # Guard before the widget writes (same rationale as the 3-point preset).
-        if not self._hid_available_or_refuse():
+        if not self._hid_write_available_or_refuse():
             return None
         anchors = SENSITIVITY_PRESETS_8POINT.get(name)
         if anchors is None:
@@ -7197,7 +7208,7 @@ class AppShell:
         )
 
     def _apply_axis_inversion(self, side: str, x_tag: str, y_tag: str):
-        if not self._hid_available_or_refuse():
+        if not self._hid_write_available_or_refuse():
             return None
         if self.settings_service is None:
             message = t("apply.axis_inversion.unavailable", side=_side_label(side))
@@ -7227,7 +7238,7 @@ class AppShell:
         return result
 
     def apply_button_binding(self):
-        if not self._hid_available_or_refuse():
+        if not self._hid_write_available_or_refuse():
             return None
         if self.settings_service is None:
             message = t("apply.binding.unavailable")
@@ -7285,7 +7296,7 @@ class AppShell:
         return result
 
     def apply_lighting(self):
-        if not self._hid_available_or_refuse():
+        if not self._hid_write_available_or_refuse():
             return None
         if self.settings_service is None:
             message = t("apply.lighting.unavailable")
@@ -7612,10 +7623,10 @@ class AppShell:
 
         # Save + Apply touches the controller three ways (pre-apply RP
         # capture, the write burst, the post-apply verify read-back).
-        # Refuse the whole action while a threaded HID job is in flight,
-        # BEFORE the disk save, so a refusal never half-completes (saved
-        # but unapplied); the user re-clicks when idle (the confirm modal
-        # is left untouched through a refusal). Plain Save
+        # Refuse the whole action while a threaded HID job is in flight or
+        # first-run consent is pending, BEFORE the disk save, so a refusal
+        # never half-completes (saved but unapplied); the confirm modal is left
+        # untouched through a refusal. Plain Save
         # (apply_to_controller=False) is store-only and stays available.
         if apply_to_controller and self.settings_service is not None:
             import_presence_key = self._safe_import_presence_key
@@ -7643,9 +7654,7 @@ class AppShell:
                         import_presence_generation,
                     )
                 return
-            if not self._hid_available_or_refuse():
-                return
-            if not self._consent_pending_write_allowed_or_refuse():
+            if not self._hid_write_available_or_refuse():
                 return
 
         name = result.generated_name

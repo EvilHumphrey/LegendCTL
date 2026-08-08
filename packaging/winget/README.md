@@ -11,7 +11,7 @@ winget show --id EvilHumphrey.LegendCTL --exact
 
 The versioned folders beside this file are historical submission snapshots.
 They are not the live catalog and must not be copied forward as a new release
-template. Microsoft accepted the package at 2.6.0; future updates are generated
+template. Microsoft accepted the package at 2.6.2; future updates are generated
 from the accepted upstream manifest.
 
 ## Automated update workflow

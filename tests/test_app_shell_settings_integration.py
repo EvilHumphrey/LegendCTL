@@ -4020,8 +4020,8 @@ class PollingRate8000FirmwareHonestyTests(unittest.TestCase):
     *only*, ``_do_write_polling_rate`` reads the rate back once (reusing the
     existing ``get_polling_rate``) and, when the device kept a lower rate,
     surfaces the firmware-capability message and reconciles the combo to the
-    device's real rate. Capable hardware (read-back == 8000) and unverifiable
-    read-backs fall through to the normal success path — never a false block.
+    device's real rate. Capable hardware (read-back == 8000) reaches the normal
+    success path; an unreadable read-back is reported sent-but-unverified.
     """
 
     @staticmethod
@@ -4093,35 +4093,49 @@ class PollingRate8000FirmwareHonestyTests(unittest.TestCase):
         finally:
             i18n.set_locale("en")
 
-    def test_8000_unverifiable_readback_is_trusted(self) -> None:
-        # Fail-safe: read-back returns None (couldn't read) → trust the ACK,
-        # record success, do NOT cry non-commit.
+    def test_8000_unverifiable_readback_is_reported_unverified(self) -> None:
+        # Fail-on-base: a read miss used to emit apply.polling_rate.success.
+        # The transport write succeeded, but no device read confirmed 8K.
         settings_service = MagicMock()
         result = self._ok_8000(settings_service)
         settings_service.get_polling_rate.return_value = None
         shell = self._hydrated_shell(settings_service)
+        shell.device_service = DeviceService(clock=lambda: 0.0)
+        shell.device_service.record_apply_result = MagicMock(
+            wraps=shell.device_service.record_apply_result
+        )
 
         returned = shell.apply_polling_rate("8000Hz")
 
         self.assertIs(returned, result)
-        shell.device_service.record_apply_result.assert_called_once_with(
-            True, "OK: Polling rate 8000Hz written."
-        )
+        success, message = shell.device_service.record_apply_result.call_args.args
+        self.assertTrue(success)
+        self.assertIsInstance(message, LogEntry)
+        self.assertEqual(message.key, "apply.result.write_unverified")
+        self.assertNotEqual(message.key, "apply.polling_rate.success")
+        self.assertEqual(render_log_message(message), i18n.t("apply.result.write_unverified"))
 
-    def test_8000_readback_exception_is_trusted(self) -> None:
-        # Fail-safe: a read-back that raises (e.g. TimeoutError) must not crash
-        # the apply nor be treated as a non-commit.
+    def test_8000_readback_exception_is_reported_unverified(self) -> None:
+        # Fail-on-base: an exception used to emit apply.polling_rate.success.
+        # It must not crash the apply or claim a confirmed commit.
         settings_service = MagicMock()
         result = self._ok_8000(settings_service)
         settings_service.get_polling_rate.side_effect = TimeoutError("no answer")
         shell = self._hydrated_shell(settings_service)
+        shell.device_service = DeviceService(clock=lambda: 0.0)
+        shell.device_service.record_apply_result = MagicMock(
+            wraps=shell.device_service.record_apply_result
+        )
 
         returned = shell.apply_polling_rate("8000Hz")
 
         self.assertIs(returned, result)
-        shell.device_service.record_apply_result.assert_called_once_with(
-            True, "OK: Polling rate 8000Hz written."
-        )
+        success, message = shell.device_service.record_apply_result.call_args.args
+        self.assertTrue(success)
+        self.assertIsInstance(message, LogEntry)
+        self.assertEqual(message.key, "apply.result.write_unverified")
+        self.assertNotEqual(message.key, "apply.polling_rate.success")
+        self.assertEqual(render_log_message(message), i18n.t("apply.result.write_unverified"))
 
     def test_sub_8000_selection_never_reads_back(self) -> None:
         # Only 8000 Hz pays the confirmation read — every other rate is

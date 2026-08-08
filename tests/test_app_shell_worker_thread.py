@@ -1984,6 +1984,29 @@ class RetryFailedSettingsJobbingTests(unittest.TestCase):
         _capture_widget_state(shell._drain_hid_job_completions)
         self.assertFalse(shell._hid_job_in_flight)
 
+    def test_retry_pending_consent_refuses_before_modal_teardown(self) -> None:
+        shell = _make_shell(MagicMock())
+        shell._dpg_context_ready = True
+        shell._consent_pending_verify = True
+        shell._show_first_run_acknowledgment_modal_if_needed = MagicMock()
+        failure, _started, _release, retry_calls = self._gated_failure()
+
+        with patch("zd_app.ui.app_shell.dpg.delete_item") as delete_item:
+            returned: list = []
+            _capture_widget_state(
+                lambda: returned.append(shell._retry_failed_settings([failure])),
+                patch_delete=False,
+            )
+
+        self.assertIsNone(returned[0])
+        self.assertEqual(retry_calls, [])
+        delete_item.assert_not_called()
+        shell._show_first_run_acknowledgment_modal_if_needed.assert_called_once_with()
+        shell.device_service.record_apply_result.assert_called_once_with(
+            False,
+            i18n.t("first_run.pending_write_blocked"),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Busy-staleness surfacing — a job stuck past

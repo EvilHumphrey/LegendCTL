@@ -119,17 +119,21 @@ injected fakes for tests). Version constants: `zd_app/version.py`.
 
 ## Test architecture
 
-3,276 unittest tests (v2.6.2 public maintenance gate, 2026-08-06). Services are tested headlessly; screens are tested
-against a patched DearPyGui that records widget calls (no real rendering — which is why
-real-DPG behaviors like the modal law are additionally pinned by the manual bench tool
-in `tools/`). Suite conventions: system Python 3.12 with `dearpygui` installed (the
-release CI additionally runs the full suite on Python 3.13 — the runtime the release
-binaries ship with — before building); exit
+The public maintenance gate is a `unittest` suite. Services and most screen behavior
+are tested headlessly against a patched DearPyGui that records widget calls. The
+always-on Tier-1 font-pressure matrix is different: every cell launches a fresh
+subprocess with a real DearPyGui context and viewport; `ZD_RENDER_MATRIX=full` adds the
+broader Tier-2 cell set. Other real-DPG behaviors, including the modal law, also have
+isolated subprocess gates and manual bench tools under `tools/`. Suite conventions:
+system Python 3.12 with `dearpygui` installed (the release CI additionally runs the full
+suite on Python 3.13 — the runtime the release binaries ship with — before building); exit
 code 139 (or Windows' signed/unsigned `0xC0000005` form after a complete `OK`
-summary) on teardown is a known DPG artifact, not a failure. The current 36 skips
-include ten exact-signature quarantines for latent font-pressure findings; a timeout,
-unrelated assertion, changed signature, or unexpected success fails the matrix gate.
-Drift/parity/forbidden-phrase gates run as ordinary tests so they fail the build on violation.
+summary) on teardown is a known DPG artifact, not a failure. Skip totals vary by
+environment: Tier-2 cells skip unless the full matrix is requested, and registered
+rendering-stack variants skip only when their exact known-finding signature matches.
+A timeout, unrelated assertion, changed signature, or unexpected success fails the
+matrix gate. Drift/parity/forbidden-phrase gates run as ordinary tests so they fail the
+build on violation.
 
 ## Build & distribution
 
