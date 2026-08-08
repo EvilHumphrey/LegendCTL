@@ -63,7 +63,8 @@ READ_FILE_CANCEL_JOIN_TIMEOUT_MS = 250
 STOP_READER_REAP_TIMEOUT_S = 0.5
 READ_STALE_RESPONSE_MAX_DISCARDS = 64
 WRITE_RETRY_DELAY_S = 0.05
-DISCONNECT_WIN32_ERRORS = {6, 433, 1167, 1168}
+ERROR_DEVICE_NOT_CONNECTED = 1167
+DISCONNECT_WIN32_ERRORS = {6, 433, ERROR_DEVICE_NOT_CONNECTED, 1168}
 SHORT_WRITE_ERROR_CODE = 299
 CATEGORY_POLLING_RATE = 0x11
 POLLING_RATE_SUBCOMMAND = 0x00
@@ -539,6 +540,7 @@ class WriteOutcome(Enum):
     OK = "ok"
     OK_WITH_RETRY = "ok_with_retry"
     DEVICE_NOT_FOUND = "device_not_found"
+    AMBIGUOUS_DEVICE = "ambiguous_device"
     OPEN_FAILED = "open_failed"
     WRITE_FAILED = "write_failed"
     # The write seam reported OK (WriteFile succeeded) but a post-write read-back
@@ -676,6 +678,32 @@ class ControllerSnapshot:
     sensitivity_right_8point: Optional[SensitivityAnchorTuple8] = None
 
 
+@dataclass(frozen=True)
+class ControllerSessionAdmission:
+    """Immutable controller identity epoch for one multi-call operation."""
+
+    generation: int
+    target_path: str
+
+
+def empty_controller_snapshot() -> ControllerSnapshot:
+    """Return an honest all-unread snapshot after admission cannot be proved."""
+
+    return ControllerSnapshot(
+        polling_rate=None,
+        vibration=None,
+        deadzones=None,
+        axis_inversion_left=None,
+        axis_inversion_right=None,
+        sensitivity_left=None,
+        sensitivity_right=None,
+        trigger_left=None,
+        trigger_right=None,
+        button_bindings={},
+        lighting_zones={},
+    )
+
+
 @dataclass
 class SetAxisInversionResult:
     outcome: SetAxisInversionOutcome
@@ -720,12 +748,21 @@ class SetLightingResult:
     verify_inconclusive: bool = False
 
 
+@dataclass(frozen=True)
+class _HandleAdmission:
+    handle: int
+    generation: int
+    target_path: str
+    read_write: bool
+
+
 @dataclass
 class _EnsureHandleResult:
     outcome: WriteOutcome
     handle: Optional[int] = None
     target_path: Optional[str] = None
     error_code: Optional[int] = None
+    admission: Optional[_HandleAdmission] = None
 
 
 @dataclass(frozen=True)
@@ -908,13 +945,66 @@ def enumerate_mi02_hid_paths(
     return paths
 
 
+def _unique_mi02_paths(paths: list[str]) -> tuple[str, ...]:
+    """Return non-empty MI_02 candidates, preserving order and exact uniqueness."""
+
+    return tuple(dict.fromkeys(path for path in paths if isinstance(path, str) and path))
+
+
+def _mi02_device_instance_key(path: str) -> str:
+    """Identify the physical device that owns an MI_02 collection path."""
+
+    parts = path.lower().split("#")
+    if len(parts) >= 3 and parts[2]:
+        return parts[2]
+    return path.lower()
+
+
+def _mi02_paths_are_ambiguous(paths: list[str]) -> bool:
+    candidates = _unique_mi02_paths(paths)
+    return len({_mi02_device_instance_key(path) for path in candidates}) > 1
+
+
+def _mi02_paths_match(left: Optional[str], right: Optional[str]) -> bool:
+    if left is None or right is None:
+        return left is right
+    return left.casefold() == right.casefold()
+
+
 def _choose_mi02_path(paths: list[str]) -> Optional[str]:
-    if not paths:
+    """Choose one physical controller's MI_02 interface, abstaining across units.
+
+    Why abstain: with two Legend units attached, nothing correlates the handle
+    a write burst uses with the unit the UI is displaying, reading, or
+    verifying against, and the handle is then cached for the session. Guessing
+    is a silent wrong-unit write. ``model_fingerprint._choose_mi02_path``
+    (same name, same input) already abstains for exactly this reason on the
+    read-only path; the write path guessed. This is the abstention-only first
+    safety milestone from the multi-controller identity design -- "one
+    uniquely bindable Legend instance keeps today's UX; multiple Legend
+    instances with no selection refuse writes" -- which needs no picker and no
+    identity model.
+
+    One composite controller can legitimately expose several MI_02 collection
+    paths. Those share a device-instance key, so preserve the historical HID
+    path preference within that one physical unit. Distinct instance keys are
+    ambiguous because this service has no controller picker or ContainerId
+    binding with which to choose between them.
+    """
+
+    candidates = _unique_mi02_paths(paths)
+    if not candidates:
         return None
-    for path in paths:
+    if _mi02_paths_are_ambiguous(list(candidates)):
+        logger.warning(
+            "Multiple distinct ZD controllers expose an MI_02 interface; "
+            "abstaining rather than guessing which one the user meant."
+        )
+        return None
+    for path in candidates:
         if path.lower().startswith(r"\\?\hid#"):
             return path
-    return paths[0]
+    return candidates[0]
 
 
 def _default_open_write_handle(path: str) -> tuple[Optional[int], int]:
@@ -1046,6 +1136,11 @@ def _default_read_file(
         # Register from the worker immediately before ReadFile so stop() never
         # observes a blocked reader that has not reached the service registry.
         if on_reader_started is not None and not on_reader_started(threading.current_thread()):
+            # Registration can lose a race with lifecycle invalidation after
+            # the caller acquired its I/O lease. Balance that lease even though
+            # no kernel ReadFile was issued.
+            if on_reader_finished is not None:
+                on_reader_finished(threading.current_thread())
             return
         try:
             ok = bool(
@@ -1660,11 +1755,25 @@ class SettingsService:
         self._write_handle: Optional[int] = None
         self._read_write_handle: Optional[int] = None
         self._target_path: Optional[str] = None
+        # Latched whenever continuity with the admitted controller can no
+        # longer be proved (a disconnect-class I/O failure or a retry that
+        # observes another path). While set, this service refuses to bind to
+        # ANY controller until stop()/restart explicitly re-admits one.
+        self._identity_change_latched: bool = False
         self._last_open_error: Optional[int] = None
         # One lock owns cached-handle swaps and the current synchronous-reader
         # registry. Never hold it around CreateFileW, ReadFile, WriteFile, or a
         # join: those operations may block indefinitely on real hardware.
         self._handle_lock = threading.Lock()
+        self._lifecycle_lock = threading.RLock()
+        self._operation_local = threading.local()
+        self._session_generation = 0
+        self._active_io_leases: dict[int, int] = {}
+        self._retired_io_handles: set[int] = set()
+        # A synchronous reader that survives CancelIoEx may require CloseHandle
+        # itself to break the kernel wait. Keep its raw value quarantined until
+        # the worker exits, but do not close it twice when the lease releases.
+        self._forced_closed_io_handles: set[int] = set()
         self._active_reader: threading.Thread | None = None
         self._read_write_generation = 0
         # Cached 8-point (cat 0x86) capability verdict for the current HID
@@ -1681,6 +1790,137 @@ class SettingsService:
     def is_started(self) -> bool:
         with self._handle_lock:
             return self._write_handle is not None or self._read_write_handle is not None
+
+    def _admission_is_current_locked(self, admission: _HandleAdmission) -> bool:
+        current_handle = (
+            self._read_write_handle if admission.read_write else self._write_handle
+        )
+        return (
+            not self._identity_change_latched
+            and self._session_generation == admission.generation
+            and _mi02_paths_match(self._target_path, admission.target_path)
+            and current_handle == admission.handle
+        )
+
+    def _current_admission_locked(self, *, read_write: bool) -> Optional[_HandleAdmission]:
+        handle = self._read_write_handle if read_write else self._write_handle
+        if handle is None or self._target_path is None:
+            return None
+        return _HandleAdmission(
+            handle=handle,
+            generation=self._session_generation,
+            target_path=self._target_path,
+            read_write=read_write,
+        )
+
+    def _admission_is_current(self, admission: _HandleAdmission) -> bool:
+        with self._handle_lock:
+            return self._admission_is_current_locked(admission)
+
+    def _session_admission_from_handle(
+        self,
+        admission: _HandleAdmission,
+    ) -> ControllerSessionAdmission:
+        return ControllerSessionAdmission(
+            generation=admission.generation,
+            target_path=admission.target_path,
+        )
+
+    def session_admission_is_current(
+        self,
+        admission: ControllerSessionAdmission,
+    ) -> bool:
+        with self._handle_lock:
+            return (
+                not self._identity_change_latched
+                and self._session_generation == admission.generation
+                and _mi02_paths_match(self._target_path, admission.target_path)
+            )
+
+    def admit_read_batch(self) -> Optional[ControllerSessionAdmission]:
+        admission = self._ensure_read_write_admission()
+        if admission is None:
+            return None
+        return self._session_admission_from_handle(admission)
+
+    def admit_write_operation(self) -> Optional[ControllerSessionAdmission]:
+        result = self._ensure_handle()
+        if result.admission is None:
+            return None
+        return self._session_admission_from_handle(result.admission)
+
+    def run_write_operation(
+        self,
+        admission: ControllerSessionAdmission,
+        callback: Callable[[], _R],
+    ) -> _R:
+        """Run setters with ``_ensure_handle`` pinned to one admitted session.
+
+        The coordinator's current-session precheck is useful for early aborts,
+        but it cannot itself make the later public setter atomic.  This
+        thread-local binding carries the same token into ``_ensure_handle``;
+        even a stop/start in that gap makes the setter fail closed instead of
+        independently admitting the replacement.
+        """
+
+        missing = object()
+        previous = getattr(self._operation_local, "write_admission", missing)
+        self._operation_local.write_admission = admission
+        try:
+            return callback()
+        finally:
+            if previous is missing:
+                del self._operation_local.write_admission
+            else:
+                self._operation_local.write_admission = previous
+
+    def _acquire_io_lease(self, admission: _HandleAdmission) -> bool:
+        # Serialize admission with stop/latch invalidation. The lock is held
+        # only for this non-blocking bookkeeping, never around native I/O.
+        with self._lifecycle_lock:
+            with self._handle_lock:
+                if not self._admission_is_current_locked(admission):
+                    return False
+                self._active_io_leases[admission.handle] = (
+                    self._active_io_leases.get(admission.handle, 0) + 1
+                )
+                return True
+
+    def _release_io_lease(self, handle: int) -> None:
+        close_retired = False
+        with self._handle_lock:
+            leases = self._active_io_leases.get(handle, 0)
+            if leases <= 1:
+                self._active_io_leases.pop(handle, None)
+                if handle in self._retired_io_handles:
+                    self._retired_io_handles.remove(handle)
+                    if handle in self._forced_closed_io_handles:
+                        self._forced_closed_io_handles.remove(handle)
+                    else:
+                        close_retired = True
+            else:
+                self._active_io_leases[handle] = leases - 1
+        if close_retired:
+            self._close_handles([handle], self._close_handle)
+
+    def _retire_or_close_handles(
+        self,
+        handles: list[int],
+        *,
+        force_close: set[int] | None = None,
+    ) -> None:
+        force_close = force_close or set()
+        close_now: list[int] = []
+        with self._handle_lock:
+            for handle in handles:
+                if self._active_io_leases.get(handle, 0) > 0:
+                    self._retired_io_handles.add(handle)
+                    if handle in force_close:
+                        self._forced_closed_io_handles.add(handle)
+                        close_now.append(handle)
+                else:
+                    close_now.append(handle)
+        self._close_handles(close_now, self._close_handle)
 
     def _register_active_reader(
         self,
@@ -1715,15 +1955,14 @@ class SettingsService:
                 return None
             return self._read_write_generation
 
-    def _current_reader_for_stop(self) -> tuple[int, threading.Thread] | None:
-        with self._handle_lock:
-            reader = self._active_reader
-            handle = self._read_write_handle
-            if reader is None or handle is None:
-                return None
-            if getattr(reader, "_settings_service_generation", None) != self._read_write_generation:
-                return None
-            return handle, reader
+    def _current_reader_locked(self) -> tuple[int, threading.Thread] | None:
+        reader = self._active_reader
+        handle = self._read_write_handle
+        if reader is None or handle is None:
+            return None
+        if getattr(reader, "_settings_service_generation", None) != self._read_write_generation:
+            return None
+        return handle, reader
 
     @staticmethod
     def _close_handles(handles: list[int], close_handle: Callable[[int], bool]) -> None:
@@ -1733,13 +1972,15 @@ class SettingsService:
             except Exception:  # pragma: no cover - best-effort cleanup
                 logger.debug("close_handle(%s) raised", handle, exc_info=True)
 
-    def _reap_current_reader_before_stop(self) -> None:
-        current = self._current_reader_for_stop()
+    def _reap_reader_before_close(
+        self,
+        current: tuple[int, threading.Thread] | None,
+    ) -> set[int]:
         if current is None:
-            return
+            return set()
         handle, reader = current
         if not reader.is_alive():
-            return
+            return set()
 
         deadline = time.monotonic() + STOP_READER_REAP_TIMEOUT_S
         try:
@@ -1766,6 +2007,8 @@ class SettingsService:
                 handle,
                 STOP_READER_REAP_TIMEOUT_S * 1000,
             )
+            return {handle}
+        return set()
 
     def _clear_all_cached_handles_locked(self) -> list[int]:
         """Null cached handles while holding ``_handle_lock`` and return close work."""
@@ -1787,6 +2030,7 @@ class SettingsService:
         # the lock must see stop/invalidation and discard its candidate instead
         # of resurrecting a field after shutdown.
         self._read_write_generation += 1
+        self._session_generation += 1
         return handles
 
     def start(self) -> SetPollingRateOutcome:
@@ -1797,87 +2041,198 @@ class SettingsService:
     def stop(self) -> None:
         """Reap a current reader, then null and close cached MI_02 handles."""
 
-        # Never close a handle underneath the registered reader when we can
-        # still request cancellation and give it a bounded chance to exit.
-        self._reap_current_reader_before_stop()
-        with self._handle_lock:
-            handles = self._clear_all_cached_handles_locked()
-        self._close_handles(handles, self._close_handle)
+        with self._lifecycle_lock:
+            with self._handle_lock:
+                # Invalidate first, in the same critical section as the reader
+                # snapshot. A newly dispatched reader now fails registration;
+                # an already registered one is exactly the snapshot reaped
+                # below. No reader can appear in a reap-then-clear gap.
+                self._identity_change_latched = False
+                current_reader = self._current_reader_locked()
+                handles = self._clear_all_cached_handles_locked()
+            force_close = self._reap_reader_before_close(current_reader)
+            self._retire_or_close_handles(handles, force_close=force_close)
 
-    def _invalidate_cached_handles(self, *, error_code: int, context: str) -> None:
-        # A dropped/disconnected handle means a possibly-different controller on
-        # reconnect, so the cached 0x86 verdict must be re-probed.
-        with self._handle_lock:
-            handles = self._clear_all_cached_handles_locked()
+    def _latch_identity_change(
+        self,
+        replacement_handle: Optional[int],
+        *,
+        expected_generation: Optional[int] = None,
+        expected_target_path: Optional[str] = None,
+        expected_handle: Optional[int] = None,
+        require_write_handle_absent: bool = False,
+    ) -> bool:
+        """Discard untrusted handles and stop binding after identity continuity is lost.
 
-        logger.info(
-            "invalidating SettingsService cached handle(s) after %s "
-            "(Win32 err %s)",
-            context,
-            error_code,
-        )
-        self._close_handles(handles, self._close_handle)
+        Called immediately on a disconnect-class I/O failure, before any retry
+        or re-enumeration, and defensively if a concurrent retry observes a
+        different target path. Two things must happen and neither is sufficient
+        alone: cached/replacement handles are dropped so no later field finds
+        one, and the latch is set so no later field can enumerate a replacement.
 
-    def _poison_read_write_handle(self, handle: int, *, cancel_error: int | None) -> None:
+        Deliberately cleared ONLY by :meth:`stop`; disconnect handling must keep
+        it set until the application admits a fresh controller-presence session.
+        The production presence lifecycle calls ``stop()`` on an observed
+        reconnect (or after an in-flight HID job drains), so recovery re-admits
+        the controller without weakening the current write burst's boundary.
+        """
+
+        def _preconditions_hold_locked() -> bool:
+            return expected_generation is None or not (
+                self._session_generation != expected_generation
+                or not _mi02_paths_match(self._target_path, expected_target_path)
+                or (
+                    expected_handle is not None
+                    and expected_handle
+                    not in (self._write_handle, self._read_write_handle)
+                )
+                or (require_write_handle_absent and self._write_handle is not None)
+            )
+
+        with self._lifecycle_lock:
+            with self._handle_lock:
+                if not _preconditions_hold_locked():
+                    return False
+                self._identity_change_latched = True
+                current_reader = self._current_reader_locked()
+                handles = self._clear_all_cached_handles_locked()
+                if replacement_handle is not None and replacement_handle not in handles:
+                    handles.append(replacement_handle)
+            force_close = self._reap_reader_before_close(current_reader)
+            self._retire_or_close_handles(handles, force_close=force_close)
+            return True
+
+    def _poison_read_write_handle(
+        self,
+        admission: _HandleAdmission,
+        *,
+        cancel_error: int | None,
+    ) -> None:
         """Drop the timed-out read handle before attempting its final close."""
 
-        with self._handle_lock:
-            if self._read_write_handle != handle:
-                return
-            self._read_write_handle = None
-            # Separate read/write and write-only opens normally produce distinct
-            # handles, but preserve the no-stale-field invariant for injected
-            # fakes (or an unexpected duplicate) too.
-            if self._write_handle == handle:
-                self._write_handle = None
-            if self._write_handle is None:
-                self._target_path = None
-            self._last_open_error = None
-            self._supports_8point = None
-            self._read_write_generation += 1
+        with self._lifecycle_lock:
+            with self._handle_lock:
+                if not self._admission_is_current_locked(admission):
+                    return
+                # A reader that survived cancellation must both invalidate the
+                # session and break the kernel wait. Latching prevents refresh
+                # from accumulating replacements; forced close breaks the
+                # circular wait while the raw value remains quarantined by its
+                # outstanding lease until the worker actually exits.
+                self._identity_change_latched = True
+                handles = self._clear_all_cached_handles_locked()
+            self._retire_or_close_handles(
+                handles,
+                force_close={admission.handle},
+            )
 
         logger.warning(
             "poisoning SettingsService read+write handle after unreaped HID read "
             "(CancelIoEx Win32 err %s)",
             cancel_error,
         )
-        self._close_handles([handle], self._close_handle)
+        logger.warning("SettingsService latched until explicit stop after unreaped HID read")
 
     def _write_payload(
         self,
-        handle: int,
+        admission: _HandleAdmission,
         payload: bytes,
         *,
         context: str = "payload",
     ) -> tuple[bool, int, int]:
-        ok, err, bytes_written = self._write_file(handle, payload)
-        if ok and bytes_written != len(payload):
-            logger.warning(
-                "SettingsService short write for %s: wrote %s of %s bytes",
-                context,
-                bytes_written,
-                len(payload),
-            )
-            ok = False
-            err = SHORT_WRITE_ERROR_CODE
-        if not ok and _is_disconnect_win32_error(err):
-            self._invalidate_cached_handles(
-                error_code=err,
-                context="WriteFile failure",
-            )
-        return ok, err, bytes_written
+        if not self._acquire_io_lease(admission):
+            return False, ERROR_DEVICE_NOT_CONNECTED, 0
+
+        try:
+            ok, err, bytes_written = self._write_file(admission.handle, payload)
+            if not self._admission_is_current(admission):
+                # The leased handle could not be reused, so any bytes stayed on
+                # the originally admitted controller. Still abstain from an OK:
+                # the lifecycle reset means this caller can no longer attribute
+                # completion to its current session.
+                return False, ERROR_DEVICE_NOT_CONNECTED, bytes_written
+            if ok and bytes_written != len(payload):
+                logger.warning(
+                    "SettingsService short write for %s: wrote %s of %s bytes",
+                    context,
+                    bytes_written,
+                    len(payload),
+                )
+                ok = False
+                err = SHORT_WRITE_ERROR_CODE
+            if not ok and _is_disconnect_win32_error(err):
+                # A disconnect destroys the identity proof for this user operation.
+                # Latch before returning so neither the built-in retry nor a later
+                # field in an Apply/Restore/Safe Import burst can enumerate a
+                # replacement controller and replay the admitted payload there.
+                latched = self._latch_identity_change(
+                    None,
+                    expected_generation=admission.generation,
+                    expected_target_path=admission.target_path,
+                    expected_handle=admission.handle,
+                )
+                if latched:
+                    logger.info(
+                        "latched SettingsService after WriteFile disconnect for %s "
+                        "(Win32 err %s)",
+                        context,
+                        err,
+                    )
+            return ok, err, bytes_written
+        finally:
+            self._release_io_lease(admission.handle)
 
     def _write_payload_with_retry(
         self,
-        handle: int,
+        admission: _HandleAdmission,
         payload: bytes,
         *,
         context: str,
     ) -> _WritePayloadResult:
-        ok, err, bytes_written = self._write_payload(handle, payload, context=context)
+        if admission.read_write or not self._admission_is_current(admission):
+            return _WritePayloadResult(
+                ok=False,
+                err=ERROR_DEVICE_NOT_CONNECTED,
+                bytes_written=0,
+                retried=False,
+            )
+
+        ok, err, bytes_written = self._write_payload(
+            admission,
+            payload,
+            context=context,
+        )
         if ok:
             return _WritePayloadResult(
                 ok=True,
+                err=err,
+                bytes_written=bytes_written,
+                retried=False,
+            )
+
+        if _is_disconnect_win32_error(err):
+            logger.warning(
+                "SettingsService refusing to retry %s after disconnect "
+                "(Win32 err %s); a fresh controller-presence binding is required.",
+                context,
+                err,
+            )
+            return _WritePayloadResult(
+                ok=False,
+                err=err,
+                bytes_written=bytes_written,
+                retried=False,
+            )
+
+        if not self._admission_is_current(admission):
+            logger.warning(
+                "SettingsService refusing to retry %s after controller lifecycle "
+                "or target transition (Win32 err %s)",
+                context,
+                err,
+            )
+            return _WritePayloadResult(
+                ok=False,
                 err=err,
                 bytes_written=bytes_written,
                 retried=False,
@@ -1890,28 +2245,16 @@ class SettingsService:
         )
         self._sleep(WRITE_RETRY_DELAY_S)
 
-        retry_handle = handle
-        with self._handle_lock:
-            write_handle_missing = self._write_handle is None
-        if write_handle_missing:
-            retry_handle_result = self._ensure_handle()
-            if (
-                retry_handle_result.outcome != SetPollingRateOutcome.OK
-                or retry_handle_result.handle is None
-            ):
-                retry_err = retry_handle_result.error_code
-                if retry_err is None:
-                    retry_err = err
-                return _WritePayloadResult(
-                    ok=False,
-                    err=retry_err,
-                    bytes_written=bytes_written,
-                    retried=True,
-                )
-            retry_handle = retry_handle_result.handle
+        if not self._admission_is_current(admission):
+            return _WritePayloadResult(
+                ok=False,
+                err=err,
+                bytes_written=bytes_written,
+                retried=False,
+            )
 
         retry_ok, retry_err, retry_bytes_written = self._write_payload(
-            retry_handle,
+            admission,
             payload,
             context=context,
         )
@@ -1922,13 +2265,14 @@ class SettingsService:
             retried=True,
         )
 
-    def _execute_write(
+    def _execute_write_admitted(
         self,
         payload: bytes,
         *,
         context: str,
         make_result: Callable[..., _R],
-    ) -> _R:
+        required_admission: Optional[_HandleAdmission] = None,
+    ) -> tuple[_R, Optional[_HandleAdmission]]:
         """Shared ensure-handle -> write-with-retry scaffold for ``set_*`` writers.
 
         ``make_result`` (typically a ``functools.partial`` of the feature's result
@@ -1938,16 +2282,31 @@ class SettingsService:
         """
 
         start_ts = self._clock()
-        handle_result = self._ensure_handle()
-        if handle_result.outcome != WriteOutcome.OK or handle_result.handle is None:
+        if required_admission is None:
+            handle_result = self._ensure_handle()
+        else:
+            handle_result = _EnsureHandleResult(
+                outcome=WriteOutcome.OK,
+                handle=required_admission.handle,
+                target_path=required_admission.target_path,
+                admission=required_admission,
+            )
+        if (
+            handle_result.outcome != WriteOutcome.OK
+            or handle_result.handle is None
+            or handle_result.admission is None
+        ):
             outcome = handle_result.outcome
-            if outcome != WriteOutcome.DEVICE_NOT_FOUND:
+            if outcome not in (
+                WriteOutcome.DEVICE_NOT_FOUND,
+                WriteOutcome.AMBIGUOUS_DEVICE,
+            ):
                 outcome = WriteOutcome.OPEN_FAILED
             error_code: Optional[int] = handle_result.error_code
             bytes_written: Optional[int] = None
         else:
             write_result = self._write_payload_with_retry(
-                handle_result.handle,
+                handle_result.admission,
                 payload,
                 context=context,
             )
@@ -1959,13 +2318,28 @@ class SettingsService:
                 error_code = None
             bytes_written = write_result.bytes_written
 
-        return make_result(
+        result = make_result(
             outcome=outcome,
             error_code=error_code,
             bytes_written=bytes_written,
             payload_hex=payload.hex(),
             elapsed_ms=round((self._clock() - start_ts) * 1000),
         )
+        return result, handle_result.admission
+
+    def _execute_write(
+        self,
+        payload: bytes,
+        *,
+        context: str,
+        make_result: Callable[..., _R],
+    ) -> _R:
+        result, _admission = self._execute_write_admitted(
+            payload,
+            context=context,
+            make_result=make_result,
+        )
+        return result
 
     def set_polling_rate(self, rate: PollingRate) -> SetPollingRateResult:
         """Write the confirmed polling-rate feature report."""
@@ -2041,19 +2415,46 @@ class SettingsService:
 
         attempts = max(1, int(attempts))
         last_result: Optional[SetStepSizeResult] = None
+        operation_admission: Optional[_HandleAdmission] = None
         saw_confirmed_mismatch = False
         for attempt in range(attempts):
-            result = self.set_step_size(value)
+            if (
+                last_result is not None
+                and (
+                    operation_admission is None
+                    or not self._admission_is_current(operation_admission)
+                )
+            ):
+                logger.warning(
+                    "step_size verify stopped before rewrite: controller target "
+                    "continuity was lost; returning the successful write as unverified"
+                )
+                return replace(last_result, verify_inconclusive=True)
+            result, write_admission = self._execute_write_admitted(
+                build_step_size_payload(value),
+                context=f"step_size:{value}",
+                make_result=partial(SetStepSizeResult, value=value),
+                required_admission=operation_admission,
+            )
             last_result = result
             # A write-layer failure (DEVICE_NOT_FOUND / OPEN_FAILED /
             # WRITE_FAILED) is terminal for this attempt's purpose: there is no
             # committed-vs-rejected ambiguity to resolve, so surface it as-is.
             if result.outcome not in (WriteOutcome.OK, WriteOutcome.OK_WITH_RETRY):
                 return result
+            if operation_admission is None:
+                operation_admission = write_admission
+            if (
+                operation_admission is None
+                or not self._admission_is_current(operation_admission)
+            ):
+                return replace(result, verify_inconclusive=True)
 
             # Settle so the firmware leaves its post-write quiet window before we
             # read back; rides the injected sleep seam (no real sleep in tests).
             self._sleep(settle_s)
+            if not self._admission_is_current(operation_admission):
+                return replace(result, verify_inconclusive=True)
 
             # The read-back can RAISE on real hardware -- a HID read timeout
             # (``TimeoutError``, raised by the bounded reader at the ReadFile
@@ -2075,8 +2476,12 @@ class SettingsService:
                     attempts,
                     exc,
                 )
+                if not self._admission_is_current(operation_admission):
+                    return replace(result, verify_inconclusive=True)
                 continue
 
+            if not self._admission_is_current(operation_admission):
+                return replace(result, verify_inconclusive=True)
             if readback == value:
                 # Committed. Preserve the real write outcome (OK / OK_WITH_RETRY).
                 return result
@@ -2091,6 +2496,8 @@ class SettingsService:
                     attempt + 1,
                     attempts,
                 )
+                if not self._admission_is_current(operation_admission):
+                    return replace(result, verify_inconclusive=True)
                 continue
 
             # CONFIRMED mismatch: the read SUCCEEDED and returned a different,
@@ -2208,8 +2615,13 @@ class SettingsService:
         if not isinstance(slot, ButtonSlot):
             raise TypeError(f"slot must be a ButtonSlot, got {slot!r}")
 
+        read_session = self.admit_read_batch()
+        if read_session is None:
+            return None
         last_error: Optional[str] = None
         for attempt in range(BUTTON_BINDING_READ_ATTEMPTS):
+            if not self.session_admission_is_current(read_session):
+                return None
             if attempt:
                 # Only sleep after a failure -- no added latency on the happy
                 # path. self._sleep is the injected seam (tests stub it to a
@@ -2227,8 +2639,12 @@ class SettingsService:
             except SettingsServiceError as exc:
                 last_error = str(exc)
                 logger.warning("get_button_binding(slot=%r) failed: %s", slot, exc)
+                if not self.session_admission_is_current(read_session):
+                    return None
                 continue
 
+            if not self.session_admission_is_current(read_session):
+                return None
             mapping = self._decode_button_binding_response(response, slot)
             if mapping is not None:
                 return mapping
@@ -2295,9 +2711,13 @@ class SettingsService:
         if (
             handle_result.outcome != SetPollingRateOutcome.OK
             or handle_result.handle is None
+            or handle_result.admission is None
         ):
             outcome = handle_result.outcome
-            if outcome != WriteOutcome.DEVICE_NOT_FOUND:
+            if outcome not in (
+                WriteOutcome.DEVICE_NOT_FOUND,
+                WriteOutcome.AMBIGUOUS_DEVICE,
+            ):
                 outcome = WriteOutcome.OPEN_FAILED
             return SetBackPaddleBindingResult(
                 outcome=outcome,
@@ -2319,10 +2739,8 @@ class SettingsService:
             written = 0
             retried_any = False
             for payload in payloads:
-                with self._handle_lock:
-                    current_handle = self._write_handle or handle_result.handle
                 write_result = self._write_payload_with_retry(
-                    current_handle,
+                    handle_result.admission,
                     payload,
                     context=f"back_paddle:{slot.name}",
                 )
@@ -2332,6 +2750,7 @@ class SettingsService:
                     return False, written, retried_any, write_result.err
             return True, written, retried_any, None
 
+        admitted_target_path = handle_result.target_path
         ok, total_written, retried, last_err = _write_pair()
         # Back-paddle categories are write-only (no read-back channel), so a
         # frame that fails AFTER an earlier frame in the pair committed would
@@ -2342,7 +2761,12 @@ class SettingsService:
         # pair; a permanent failure still returns WRITE_FAILED — never a false
         # OK. Single-frame (unbound) writes already self-retry per frame, so the
         # unit re-attempt only applies to the multi-frame bound case.
-        if not ok and len(payloads) > 1:
+        if (
+            not ok
+            and len(payloads) > 1
+            and not _is_disconnect_win32_error(last_err)
+            and self.target_path == admitted_target_path
+        ):
             retried = True
             ok, retry_written, _, last_err = _write_pair()
             total_written += retry_written
@@ -2523,7 +2947,7 @@ class SettingsService:
         with a short timeout, retrying exactly once only when that read returns
         no decoded curve; the device is deemed capable iff a fully valid
         8-point curve decodes. The verdict is cached in ``self._supports_8point``
-        and reset when handles drop (see ``stop`` / ``_invalidate_cached_handles``),
+        and reset when handles drop (see ``stop`` / the target-loss latch),
         so a freshly connected controller re-probes.
 
         Defaults to ``False`` on any failure. The asymmetry is deliberate: a
@@ -2537,6 +2961,9 @@ class SettingsService:
             cached_support = self._supports_8point
         if cached_support is not None:
             return cached_support
+        probe_admission = self._ensure_read_write_admission()
+        if probe_admission is None:
+            return False
         curve = self.get_sensitivity_curve_8point(
             SENSITIVITY_STICK_LEFT,
             timeout_ms=SENSITIVITY_8POINT_PROBE_TIMEOUT_MS,
@@ -2547,8 +2974,9 @@ class SettingsService:
                 timeout_ms=SENSITIVITY_8POINT_PROBE_TIMEOUT_MS,
             )
         with self._handle_lock:
-            # A concurrent stop/invalidation deliberately clears the cache;
-            # caching this completed probe remains safe for the current fields.
+            if not self._admission_is_current_locked(probe_admission):
+                # A stale A probe must never publish capability into B's epoch.
+                return False
             self._supports_8point = curve is not None
             return self._supports_8point
 
@@ -2817,21 +3245,55 @@ class SettingsService:
         ``LightingSettings``. Mirrors ``set_step_size_verified`` exactly.
         """
 
+        payload = build_lighting_payload(zone, settings)
+        validated = _validate_lighting_settings(settings)
         attempts = max(1, int(attempts))
         last_result: Optional[SetLightingResult] = None
+        operation_admission: Optional[_HandleAdmission] = None
         saw_confirmed_mismatch = False
         for attempt in range(attempts):
-            result = self.set_zone_lighting(zone, settings)
+            if (
+                last_result is not None
+                and (
+                    operation_admission is None
+                    or not self._admission_is_current(operation_admission)
+                )
+            ):
+                logger.warning(
+                    "lighting %s verify stopped before rewrite: controller target "
+                    "continuity was lost; returning the successful write as unverified",
+                    zone.name,
+                )
+                return replace(last_result, verify_inconclusive=True)
+            result, write_admission = self._execute_write_admitted(
+                payload,
+                context=f"lighting:{zone.name}",
+                make_result=partial(
+                    SetLightingResult,
+                    zone=zone.name.lower(),
+                    settings=validated,
+                ),
+                required_admission=operation_admission,
+            )
             last_result = result
             # A write-layer failure (DEVICE_NOT_FOUND / OPEN_FAILED /
             # WRITE_FAILED) is terminal for this attempt's purpose: there is no
             # committed-vs-rejected ambiguity to resolve, so surface it as-is.
             if result.outcome not in (WriteOutcome.OK, WriteOutcome.OK_WITH_RETRY):
                 return result
+            if operation_admission is None:
+                operation_admission = write_admission
+            if (
+                operation_admission is None
+                or not self._admission_is_current(operation_admission)
+            ):
+                return replace(result, verify_inconclusive=True)
 
             # Settle so the firmware leaves its post-write quiet window before we
             # read back; rides the injected sleep seam (no real sleep in tests).
             self._sleep(settle_s)
+            if not self._admission_is_current(operation_admission):
+                return replace(result, verify_inconclusive=True)
 
             # ``get_zone_lighting`` already swallows ``SettingsServiceError`` into
             # ``None`` internally, but a HID read timeout (``TimeoutError``, a
@@ -2850,8 +3312,12 @@ class SettingsService:
                     attempts,
                     exc,
                 )
+                if not self._admission_is_current(operation_admission):
+                    return replace(result, verify_inconclusive=True)
                 continue
 
+            if not self._admission_is_current(operation_admission):
+                return replace(result, verify_inconclusive=True)
             if readback == settings:
                 # Committed. Preserve the real write outcome (OK / OK_WITH_RETRY).
                 return result
@@ -2867,6 +3333,8 @@ class SettingsService:
                     attempt + 1,
                     attempts,
                 )
+                if not self._admission_is_current(operation_admission):
+                    return replace(result, verify_inconclusive=True)
                 continue
 
             # CONFIRMED mismatch: the read SUCCEEDED and returned a different
@@ -2954,11 +3422,16 @@ class SettingsService:
         how many getter calls were issued vs planned.
         """
 
+        batch_admission = self.admit_read_batch()
+        if batch_admission is None:
+            return empty_controller_snapshot()
+
         budget_s = self._batch_read_budget_s
         deadline = (self._clock() + budget_s) if budget_s > 0 else None
         issued = 0
         skipped = 0
         exhausted = False
+        identity_lost = False
         self.last_read_skipped_fields = 0
 
         def _within_budget() -> bool:
@@ -2966,7 +3439,13 @@ class SettingsService:
             # included). Once the deadline passes, stay exhausted without
             # consulting the clock again so the whole tail of the batch is
             # skipped uniformly.
-            nonlocal issued, skipped, exhausted
+            nonlocal issued, skipped, exhausted, identity_lost
+            if (
+                not identity_lost
+                and not self.session_admission_is_current(batch_admission)
+            ):
+                identity_lost = True
+                exhausted = True
             if not exhausted and deadline is not None and self._clock() >= deadline:
                 exhausted = True
             if exhausted:
@@ -3033,6 +3512,17 @@ class SettingsService:
         )
         step_size = self.get_step_size() if _within_budget() else None
 
+        if (
+            identity_lost
+            or not self.session_admission_is_current(batch_admission)
+        ):
+            logger.warning(
+                "get_all_settings: controller identity changed during batch; "
+                "discarding all mixed or stale values"
+            )
+            self.last_read_skipped_fields = skipped
+            return empty_controller_snapshot()
+
         if skipped:
             self.last_read_skipped_fields = skipped
             logger.warning(
@@ -3063,48 +3553,168 @@ class SettingsService:
         )
 
     def _ensure_handle(self) -> _EnsureHandleResult:
+        # Serialize the pre-open quarantine check through candidate commit with
+        # stop/latch/poison. Otherwise a forced-close can occur between a
+        # precheck and CreateFile, recreating the same numeric raw handle while
+        # the old reader is still able to resume.
+        with self._lifecycle_lock:
+            return self._ensure_handle_under_lifecycle()
+
+    def _ensure_handle_under_lifecycle(self) -> _EnsureHandleResult:
         with self._handle_lock:
-            if self._write_handle is not None:
+            if self._forced_closed_io_handles:
+                # A force-closed synchronous reader has not left user space yet.
+                # Refuse before enumeration/CreateFile so no replacement OS
+                # object can reuse a quarantined raw value under that reader.
+                return _EnsureHandleResult(
+                    outcome=SetPollingRateOutcome.OPEN_FAILED
+                )
+            bound_admission = getattr(
+                self._operation_local,
+                "write_admission",
+                None,
+            )
+            if bound_admission is not None:
+                if (
+                    self._write_handle is None
+                    or self._identity_change_latched
+                    or self._session_generation != bound_admission.generation
+                    or not _mi02_paths_match(
+                        self._target_path,
+                        bound_admission.target_path,
+                    )
+                ):
+                    return _EnsureHandleResult(
+                        outcome=SetPollingRateOutcome.DEVICE_NOT_FOUND
+                    )
+                admission = self._current_admission_locked(read_write=False)
                 return _EnsureHandleResult(
                     outcome=SetPollingRateOutcome.OK,
                     handle=self._write_handle,
                     target_path=self._target_path,
+                    admission=admission,
+                )
+            if self._identity_change_latched:
+                # A transaction already lost continuity with its admitted
+                # controller. Rebinding would let the rest of the burst land
+                # on a replacement, so fail closed until stop().
+                return _EnsureHandleResult(
+                    outcome=SetPollingRateOutcome.DEVICE_NOT_FOUND
+                )
+            if self._write_handle is not None:
+                admission = self._current_admission_locked(read_write=False)
+                return _EnsureHandleResult(
+                    outcome=SetPollingRateOutcome.OK,
+                    handle=self._write_handle,
+                    target_path=self._target_path,
+                    admission=admission,
                 )
             generation = self._read_write_generation
+            session_generation = self._session_generation
+            cached_target_path = self._target_path
 
         # Enumeration and CreateFileW remain outside the lock: both may block.
-        target_path = _choose_mi02_path(self._enumerate_paths())
+        enumerated_paths = self._enumerate_paths()
+        if cached_target_path is not None:
+            # A read+write handle has already admitted one exact interface for
+            # this session. The first write-only open must remain on it; running
+            # the generic chooser again could silently replace A with B.
+            target_path = next(
+                (
+                    path
+                    for path in _unique_mi02_paths(enumerated_paths)
+                    if path.casefold() == cached_target_path.casefold()
+                ),
+                None,
+            )
+            if target_path is None:
+                self._latch_identity_change(
+                    None,
+                    expected_generation=session_generation,
+                    expected_target_path=cached_target_path,
+                    require_write_handle_absent=True,
+                )
+                return _EnsureHandleResult(
+                    outcome=SetPollingRateOutcome.DEVICE_NOT_FOUND,
+                    target_path=cached_target_path,
+                )
+        else:
+            target_path = _choose_mi02_path(enumerated_paths)
         if target_path is None:
+            no_target_outcome = (
+                SetPollingRateOutcome.AMBIGUOUS_DEVICE
+                if _mi02_paths_are_ambiguous(enumerated_paths)
+                else SetPollingRateOutcome.DEVICE_NOT_FOUND
+            )
             with self._handle_lock:
                 if self._write_handle is not None:
+                    admission = self._current_admission_locked(read_write=False)
                     return _EnsureHandleResult(
                         outcome=SetPollingRateOutcome.OK,
                         handle=self._write_handle,
                         target_path=self._target_path,
+                        admission=admission,
                     )
-                if self._read_write_generation == generation:
+                if (
+                    self._read_write_generation == generation
+                    and _mi02_paths_match(self._target_path, cached_target_path)
+                ):
                     self._target_path = None
                     self._last_open_error = None
-            return _EnsureHandleResult(outcome=SetPollingRateOutcome.DEVICE_NOT_FOUND)
+            return _EnsureHandleResult(outcome=no_target_outcome)
 
         handle, err = self._open_write_handle(target_path)
+        if cached_target_path is not None and handle is None:
+            self._latch_identity_change(
+                None,
+                expected_generation=session_generation,
+                expected_target_path=cached_target_path,
+                require_write_handle_absent=True,
+            )
+            return _EnsureHandleResult(
+                outcome=SetPollingRateOutcome.OPEN_FAILED,
+                target_path=target_path,
+                error_code=err,
+            )
         close_candidate: int | None = None
         with self._handle_lock:
             if self._write_handle is not None:
                 if handle is not None and handle != self._write_handle:
                     close_candidate = handle
+                admission = self._current_admission_locked(read_write=False)
                 result = _EnsureHandleResult(
                     outcome=SetPollingRateOutcome.OK,
                     handle=self._write_handle,
                     target_path=self._target_path,
+                    admission=admission,
                 )
-            elif self._read_write_generation != generation:
-                # stop()/invalidation won the race while CreateFileW was out of
-                # lock. Discard this raw handle rather than resurrecting a field.
+            elif handle is not None and (
+                self._active_io_leases.get(handle, 0) > 0
+                or handle in self._retired_io_handles
+            ):
+                # Real Win32 cannot reuse an open leased HANDLE. Treat an
+                # injected/raw collision as unavailable without closing the
+                # still-owned old handle. A force-closed stranded handle is
+                # different: the same numeric value now names a new OS object,
+                # so refusing it must also close that new candidate exactly
+                # once rather than leak it untracked.
+                if handle in self._forced_closed_io_handles:
+                    close_candidate = handle
+                result = _EnsureHandleResult(outcome=SetPollingRateOutcome.OPEN_FAILED)
+            elif (
+                self._read_write_generation != generation
+                or (
+                    self._target_path is not None
+                    and not _mi02_paths_match(self._target_path, target_path)
+                )
+            ):
+                # A lifecycle transition or the other handle direction won
+                # while CreateFileW was outside the lock. Never split A/B.
                 close_candidate = handle
                 result = _EnsureHandleResult(outcome=SetPollingRateOutcome.OPEN_FAILED)
             else:
-                self._target_path = target_path
+                if self._target_path is None:
+                    self._target_path = target_path
                 if handle is None:
                     self._last_open_error = err
                     result = _EnsureHandleResult(
@@ -3115,19 +3725,34 @@ class SettingsService:
                 else:
                     self._write_handle = handle
                     self._last_open_error = None
+                    admission = self._current_admission_locked(read_write=False)
                     result = _EnsureHandleResult(
                         outcome=SetPollingRateOutcome.OK,
                         handle=handle,
-                        target_path=target_path,
+                        target_path=self._target_path,
+                        admission=admission,
                     )
         if close_candidate is not None:
             self._close_handles([close_candidate], self._close_handle)
         return result
 
-    def _ensure_read_write_handle(self) -> Optional[int]:
+    def _ensure_read_write_admission(self) -> Optional[_HandleAdmission]:
+        with self._lifecycle_lock:
+            return self._ensure_read_write_admission_under_lifecycle()
+
+    def _ensure_read_write_admission_under_lifecycle(
+        self,
+    ) -> Optional[_HandleAdmission]:
         with self._handle_lock:
+            if self._forced_closed_io_handles:
+                return None
+            if self._identity_change_latched:
+                # This handle is GENERIC_READ|GENERIC_WRITE. Reopening it on a
+                # replacement could both write a query there and falsely
+                # verify the prior controller's write against another unit.
+                return None
             if self._read_write_handle is not None:
-                return self._read_write_handle
+                return self._current_admission_locked(read_write=True)
             generation = self._read_write_generation
             cached_target_path = self._target_path
 
@@ -3136,8 +3761,11 @@ class SettingsService:
         if target_path is None:
             with self._handle_lock:
                 if self._read_write_handle is not None:
-                    return self._read_write_handle
-                if self._read_write_generation == generation:
+                    return self._current_admission_locked(read_write=True)
+                if (
+                    self._read_write_generation == generation
+                    and _mi02_paths_match(self._target_path, cached_target_path)
+                ):
                     self._target_path = None
                     self._last_open_error = None
             return None
@@ -3148,13 +3776,28 @@ class SettingsService:
             if self._read_write_handle is not None:
                 if handle is not None and handle != self._read_write_handle:
                     close_candidate = handle
-                result = self._read_write_handle
-            elif self._read_write_generation != generation:
-                # stop()/invalidation won while CreateFileW was out of lock.
+                result = self._current_admission_locked(read_write=True)
+            elif handle is not None and (
+                self._active_io_leases.get(handle, 0) > 0
+                or handle in self._retired_io_handles
+            ):
+                if handle in self._forced_closed_io_handles:
+                    close_candidate = handle
+                result = None
+            elif (
+                self._read_write_generation != generation
+                or (
+                    self._target_path is not None
+                    and not _mi02_paths_match(self._target_path, target_path)
+                )
+            ):
+                # A lifecycle transition or the write-only direction committed
+                # another target first. Never install split A/B handles.
                 close_candidate = handle
                 result = None
             else:
-                self._target_path = target_path
+                if self._target_path is None:
+                    self._target_path = target_path
                 if handle is None:
                     self._last_open_error = err
                     result = None
@@ -3162,26 +3805,55 @@ class SettingsService:
                     self._read_write_handle = handle
                     self._last_open_error = None
                     self._read_write_generation += 1
-                    result = handle
+                    result = self._current_admission_locked(read_write=True)
         if close_candidate is not None:
             self._close_handles([close_candidate], self._close_handle)
         return result
 
-    def _read_payload(self, handle: int, length: int, timeout_ms: int) -> bytes:
+    def _ensure_read_write_handle(self) -> Optional[int]:
+        admission = self._ensure_read_write_admission()
+        return admission.handle if admission is not None else None
+
+    def _read_payload(
+        self,
+        admission: _HandleAdmission,
+        length: int,
+        timeout_ms: int,
+    ) -> bytes:
+        if not admission.read_write or not self._acquire_io_lease(admission):
+            raise SettingsServiceError(
+                "controller lifecycle changed before ReadFile",
+                win32_error=ERROR_DEVICE_NOT_CONNECTED,
+            )
+        handle = admission.handle
         if self._read_file is _default_read_file:
             generation = self._read_generation_for_handle(handle)
-            return _default_read_file(
-                handle,
-                length,
-                timeout_ms,
-                on_reader_started=lambda reader: self._register_active_reader(
-                    reader,
+            worker_started = False
+
+            def _reader_started(reader: threading.Thread) -> bool:
+                nonlocal worker_started
+                worker_started = True
+                return self._register_active_reader(reader, handle, generation)
+
+            def _reader_finished(reader: threading.Thread) -> None:
+                self._clear_active_reader(reader)
+                self._release_io_lease(handle)
+
+            try:
+                return _default_read_file(
                     handle,
-                    generation,
-                ),
-                on_reader_finished=self._clear_active_reader,
-            )
-        return self._read_file(handle, length, timeout_ms)
+                    length,
+                    timeout_ms,
+                    on_reader_started=_reader_started,
+                    on_reader_finished=_reader_finished,
+                )
+            finally:
+                if not worker_started:
+                    self._release_io_lease(handle)
+        try:
+            return self._read_file(handle, length, timeout_ms)
+        finally:
+            self._release_io_lease(handle)
 
     def _read_response(
         self,
@@ -3203,12 +3875,13 @@ class SettingsService:
                 name="expected_selector",
             )
 
-        handle = self._ensure_read_write_handle()
-        if handle is None:
+        admission = self._ensure_read_write_admission()
+        if admission is None:
             raise SettingsServiceError("could not open read+write MI_02 handle")
+        handle = admission.handle
 
         ok, err, bytes_written = self._write_payload(
-            handle,
+            admission,
             query_payload,
             context="read query",
         )
@@ -3222,6 +3895,12 @@ class SettingsService:
                 f"read query WriteFile wrote {bytes_written} of {len(query_payload)} bytes"
             )
 
+        if not self._admission_is_current(admission):
+            raise SettingsServiceError(
+                "controller lifecycle changed before read response",
+                win32_error=ERROR_DEVICE_NOT_CONNECTED,
+            )
+
         deadline = self._clock() + (timeout_ms / 1000.0)
         last_mismatch: str | None = None
         for attempt in range(READ_STALE_RESPONSE_MAX_DISCARDS + 1):
@@ -3231,27 +3910,43 @@ class SettingsService:
                 remaining_ms = max(1, int((deadline - self._clock()) * 1000))
             try:
                 response = self._read_payload(
-                    handle,
+                    admission,
                     HID_FEATURE_REPORT_SIZE,
                     remaining_ms,
                 )
             except StrandedReadTimeout as exc:
                 # Null the cached field before CloseHandle so a retry cannot
                 # start another reader on the same handle while this one lives.
-                self._poison_read_write_handle(handle, cancel_error=exc.cancel_error)
+                self._poison_read_write_handle(
+                    admission,
+                    cancel_error=exc.cancel_error,
+                )
                 raise
             except SettingsServiceError as exc:
                 error_code = _win32_error_from_exception(exc)
                 if _is_disconnect_win32_error(error_code):
-                    self._invalidate_cached_handles(
-                        error_code=error_code,
-                        context="ReadFile failure",
+                    latched = self._latch_identity_change(
+                        None,
+                        expected_generation=admission.generation,
+                        expected_target_path=admission.target_path,
+                        expected_handle=handle,
                     )
+                    if latched:
+                        logger.info(
+                            "latched SettingsService after ReadFile disconnect "
+                            "(Win32 err %s)",
+                            error_code,
+                        )
                 if last_mismatch is not None:
                     raise SettingsServiceError(
                         f"{last_mismatch}; no matching response before timeout"
                     ) from exc
                 raise
+            if not self._admission_is_current(admission):
+                raise SettingsServiceError(
+                    "controller lifecycle changed during read response",
+                    win32_error=ERROR_DEVICE_NOT_CONNECTED,
+                )
             if len(response) < 8:
                 raise SettingsServiceError(f"read response too short: {len(response)} bytes")
             if response[0] != HID_REPORT_ID:

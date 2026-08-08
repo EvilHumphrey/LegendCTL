@@ -36,6 +36,7 @@ from zd_app.services.settings_apply_coordinator import ApplyFailure, ApplyResult
 from zd_app.services.settings_service import (
     PollingRate,
     SensitivityAnchor,
+    SettingsService,
     TriggerVibrationMode,
     VibrationSettings,
 )
@@ -48,13 +49,21 @@ from zd_app.ui.app_shell import AppShell
 from zd_app.ui.screens import safe_import as safe_import_screen
 
 
+_UNIT_A = r"USB\VID_413D&PID_2104\UNIT-A"
+_UNIT_B = r"USB\VID_413D&PID_2104\UNIT-B"
+
+
 def _make_shell(settings_service=None, *, last_applied_store=None) -> AppShell:
     """Sync-mode shell (mirrors the busy-guard helper + the Phase-2 store)."""
 
     settings_store = MagicMock()
     settings_store.load.return_value = AppSettings()
     device_service = MagicMock()
-    device_service.state = DeviceState()
+    device_service.state = DeviceState(
+        connection_state="connected",
+        device_class="zd_ultimate_legend",
+        stable_identifier=_UNIT_A,
+    )
     device_service.recent_events.return_value = []
     device_service.summary_source_summary.return_value = "Not verified"
     device_service.last_read_duration_ms = None
@@ -102,11 +111,11 @@ class _ExplodingStore:
     def __init__(self) -> None:
         self.save_attempts = 0
 
-    def save(self, record) -> None:
+    def save_for_controller(self, record, stable_identifier) -> None:
         self.save_attempts += 1
         raise OSError("disk full")
 
-    def load(self):
+    def load_for_controller(self, stable_identifier):
         return None
 
 
@@ -177,6 +186,154 @@ class NamedApplyRecordingTests(unittest.TestCase):
         # The partial-failure banner still fired exactly as before.
         recorded = shell.device_service.record_apply_result.call_args
         self.assertIs(recorded.args[0], False)
+
+    def test_disconnect_marks_every_unwritten_field_failed_end_to_end(self) -> None:
+        path_a = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02#7&a"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        write_events: list[int] = []
+
+        def write_file(handle: int, _payload: bytes) -> tuple[bool, int, int]:
+            write_events.append(handle)
+            return False, 1167, 0
+
+        service = SettingsService(
+            enumerate_paths=lambda: [path_a],
+            open_write_handle=lambda _path: (0xA001, 0),
+            write_file=write_file,
+            close_handle=lambda _handle: True,
+            sleep=lambda _seconds: None,
+        )
+        with TemporaryDirectory() as tmp:
+            store = LastAppliedStore(base_dir=tmp)
+            shell = _make_shell(service, last_applied_store=store)
+            self._apply(shell)
+
+            result = shell._last_apply_result
+            self.assertIsNotNone(result)
+            failed_labels = [failure.setting_label for failure in result.failed]
+            self.assertEqual(
+                failed_labels,
+                ["polling", "vibration", "step_size"],
+            )
+            self.assertEqual(write_events, [0xA001])
+            self.assertTrue(
+                all(failure.retry_fn is not None for failure in result.failed)
+            )
+            self.assertTrue(
+                all(
+                    "not written" in failure.error.lower()
+                    for failure in result.failed[1:]
+                )
+            )
+
+            verification = result.readback_verification
+            self.assertIsNotNone(verification)
+            self.assertEqual(verification.wrote_succeeded, 0)
+            self.assertEqual(verification.write_failed, 3)
+            self.assertEqual(verification.could_not_verify, 0)
+            self.assertTrue(
+                all(not field.write_succeeded for field in verification.fields)
+            )
+
+            record = store.load_for_controller(_UNIT_A)
+            self.assertIsNotNone(record)
+            self.assertEqual(record.failed_fields, tuple(failed_labels))
+
+            # Retry owns the complete failure set, but the service is still
+            # identity-latched. It must retain every failure without another
+            # write or independently admitting a replacement controller.
+            with patch("zd_app.ui.app_shell.time.sleep"):
+                _capture_widget_state(
+                    lambda: shell._retry_failed_settings(
+                        list(result.failed),
+                        originating_result=result,
+                    )
+                )
+            retry_result = shell._last_apply_result
+            self.assertEqual(
+                [failure.setting_label for failure in retry_result.failed],
+                failed_labels,
+            )
+            self.assertEqual(write_events, [0xA001])
+
+    def test_retried_skipped_fallback_strips_unsent_8point_rider(self) -> None:
+        path_a = (
+            r"\\?\hid#vid_413d&pid_2104&mi_02#7&a"
+            r"#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        )
+        handles = iter((0xA001, 0xA002))
+        write_events: list[int] = []
+
+        def write_file(handle: int, payload: bytes) -> tuple[bool, int, int]:
+            write_events.append(handle)
+            if len(write_events) == 1:
+                return False, 1167, 0
+            return True, 0, len(payload)
+
+        service = SettingsService(
+            enumerate_paths=lambda: [path_a],
+            open_write_handle=lambda _path: (next(handles), 0),
+            write_file=write_file,
+            close_handle=lambda _handle: True,
+            sleep=lambda _seconds: None,
+        )
+        service.supports_8point_sensitivity = lambda: False  # type: ignore[method-assign]
+        left_3point = (
+            SensitivityAnchor(0, 0),
+            SensitivityAnchor(50, 40),
+            SensitivityAnchor(100, 100),
+        )
+        left_8point = tuple(SensitivityAnchor(i * 10, i * 10) for i in range(8))
+        snapshot = empty_snapshot(
+            polling_rate=PollingRate.HZ_1000,
+            sensitivity_left=left_3point,
+            sensitivity_left_8point=left_8point,
+        )
+
+        with TemporaryDirectory() as tmp:
+            store = LastAppliedStore(base_dir=tmp)
+            shell = _make_shell(service, last_applied_store=store)
+            shell.refresh_from_controller = MagicMock()
+            with patch("zd_app.ui.app_shell.time.sleep"):
+                _capture_widget_state(
+                    lambda: shell._apply_wrapper_profile_snapshot(
+                        "fallback retry",
+                        snapshot,
+                    )
+                )
+
+            apply_result = shell._last_apply_result
+            self.assertEqual(
+                [failure.setting_label for failure in apply_result.failed],
+                ["polling", "sens_left"],
+            )
+            self.assertEqual(apply_result.sensitivity_downgrades, ())
+            before_retry = store.load_for_controller(_UNIT_A)
+            self.assertEqual(before_retry.failed_fields, ("polling", "sens_left"))
+            self.assertEqual(before_retry.snapshot.sensitivity_left_8point, left_8point)
+
+            # stop() is the SettingsService contract's explicit latch reset.
+            service.stop()
+            self.assertEqual(service.start().value, "ok")
+            with patch("zd_app.ui.app_shell.time.sleep"):
+                _capture_widget_state(
+                    lambda: shell._retry_failed_settings(
+                        list(apply_result.failed),
+                        originating_result=apply_result,
+                    )
+                )
+
+            retry_result = shell._last_apply_result
+            after_retry = store.load_for_controller(_UNIT_A)
+
+        self.assertEqual(retry_result.failed, [])
+        self.assertEqual(retry_result.sensitivity_downgrades, ("sens_left",))
+        self.assertEqual(after_retry.failed_fields, ())
+        self.assertIsNone(after_retry.snapshot.sensitivity_left_8point)
+        self.assertEqual(after_retry.snapshot.sensitivity_left, left_3point)
+        self.assertEqual(write_events, [0xA001, 0xA002, 0xA002])
 
     def test_downgraded_apply_records_the_sent_3point_curve_after_round_trip(self) -> None:
         left_3point = (
@@ -269,6 +426,35 @@ class NamedApplyRecordingTests(unittest.TestCase):
             self._apply(shell)
             self.assertIsNone(store.load())
 
+    def test_unknown_controller_identity_abstains_without_recording(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = LastAppliedStore(base_dir=tmp)
+            shell = _make_shell(
+                _RecordingService(empty_snapshot()), last_applied_store=store
+            )
+            shell.device_service.state.stable_identifier = "unknown"
+            self._apply(shell)
+            self.assertIsNone(store.load())
+
+    def test_explicit_origin_identity_binds_record_even_if_live_state_moves(self) -> None:
+        with TemporaryDirectory() as tmp:
+            store = LastAppliedStore(base_dir=tmp)
+            shell = _make_shell(
+                _RecordingService(empty_snapshot()), last_applied_store=store
+            )
+            shell.device_service.state.stable_identifier = _UNIT_B
+
+            shell._record_last_applied_safe(
+                "origin-a",
+                _APPLY_SNAPSHOT,
+                ApplyResult(total_attempted=1),
+                include_device=True,
+                controller_stable_identifier=_UNIT_A,
+            )
+
+            self.assertIsNotNone(store.load_for_controller(_UNIT_A))
+            self.assertIsNone(store.load_for_controller(_UNIT_B))
+
     def test_per_field_write_does_not_record(self) -> None:
         # Manual per-field writes are deliberately outside the record's claim.
         # (apply_polling_rate writes immediately — no slider throttle.)
@@ -344,7 +530,9 @@ class SafeImportRecordingTests(unittest.TestCase):
                 side_effect={
                     safe_import_screen.NAME_INPUT: "Imported Profile"
                 }.__getitem__,
-            ), patch("zd_app.ui.app_shell.safe_import.open_result"):
+            ), patch("zd_app.ui.app_shell.safe_import.open_result"), patch(
+                "zd_app.ui.app_shell.dpg.delete_item"
+            ):
                 _capture_widget_state(
                     lambda: shell.safe_import_apply(apply_to_controller=False)
                 )
@@ -361,7 +549,7 @@ class RetryRecordUpdateTests(unittest.TestCase):
             failed_fields=tuple(failed),
             snapshot=_APPLY_SNAPSHOT,
         )
-        store.save(seeded)
+        store.save_for_controller(seeded, _UNIT_A)
         return seeded
 
     @staticmethod
@@ -440,7 +628,7 @@ class RetryRecordUpdateTests(unittest.TestCase):
 
     def test_retry_storage_failure_never_breaks_the_retry(self) -> None:
         class _ExplodingLoadStore(_ExplodingStore):
-            def load(self):
+            def load_for_controller(self, stable_identifier):
                 raise OSError("unreadable")
 
         store = _ExplodingLoadStore()

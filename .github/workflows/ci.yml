@@ -53,27 +53,19 @@ jobs:
           # `unittest discover` runs clean in a single process. Historically a
           # DPG teardown segfault could still surface as process exit code 139
           # AFTER every test passed and the summary printed. So we decide
-          # pass/fail from the unittest *summary line*, not the raw exit code —
-          # the project's own rule (docs/ARCHITECTURE.md, "Test architecture":
-          # "exit code 139 on teardown is a known DPG segfault artifact, not a
-          # failure"). unittest writes its output to stderr, hence 2>&1.
+          # The shared evaluator requires a real `Ran ...` + `OK` summary and
+          # combines it with the process exit code. Only exit 0 and the
+          # documented post-summary DPG teardown artifact (139 or Windows'
+          # signed/unsigned 0xC0000005 form) are allowed.
+          # unittest writes to stderr, hence 2>&1.
           $ErrorActionPreference = 'Continue'
           python -m unittest discover -s tests 2>&1 | Tee-Object -FilePath test_output.txt
           $code = $LASTEXITCODE
-          $log  = Get-Content test_output.txt -Raw
-
-          if ($log -match '(?m)^FAILED \(') {
-            Write-Host "::error::unittest reported FAILED — see summary above."
-            exit 1
-          }
-          elseif ($log -match '(?m)^OK\b') {
-            Write-Host "Suite PASSED. (process exit code = $code; 139 = known DPG teardown artifact, ignored)"
-            exit 0
-          }
-          else {
-            Write-Host "::error::No unittest 'OK' summary found (exit code $code). Likely a crash/segfault BEFORE the summary — investigate; do not treat as green."
-            exit 1
-          }
+          & .\.github\scripts\evaluate-unittest-result.ps1 `
+            -LogPath test_output.txt `
+            -ProcessExitCode $code `
+            -MinimumTestCount 3000
+          exit $LASTEXITCODE
 
       - name: Upload test log
         if: always()

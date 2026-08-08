@@ -894,7 +894,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         self.assertEqual(len(result.failed), 1)
         self.assertEqual(result.failed[0].setting_label, "vibration")
         self.assertTrue(result.failed[0].is_transient)
-        self.assertIn("HID write failed after retry", result.failed[0].error)
+        self.assertIn("HID write failed", result.failed[0].error)
 
     def test_apply_snapshot_modal_shown_on_failure(self) -> None:
         settings_service = MagicMock()
@@ -1071,7 +1071,11 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
 
         # Headless apply (no DPG context) bypasses the device-confirm modal and
         # applies the full snapshot — include_device=True is the default.
-        shell.refresh_from_controller.assert_called_once_with(include_device=True)
+        shell.refresh_from_controller.assert_called_once_with(
+            include_device=True,
+            _presence_key=("no_device", "zd_ultimate_legend", "unknown"),
+            _presence_generation=0,
+        )
 
     def test_apply_selected_wrapper_profile_no_settings_service(self) -> None:
         store = MagicMock()
@@ -1608,6 +1612,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         shell.settings.auto_read_on_connect = False
         shell._defer_ui_armed = True
         shell.rebuild_current_screen = MagicMock()
+        shell.refresh_from_controller = MagicMock()
         shell._last_tick = 10.0
         states = ["no_device", "connected"]
 
@@ -1633,7 +1638,8 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
             background=False,
             force_probe=True,
         )
-        self.assertTrue(shell._needs_hydration)
+        self.assertFalse(shell._needs_hydration)
+        shell.refresh_from_controller.assert_called_once_with()
         settings_service.stop.assert_called_once_with()
         shell.device_service.log_event.assert_any_call(
             "Controller reconnected; refreshing Wrapper Settings."
@@ -1707,7 +1713,9 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         ]
         self.assertEqual(force_probe_calls, [])
         self.assertFalse(shell._needs_hydration)
-        shell.settings_service.stop.assert_not_called()
+        # The disconnect transition invalidates the controller-bound service
+        # immediately; it must not leave a session for the departed device live.
+        shell.settings_service.stop.assert_called_once_with()
         self.assertEqual(shell._last_connection_state, "no_device")
 
     def test_tick_disconnect_logs_event_and_defers_screen_rebuild_once(self) -> None:
@@ -2303,7 +2311,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
 
         self.assertEqual(
             rendered["settings_v2_status_text"],
-            "Apply failed: vibration settings: HID write failed after retry (error 995)",
+            "Apply failed: vibration settings: HID write failed (error 995)",
         )
         self.assertIsNotNone(shell._apply_status_clear_after)
 
@@ -4012,8 +4020,8 @@ class PollingRate8000FirmwareHonestyTests(unittest.TestCase):
     *only*, ``_do_write_polling_rate`` reads the rate back once (reusing the
     existing ``get_polling_rate``) and, when the device kept a lower rate,
     surfaces the firmware-capability message and reconciles the combo to the
-    device's real rate. Capable hardware (read-back == 8000) and unverifiable
-    read-backs fall through to the normal success path — never a false block.
+    device's real rate. Capable hardware (read-back == 8000) reaches the normal
+    success path; an unreadable read-back is reported sent-but-unverified.
     """
 
     @staticmethod
@@ -4085,35 +4093,53 @@ class PollingRate8000FirmwareHonestyTests(unittest.TestCase):
         finally:
             i18n.set_locale("en")
 
-    def test_8000_unverifiable_readback_is_trusted(self) -> None:
-        # Fail-safe: read-back returns None (couldn't read) → trust the ACK,
-        # record success, do NOT cry non-commit.
+    def test_8000_unverifiable_readback_is_reported_unverified(self) -> None:
+        # Fail-on-base: a read miss used to emit apply.polling_rate.success.
+        # The transport write succeeded, but no device read confirmed 8K.
         settings_service = MagicMock()
         result = self._ok_8000(settings_service)
         settings_service.get_polling_rate.return_value = None
         shell = self._hydrated_shell(settings_service)
+        shell.device_service = DeviceService(clock=lambda: 0.0)
+        shell.device_service.record_apply_result = MagicMock(
+            wraps=shell.device_service.record_apply_result
+        )
 
         returned = shell.apply_polling_rate("8000Hz")
 
         self.assertIs(returned, result)
-        shell.device_service.record_apply_result.assert_called_once_with(
-            True, "OK: Polling rate 8000Hz written."
-        )
+        success, message = shell.device_service.record_apply_result.call_args.args
+        self.assertFalse(success)
+        self.assertIsInstance(message, LogEntry)
+        self.assertEqual(message.key, "apply.result.write_unverified")
+        self.assertNotEqual(message.key, "apply.polling_rate.success")
+        self.assertEqual(render_log_message(message), i18n.t("apply.result.write_unverified"))
+        self.assertEqual(shell.device_service.state.data_freshness, "write_failed")
+        self.assertEqual(shell.device_service.state.sync_status, "Apply Failed")
 
-    def test_8000_readback_exception_is_trusted(self) -> None:
-        # Fail-safe: a read-back that raises (e.g. TimeoutError) must not crash
-        # the apply nor be treated as a non-commit.
+    def test_8000_readback_exception_is_reported_unverified(self) -> None:
+        # Fail-on-base: an exception used to emit apply.polling_rate.success.
+        # It must not crash the apply or claim a confirmed commit.
         settings_service = MagicMock()
         result = self._ok_8000(settings_service)
         settings_service.get_polling_rate.side_effect = TimeoutError("no answer")
         shell = self._hydrated_shell(settings_service)
+        shell.device_service = DeviceService(clock=lambda: 0.0)
+        shell.device_service.record_apply_result = MagicMock(
+            wraps=shell.device_service.record_apply_result
+        )
 
         returned = shell.apply_polling_rate("8000Hz")
 
         self.assertIs(returned, result)
-        shell.device_service.record_apply_result.assert_called_once_with(
-            True, "OK: Polling rate 8000Hz written."
-        )
+        success, message = shell.device_service.record_apply_result.call_args.args
+        self.assertFalse(success)
+        self.assertIsInstance(message, LogEntry)
+        self.assertEqual(message.key, "apply.result.write_unverified")
+        self.assertNotEqual(message.key, "apply.polling_rate.success")
+        self.assertEqual(render_log_message(message), i18n.t("apply.result.write_unverified"))
+        self.assertEqual(shell.device_service.state.data_freshness, "write_failed")
+        self.assertEqual(shell.device_service.state.sync_status, "Apply Failed")
 
     def test_sub_8000_selection_never_reads_back(self) -> None:
         # Only 8000 Hz pays the confirmation read — every other rate is
@@ -4207,7 +4233,8 @@ class DeviceSettingsTests(unittest.TestCase):
 
         with patch("zd_app.ui.app_shell.dpg.get_value", side_effect=get_value), \
              patch("zd_app.ui.app_shell.dpg.does_item_exist", return_value=True), \
-             patch("zd_app.ui.app_shell.dpg.set_value"):
+             patch("zd_app.ui.app_shell.dpg.set_value"), \
+             patch("zd_app.ui.app_shell.dpg.delete_item"):
             shell.save_current_as_wrapper_profile()
 
         saved = store.save.call_args.args[0]
@@ -4230,7 +4257,8 @@ class DeviceSettingsTests(unittest.TestCase):
 
         with patch("zd_app.ui.app_shell.dpg.get_value", side_effect=get_value), \
              patch("zd_app.ui.app_shell.dpg.does_item_exist", return_value=True), \
-             patch("zd_app.ui.app_shell.dpg.set_value"):
+             patch("zd_app.ui.app_shell.dpg.set_value"), \
+             patch("zd_app.ui.app_shell.dpg.delete_item"):
             shell.save_current_as_wrapper_profile()
 
         saved = store.save.call_args.args[0]
@@ -4669,6 +4697,64 @@ class SliderWriteThrottleTests(unittest.TestCase):
             any("Dropping slider trailing write" in message for message in logs.output)
         )
 
+    def test_tick_observes_disconnect_before_elapsed_pending_write_flush(self) -> None:
+        shell, _settings_service = self._make_shell_with_settings()
+        shell.settings.auto_read_on_connect = False
+        shell.device_service.state.connection_state = "connected"
+        shell.device_service.state.device_class = "zd_ultimate_legend"
+        shell.device_service.state.stable_identifier = "zd-unit-a"
+        shell.device_service.state.xinput_slot = 0
+        shell._last_connection_state = "connected"
+        shell._last_presence_poll = 0.0
+        shell._last_tick = 10.0
+        shell._defer_ui_armed = True
+        shell.rebuild_current_screen = MagicMock()
+        shell._observed_controller_presence_key = shell._controller_presence_key()
+        shell._do_write_step_size = MagicMock()
+
+        throttle = shell._slider_throttle
+        self.assertTrue(
+            throttle.should_write_now(
+                "step_size",
+                140,
+                now=100.0,
+                no_restore_point=False,
+                stable_identifier="zd-unit-a",
+            )
+        )
+        self.assertFalse(
+            throttle.should_write_now(
+                "step_size",
+                141,
+                now=100.02,
+                no_restore_point=False,
+                stable_identifier="zd-unit-a",
+            )
+        )
+
+        def refresh_state(
+            *,
+            background: bool = False,
+            force_probe: bool = False,
+            allow_probe: bool = True,
+        ):
+            del background, force_probe, allow_probe
+            shell.device_service.state.connection_state = "no_device"
+            shell.device_service.state.device_class = "none"
+            shell.device_service.state.stable_identifier = "unknown"
+            shell.device_service.state.xinput_slot = None
+            return shell.device_service.state
+
+        shell.device_service.refresh_state.side_effect = refresh_state
+        with patch("zd_app.ui.app_shell.time.time", return_value=10.0), patch(
+            "zd_app.ui.app_shell.time.monotonic", return_value=101.0
+        ):
+            shell._tick()
+
+        shell._do_write_step_size.assert_not_called()
+        self.assertEqual(throttle.peek_pending(), [])
+        self.assertEqual(shell._last_connection_state, "no_device")
+
     def test_slider_throttle_hydration_guard_still_works(self) -> None:
         # If the hydration write-guard is False, the callback returns
         # early — no write, AND no throttle state mutation (so a later
@@ -5047,6 +5133,7 @@ class DeviceConfirmBodyShowsValuesTests(unittest.TestCase):
     def test_body_shows_step_size_current_to_new(self) -> None:
         shell = _make_shell(MagicMock(), MagicMock())
         shell.last_controller_snapshot = _full_snapshot(step_size=73)
+        shell.last_snapshot_identity = shell._manual_write_stable_identifier()
         profile = WrapperProfile(name="Apex", snapshot=_full_snapshot(step_size=1))
 
         body = shell._apply_device_confirm_body(profile)
@@ -5059,6 +5146,7 @@ class DeviceConfirmBodyShowsValuesTests(unittest.TestCase):
     def test_body_shows_polling_current_to_new(self) -> None:
         shell = _make_shell(MagicMock(), MagicMock())
         shell.last_controller_snapshot = _full_snapshot(polling_rate=PollingRate.HZ_1000)
+        shell.last_snapshot_identity = shell._manual_write_stable_identifier()
         profile = WrapperProfile(
             name="Apex", snapshot=_full_snapshot(polling_rate=PollingRate.HZ_8000)
         )
@@ -5085,6 +5173,7 @@ class DeviceConfirmBodyShowsValuesTests(unittest.TestCase):
         shell.last_controller_snapshot = _full_snapshot(
             step_size=10, polling_rate=PollingRate.HZ_1000
         )
+        shell.last_snapshot_identity = shell._manual_write_stable_identifier()
         # Legacy profile: polling set, step_size never serialized.
         profile = WrapperProfile(
             name="Old",
@@ -5103,6 +5192,7 @@ class DeviceConfirmBodyShowsValuesTests(unittest.TestCase):
         shell = _make_shell(MagicMock(), MagicMock())
         shell._dpg_context_ready = True
         shell.last_controller_snapshot = _full_snapshot(step_size=73)
+        shell.last_snapshot_identity = shell._manual_write_stable_identifier()
         profile = WrapperProfile(name="Apex", snapshot=_full_snapshot(step_size=1))
         texts: list[str] = []
 
@@ -5119,6 +5209,29 @@ class DeviceConfirmBodyShowsValuesTests(unittest.TestCase):
             shell._open_apply_device_confirm("Apex", profile)
 
         self.assertTrue(any("step size: 73 -> 1" in tx for tx in texts))
+
+    def test_body_uses_new_only_when_snapshot_belongs_to_other_controller(self) -> None:
+        shell = _make_shell(MagicMock(), MagicMock())
+        shell.device_service.state.stable_identifier = "zd-unit-b"
+        shell.last_controller_snapshot = _full_snapshot(
+            step_size=73,
+            polling_rate=PollingRate.HZ_1000,
+        )
+        shell.last_snapshot_identity = "zd-unit-a"
+        profile = WrapperProfile(
+            name="Apex",
+            snapshot=_full_snapshot(
+                step_size=1,
+                polling_rate=PollingRate.HZ_8000,
+            ),
+        )
+
+        body = shell._apply_device_confirm_body(profile)
+
+        self.assertIn("step size -> 1", body)
+        self.assertIn("polling rate -> 8000Hz", body)
+        self.assertNotIn("73 -> 1", body)
+        self.assertNotIn("1000Hz -> 8000Hz", body)
 
 
 class StepSizeSaveToProfileNudgeTests(unittest.TestCase):

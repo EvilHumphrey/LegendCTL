@@ -35,6 +35,37 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _valid_manifest_document(payload_files: dict[str, str]) -> dict[str, object]:
+    return {
+        "schema": 1,
+        "version": "9.9.9",
+        "build_commit": _COMMIT,
+        "build_commit_short": _SHORT_COMMIT,
+        "build_date": "2026-07-12",
+        "generated_at": "2026-07-12T09:30:00+00:00",
+        "source_scan": {
+            "ruleset": {
+                "network_roots": list(trust_self_check.NETWORK_IMPORT_ROOTS),
+                "driver_suffixes": list(trust_self_check.DRIVER_ARTIFACT_SUFFIXES),
+                "virtual_device_tokens": list(
+                    trust_self_check.VIRTUAL_DEVICE_NAME_TOKENS
+                ),
+            },
+            "python_file_count": 2,
+            "parse_failures": [],
+            "entry_module_scanned": True,
+            "network_import_findings": [],
+            "browser_handoffs": [],
+            "driver_footprint_findings": [],
+            "source_files": {
+                "main_zd.py": "0" * 64,
+                "zd_app/__init__.py": "1" * 64,
+            },
+        },
+        "payload_files": payload_files,
+    }
+
+
 class TrustManifestGeneratorTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -139,36 +170,87 @@ class TrustManifestGeneratorTests(unittest.TestCase):
             )
 
 
+class TrustManifestLoaderGuardTests(unittest.TestCase):
+    def _manifest_path(self, temporary: str) -> tuple[Path, Path]:
+        package = Path(temporary) / "zd_app"
+        package.mkdir()
+        return package, package / trust_self_check.TRUST_MANIFEST_FILENAME
+
+    def test_loader_accepts_shallow_valid_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package, path = self._manifest_path(temporary)
+            path.write_text(
+                json.dumps(_valid_manifest_document({"payload.dat": "2" * 64})),
+                encoding="utf-8",
+            )
+
+            manifest = trust_self_check.load_trust_manifest(package)
+
+        assert manifest is not None
+        self.assertTrue(manifest.integrity.valid)
+        self.assertEqual(manifest.build_commit, _COMMIT)
+
+    def test_loader_reports_malformed_json_as_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package, path = self._manifest_path(temporary)
+            path.write_text("{", encoding="utf-8")
+
+            manifest = trust_self_check.load_trust_manifest(package)
+
+        assert manifest is not None
+        self.assertFalse(manifest.integrity.valid)
+        self.assertEqual(manifest.integrity.issues, ("invalid JSON",))
+
+    def test_loader_reports_non_object_json_as_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package, path = self._manifest_path(temporary)
+            path.write_text("[]", encoding="utf-8")
+
+            manifest = trust_self_check.load_trust_manifest(package)
+
+        assert manifest is not None
+        self.assertFalse(manifest.integrity.valid)
+        self.assertEqual(
+            manifest.integrity.issues,
+            ("top-level value is not an object",),
+        )
+
+    def test_loader_rejects_oversize_json_before_parsing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package, path = self._manifest_path(temporary)
+            path.write_text(
+                " " * (trust_self_check.MAX_TRUST_MANIFEST_BYTES + 1),
+                encoding="utf-8",
+            )
+
+            manifest = trust_self_check.load_trust_manifest(package)
+
+        assert manifest is not None
+        self.assertFalse(manifest.integrity.valid)
+        self.assertEqual(
+            manifest.integrity.issues,
+            ("JSON exceeds size or nesting limits",),
+        )
+
+    def test_loader_rejects_deep_json_before_json_recursion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package, path = self._manifest_path(temporary)
+            depth = 1100
+            path.write_text("[" * depth + "0" + "]" * depth, encoding="utf-8")
+
+            manifest = trust_self_check.load_trust_manifest(package)
+
+        assert manifest is not None
+        self.assertFalse(manifest.integrity.valid)
+        self.assertEqual(
+            manifest.integrity.issues,
+            ("JSON exceeds size or nesting limits",),
+        )
+
+
 class PayloadVerificationTests(unittest.TestCase):
     def _manifest(self, package_root: Path, payload_files: dict[str, str]) -> trust_self_check.TrustManifest:
-        data = {
-            "schema": 1,
-            "version": "9.9.9",
-            "build_commit": _COMMIT,
-            "build_commit_short": _SHORT_COMMIT,
-            "build_date": "2026-07-12",
-            "generated_at": "2026-07-12T09:30:00+00:00",
-            "source_scan": {
-                "ruleset": {
-                    "network_roots": list(trust_self_check.NETWORK_IMPORT_ROOTS),
-                    "driver_suffixes": list(trust_self_check.DRIVER_ARTIFACT_SUFFIXES),
-                    "virtual_device_tokens": list(
-                        trust_self_check.VIRTUAL_DEVICE_NAME_TOKENS
-                    ),
-                },
-                "python_file_count": 2,
-                "parse_failures": [],
-                "entry_module_scanned": True,
-                "network_import_findings": [],
-                "browser_handoffs": [],
-                "driver_footprint_findings": [],
-                "source_files": {
-                    "main_zd.py": "0" * 64,
-                    "zd_app/__init__.py": "1" * 64,
-                },
-            },
-            "payload_files": payload_files,
-        }
+        data = _valid_manifest_document(payload_files)
         package_root.mkdir(parents=True, exist_ok=True)
         (package_root / trust_self_check.TRUST_MANIFEST_FILENAME).write_text(
             json.dumps(data), encoding="utf-8"

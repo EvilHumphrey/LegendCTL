@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from zd_app.services.restore_point_service import (
+    ControllerPresenceChangedError,
     FRESH_READ_MAX_AGE_S,
     RestorePointService,
     _build_field_outcomes,
@@ -870,6 +871,67 @@ class CoverageMapInferenceTests(unittest.TestCase):
 
 
 class RestoreFlowTests(unittest.TestCase):
+    def test_capture_guard_refuses_persistence_after_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _stub, store = _make_service(
+                tmpdir=tmp,
+                settings_stub=_full_populated_stub(),
+            )
+            calls = {"n": 0}
+
+            def guard() -> bool:
+                calls["n"] += 1
+                return calls["n"] < 2
+
+            captured = service.capture(
+                _basic_trigger(),
+                device_identity=_identity(),
+                presence_guard=guard,
+            )
+
+            self.assertIsNone(captured)
+            valid, skipped = store.list()
+            self.assertEqual(valid, [])
+            self.assertEqual(skipped, [])
+
+    def test_restore_guard_refuses_before_coordinator_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = _full_populated_stub()
+            service, _stub, store = _make_service(tmpdir=tmp, settings_stub=stub)
+            captured = service.capture(_basic_trigger(), device_identity=_identity())
+            assert captured is not None
+            calls = {"n": 0}
+
+            def guard() -> bool:
+                calls["n"] += 1
+                return calls["n"] < 4
+
+            with self.assertRaises(ControllerPresenceChangedError) as raised:
+                service.restore(captured.id, presence_guard=guard)
+
+            self.assertFalse(raised.exception.writes_may_have_occurred)
+            self.assertEqual(stub.write_calls, [])
+            self.assertIsNone(store.load(captured.id).last_restore_attempt)
+
+    def test_restore_guard_discards_result_and_attribution_after_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = _full_populated_stub()
+            service, _stub, store = _make_service(tmpdir=tmp, settings_stub=stub)
+            captured = service.capture(_basic_trigger(), device_identity=_identity())
+            assert captured is not None
+            calls = {"n": 0}
+
+            def guard() -> bool:
+                calls["n"] += 1
+                return calls["n"] < 5
+
+            with self.assertRaises(ControllerPresenceChangedError) as raised:
+                service.restore(captured.id, presence_guard=guard)
+
+            self.assertTrue(raised.exception.writes_may_have_occurred)
+            self.assertTrue(stub.write_calls)
+            self.assertIsNone(store.load(captured.id).last_restore_attempt)
+
     def test_restore_creates_before_restore_snapshot_first(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             stub = _full_populated_stub()
@@ -962,13 +1024,16 @@ class RestoreFlowTests(unittest.TestCase):
             captured = service.capture(_basic_trigger(), device_identity=_identity())
             assert captured is not None
             stub.fail_labels = {"polling"}
+            stub.polling_rate = None
             result = service.restore(captured.id)
             self.assertEqual(result.label, RestoreResultLabel.PARTIALLY_RESTORED)
             self.assertEqual(result.write_failed, 1)
+            self.assertEqual(result.could_not_verify, 0)
             polling_outcome = next(
                 f for f in result.fields if f.field_name == "polling_rate"
             )
             self.assertFalse(polling_outcome.write_succeeded)
+            self.assertIsNone(polling_outcome.verify_matched)
 
     def test_restore_failed_when_every_field_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

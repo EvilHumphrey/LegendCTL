@@ -87,6 +87,35 @@ from zd_app.storage.restore_point_store import RestorePointStore
 logger = logging.getLogger(__name__)
 
 
+class ControllerPresenceChangedError(RuntimeError):
+    """A restore crossed the immutable controller-presence boundary.
+
+    ``writes_may_have_occurred`` distinguishes a pre-write refusal from a
+    completion that went stale after the coordinator had begun its burst.  The
+    UI localizes the two outcomes; this exception deliberately carries no
+    controller identity or user-facing prose.
+    """
+
+    def __init__(self, *, writes_may_have_occurred: bool) -> None:
+        super().__init__("controller presence changed during restore")
+        self.writes_may_have_occurred = writes_may_have_occurred
+
+
+def _presence_guard_allows(presence_guard: Callable[[], bool] | None) -> bool:
+    return presence_guard is None or presence_guard()
+
+
+def _require_restore_presence(
+    presence_guard: Callable[[], bool] | None,
+    *,
+    writes_may_have_occurred: bool,
+) -> None:
+    if not _presence_guard_allows(presence_guard):
+        raise ControllerPresenceChangedError(
+            writes_may_have_occurred=writes_may_have_occurred
+        )
+
+
 FRESH_READ_MAX_AGE_S = 30.0
 """Default staleness threshold per the "Staleness threshold" rule."""
 
@@ -260,6 +289,7 @@ class RestorePointService:
         fresh_read_max_age_s: float = FRESH_READ_MAX_AGE_S,
         cached_snapshot: Optional[ControllerSnapshot] = None,
         cached_snapshot_ts: Optional[float] = None,
+        presence_guard: Callable[[], bool] | None = None,
     ) -> Optional[RestorePoint]:
         """Capture a restore point. Returns ``None`` if no usable snapshot.
 
@@ -279,6 +309,17 @@ class RestorePointService:
         """
 
         snapshot, read_success, _read_errors = self._do_fresh_read()
+        # A capture may be initiated for controller A and finish after the
+        # presence monitor has observed B.  Never persist that read as a
+        # checkpoint: restore points are later write inputs, so merely
+        # discarding the UI result is not enough.
+        if not _presence_guard_allows(presence_guard):
+            logger.info(
+                "restore-point capture discarded after controller transition "
+                "(trigger=%s)",
+                trigger.type,
+            )
+            return None
         capture_source = CaptureSource.FRESH_READ
         if not _any_read_succeeded(read_success):
             if cached_snapshot is None or cached_snapshot_ts is None:
@@ -321,6 +362,15 @@ class RestorePointService:
             coverage=coverage,
             last_restore_attempt=None,
         )
+        # Final commit guard: reads and object construction above are harmless;
+        # the durable restore input begins here.
+        if not _presence_guard_allows(presence_guard):
+            logger.info(
+                "restore-point capture refused at commit after controller "
+                "transition (trigger=%s)",
+                trigger.type,
+            )
+            return None
         self._store.save(rp)
         if self._wear_ledger is not None:
             self._wear_ledger.append(
@@ -380,6 +430,7 @@ class RestorePointService:
         rp_id: str,
         *,
         excluded_fields: Optional[Iterable[str]] = None,
+        presence_guard: Callable[[], bool] | None = None,
     ) -> RestoreResult:
         """Restore a previously captured restore point.
 
@@ -411,8 +462,14 @@ class RestorePointService:
             before_trigger,
             title=f"Before restoring {target_rp.title}",
             device_identity=target_rp.device_identity,
+            presence_guard=presence_guard,
         )
         before_id = before_rp.id if before_rp is not None else None
+
+        _require_restore_presence(
+            presence_guard,
+            writes_may_have_occurred=False,
+        )
 
         if before_rp is None:
             # Flaky-controller case: capture() returned None (live read failed,
@@ -437,7 +494,15 @@ class RestorePointService:
         )
 
         # 3. Apply through the coordinator.
+        _require_restore_presence(
+            presence_guard,
+            writes_may_have_occurred=False,
+        )
         apply_result = self._apply_coordinator.apply_snapshot(filtered)
+        _require_restore_presence(
+            presence_guard,
+            writes_may_have_occurred=True,
+        )
 
         # Quiet interval between the apply burst and the verify read — see
         # the ``post_apply_read_settle_s`` constructor comment.
@@ -445,7 +510,15 @@ class RestorePointService:
             self._sleep(self._post_apply_read_settle_s)
 
         # 4. Read controller back via fresh reads.
+        _require_restore_presence(
+            presence_guard,
+            writes_may_have_occurred=True,
+        )
         readback, _, read_errors = self._do_fresh_read()
+        _require_restore_presence(
+            presence_guard,
+            writes_may_have_occurred=True,
+        )
 
         # 5. Build per-field outcomes. An unconfirmed capability may have
         # substituted a 3-point host write for an 8-point rider, so compare the
@@ -471,7 +544,14 @@ class RestorePointService:
         wrote_succeeded = sum(1 for f in field_outcomes if f.write_succeeded)
         write_failed = sum(1 for f in field_outcomes if not f.write_succeeded)
         verified_matched = sum(1 for f in field_outcomes if f.verify_matched is True)
-        could_not_verify = sum(1 for f in field_outcomes if f.verify_matched is None)
+        # A write-failed field was not written by this Restore, so an absent
+        # read-back must not inflate the "written but could not verify" count.
+        # Its write failure is already the honest outcome.
+        could_not_verify = sum(
+            1
+            for f in field_outcomes
+            if f.write_succeeded and f.verify_matched is None
+        )
         mismatched = sum(1 for f in field_outcomes if f.verify_matched is False)
         label = _label_for(
             attempted=len(field_outcomes),
@@ -513,6 +593,10 @@ class RestorePointService:
         # and discard the RestoreResult (the caller needs before_restore_point_id
         # for rollback), so log and continue.
         try:
+            _require_restore_presence(
+                presence_guard,
+                writes_may_have_occurred=True,
+            )
             self._store.save(updated_rp)
         except OSError:
             logger.exception(
@@ -521,6 +605,10 @@ class RestorePointService:
                 rp_id,
             )
         if self._wear_ledger is not None:
+            _require_restore_presence(
+                presence_guard,
+                writes_may_have_occurred=True,
+            )
             self._wear_ledger.append(
                 RP_RESTORE,
                 summary=f"Restored '{target_rp.title}' ({label.value})",

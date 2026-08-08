@@ -52,6 +52,7 @@ class TestWriteOutcomeAliases(unittest.TestCase):
                 "OK": "ok",
                 "OK_WITH_RETRY": "ok_with_retry",
                 "DEVICE_NOT_FOUND": "device_not_found",
+                "AMBIGUOUS_DEVICE": "ambiguous_device",
                 "OPEN_FAILED": "open_failed",
                 "WRITE_FAILED": "write_failed",
                 # Added for the step_size verify-and-retry setter (revert-to-1

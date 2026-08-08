@@ -11,7 +11,7 @@ winget show --id EvilHumphrey.LegendCTL --exact
 
 The versioned folders beside this file are historical submission snapshots.
 They are not the live catalog and must not be copied forward as a new release
-template. Microsoft accepted the package at 2.6.0; future updates are generated
+template. Microsoft accepted the package at 2.6.2; future updates are generated
 from the accepted upstream manifest.
 
 ## Automated update workflow
@@ -53,8 +53,10 @@ expiry.
 The job is skipped while the variable is unset or set to `false`; if it is
 enabled without the secret, the final submission step fails closed. Once all
 three are ready, rehearse from Actions with `workflow_dispatch`, leaving
-**`dry_run` checked** — that generates and fully verifies the manifest but stops
-before opening any pull request. Unchecking `dry_run` submits for real.
+**`dry_run` checked** — that generates the manifest and runs the project's
+integrity and structural safety checks, but stops before opening any pull
+request. Microsoft performs the authoritative schema validation after a real
+submission. Unchecking `dry_run` submits for real.
 
 ## Safety gates
 

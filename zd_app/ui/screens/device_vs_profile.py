@@ -97,6 +97,11 @@ class DeviceVsProfileScreenState:
     current_snapshot: Optional[ControllerSnapshot] = None
     current_read_success: Optional[dict] = None
     current_read_errors: Optional[dict] = None
+    # Every cached read belongs to one immutable render-side presence token.
+    # The generation distinguishes disconnect/reconnect of the same stable id;
+    # the key distinguishes connected A -> connected B transitions.
+    read_presence_key: Optional[tuple[str, str, str]] = None
+    read_presence_generation: Optional[int] = None
 
 
 def _ensure_state(shell) -> DeviceVsProfileScreenState:
@@ -142,6 +147,8 @@ def build(shell, parent: str) -> None:
         # the first profile) and self-heal a stale selection.
         if state.selected_profile_id not in profile_names:
             state.selected_profile_id = _default_profile_id(profile_names)
+
+        _invalidate_read_cache_if_presence_changed(shell, state)
 
         _build_controls(shell, state, profile_names)
         # Phase 2: the Last-Applied record (persisted by the profile-apply /
@@ -485,6 +492,10 @@ def _perform_read(shell, state: DeviceVsProfileScreenState) -> None:
     and never crashes the UI (mirrors ``AppShell.refresh_from_controller``).
     """
 
+    read_presence_key, read_presence_generation = _presence_token(shell)
+    state.read_presence_key = read_presence_key
+    state.read_presence_generation = read_presence_generation
+
     if getattr(shell, "hid_busy", False):
         # A threaded HID flow (footer read / profile apply / RP restore) is
         # mid-job. Issuing this many-round-trip read now would interleave
@@ -507,6 +518,13 @@ def _perform_read(shell, state: DeviceVsProfileScreenState) -> None:
         # No fresh-read service — fall back to the cached shell snapshot with no
         # provenance (best-effort; the differ treats absences honestly).
         cached = getattr(shell, "last_controller_snapshot", None)
+        cached_identity = getattr(shell, "last_snapshot_identity", None)
+        recognized_connected = (
+            read_presence_key[0] == "connected"
+            and read_presence_key[1] == "zd_ultimate_legend"
+        )
+        if not recognized_connected or cached_identity != read_presence_key[2]:
+            cached = None
         state.current_snapshot = cached
         state.current_read_success = None
         state.current_read_errors = None
@@ -518,6 +536,9 @@ def _perform_read(shell, state: DeviceVsProfileScreenState) -> None:
     try:
         snapshot, read_success, read_errors = service.read_current_state_with_provenance()
     except Exception as exc:  # noqa: BLE001 - HID timeout / OSError / anything
+        if _presence_token(shell) != (read_presence_key, read_presence_generation):
+            _clear_read_cache(state)
+            return
         logger.warning("device_vs_profile: live read failed: %s", exc)
         state.current_snapshot = None
         state.current_read_success = None
@@ -526,12 +547,57 @@ def _perform_read(shell, state: DeviceVsProfileScreenState) -> None:
         state.status_text = t("device_vs_profile.read_failed_reason", reason=str(exc))
         state.status_kind = "bad"
         return
+    if _presence_token(shell) != (read_presence_key, read_presence_generation):
+        _clear_read_cache(state)
+        return
     state.current_snapshot = snapshot
     state.current_read_success = dict(read_success)
     state.current_read_errors = dict(read_errors)
     state.read_failed = False
     state.status_text = ""
     state.status_kind = "info"
+
+
+def _presence_token(shell) -> tuple[tuple[str, str, str], int | None]:
+    state = getattr(getattr(shell, "device_service", None), "state", None)
+    key = (
+        str(getattr(state, "connection_state", "no_device") or "no_device"),
+        str(getattr(state, "device_class", "none") or "none"),
+        str(getattr(state, "stable_identifier", "unknown") or "unknown"),
+    )
+    generation = getattr(shell, "_controller_presence_generation", None)
+    if not isinstance(generation, int):
+        generation = None
+    return key, generation
+
+
+def _clear_read_cache(state: DeviceVsProfileScreenState) -> None:
+    """Drop only controller-derived state; retain profile/filter UI choices."""
+
+    state.read_attempted = False
+    state.read_failed = False
+    state.current_snapshot = None
+    state.current_read_success = None
+    state.current_read_errors = None
+    state.last_read_ts = None
+    state.status_text = ""
+    state.status_kind = "info"
+    state.read_presence_key = None
+    state.read_presence_generation = None
+
+
+def _invalidate_read_cache_if_presence_changed(
+    shell,
+    state: DeviceVsProfileScreenState,
+) -> None:
+    if not state.read_attempted:
+        return
+    current_key, current_generation = _presence_token(shell)
+    if (
+        state.read_presence_key != current_key
+        or state.read_presence_generation != current_generation
+    ):
+        _clear_read_cache(state)
 
 
 def _empty_snapshot() -> ControllerSnapshot:
@@ -561,16 +627,19 @@ def _load_last_applied(shell) -> Optional[LastAppliedRecord]:
     """The persisted Last-Applied record, or ``None`` when unavailable.
 
     ``None`` covers every quiet case the same way: no store wired (tests /
-    embedding callers), nothing recorded yet, or a corrupt file (the store
-    already maps that to ``None`` + a log warning). The screen then simply
-    renders its "no apply recorded" hint — never a crash, never a disclosure.
+    embedding callers), nothing recorded yet, a corrupt file, a legacy record,
+    or a record whose privacy-safe controller binding cannot be proven equal to
+    the current controller. The screen then simply renders its "no apply
+    recorded" hint — never a crash, never cross-controller attribution.
     """
 
     store = getattr(shell, "last_applied_store", None)
     if store is None:
         return None
     try:
-        return store.load()
+        state = getattr(getattr(shell, "device_service", None), "state", None)
+        stable_identifier = getattr(state, "stable_identifier", None)
+        return store.load_for_controller(stable_identifier)
     except Exception as exc:  # noqa: BLE001 - never crash the screen on a bad store
         logger.warning("device_vs_profile: last-applied load failed: %s", exc)
         return None
@@ -628,7 +697,7 @@ def _on_profile_changed(shell, app_data: str) -> None:
 def _on_read_clicked(shell) -> None:
     state = _ensure_state(shell)
     # Force a fresh read on the next build.
-    state.read_attempted = False
+    _clear_read_cache(state)
     shell.rebuild_current_screen()
 
 

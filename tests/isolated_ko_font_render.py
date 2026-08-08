@@ -39,6 +39,13 @@ from zd_app.ui.fonts import font_for, register_fonts
 
 _PUA = ""  # Private Use Area: no font maps it -> fallback/tofu advance.
 
+# General Punctuation (U+2000-U+206F) sampled directly: em dash, en dash,
+# ellipsis. These are NOT Hangul, so a Hangul-only range hint can rasterize
+# every Hangul syllable correctly while still leaving these three as tofu
+# (the bug this gate exists to catch) -- _hangul_only() below would discard
+# them before measurement, so they need their own, unfiltered sampling path.
+_GENERAL_PUNCTUATION = "—–…"
+
 
 def _hangul_only(text: str) -> str:
     return "".join(ch for ch in text if 0xAC00 <= ord(ch) <= 0xD7A3)
@@ -93,6 +100,44 @@ class IsolatedKoFontRenderTest(unittest.TestCase):
                 font_for("body", "en"),
                 "ko body resolved to the en fallback (ko fonts not registered)",
             )
+        finally:
+            dpg.destroy_context()
+
+    def test_general_punctuation_renders_non_tofu_through_register_fonts(self) -> None:
+        # Regression gate: the ko font path once forced only the Korean range
+        # hint, which rasterizes Hangul correctly but leaves General
+        # Punctuation (em dash, en dash, ellipsis -- all used in ko strings)
+        # as tofu. Sample the punctuation glyphs directly (unfiltered by
+        # _hangul_only) so this class of bug cannot hide behind a Hangul-only
+        # assertion the way it did before.
+        dpg.create_context()
+        try:
+            self._boot()
+            ko_body = font_for("body", "ko")
+            self.assertIsNotNone(ko_body, "ko body font handle not registered")
+
+            control = _PUA * len(_GENERAL_PUNCTUATION)
+            w_real = dpg.get_text_size(_GENERAL_PUNCTUATION, font=ko_body)[0]
+            w_tofu = dpg.get_text_size(control, font=ko_body)[0]
+            self.assertGreater(
+                w_real,
+                w_tofu,
+                f"General Punctuation renders as tofu: real width {w_real} == "
+                f"fallback {w_tofu} for {_GENERAL_PUNCTUATION!r} (glyphs not in atlas)",
+            )
+
+            # And each punctuation character individually -- a combined-string
+            # pass could in principle mask one degenerate glyph among three.
+            for ch in _GENERAL_PUNCTUATION:
+                w_char = dpg.get_text_size(ch, font=ko_body)[0]
+                w_char_tofu = dpg.get_text_size(_PUA, font=ko_body)[0]
+                with self.subTest(codepoint=hex(ord(ch))):
+                    self.assertGreater(
+                        w_char,
+                        w_char_tofu,
+                        f"U+{ord(ch):04X} renders as tofu: real width {w_char} == "
+                        f"fallback {w_char_tofu}",
+                    )
         finally:
             dpg.destroy_context()
 

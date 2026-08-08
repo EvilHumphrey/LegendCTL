@@ -85,10 +85,15 @@ def _shell(
     rp_service: Optional[_FakeRPService] = None,
     screen_state: Optional[screen.DeviceVsProfileScreenState] = None,
     last_snapshot=None,
+    last_snapshot_identity: Optional[str] = None,
+    stable_identifier: str = "controller-a",
+    presence_generation: int = 1,
 ) -> SimpleNamespace:
     device_service = SimpleNamespace(
         state=SimpleNamespace(
-            connection_state="connected" if connected else "no_device"
+            connection_state="connected" if connected else "no_device",
+            device_class="zd_ultimate_legend" if connected else "none",
+            stable_identifier=stable_identifier if connected else "unknown",
         )
     )
     return SimpleNamespace(
@@ -96,7 +101,9 @@ def _shell(
         device_service=device_service,
         restore_point_service=rp_service,
         last_controller_snapshot=last_snapshot,
+        last_snapshot_identity=last_snapshot_identity,
         device_vs_profile_screen_state=screen_state,
+        _controller_presence_generation=presence_generation,
         COLORS={
             "accent": (1, 1, 1, 1),
             "muted": (2, 2, 2, 2),
@@ -383,6 +390,127 @@ class ConnectedReadTests(unittest.TestCase):
         # The profile's values still render so the screen is not blank.
         self.assertEqual(len(ps.tables), 1)
 
+    def test_connected_a_to_b_rebuild_discards_a_cache_and_reads_b(self) -> None:
+        state = screen.DeviceVsProfileScreenState(
+            selected_profile_id="race",
+            show_only_changes=False,
+        )
+        snapshot_a = _snap(polling_rate=PollingRate.HZ_500)
+        snapshot_b = _snap(polling_rate=PollingRate.HZ_8000)
+        rp = MagicMock()
+        rp.read_current_state_with_provenance.side_effect = (
+            (snapshot_a, {"polling_rate": True}, {}),
+            (snapshot_b, {"polling_rate": True}, {}),
+        )
+        sh = _shell(
+            self.store,
+            connected=True,
+            rp_service=rp,
+            screen_state=state,
+            stable_identifier="controller-a",
+            presence_generation=7,
+        )
+
+        with _PatchedScreen(sh) as ps:
+            ps.build()
+        self.assertIs(state.current_snapshot, snapshot_a)
+
+        sh.device_service.state.stable_identifier = "controller-b"
+        sh._controller_presence_generation = 8
+        with _PatchedScreen(sh) as ps:
+            ps.build()
+
+        self.assertEqual(rp.read_current_state_with_provenance.call_count, 2)
+        self.assertIs(state.current_snapshot, snapshot_b)
+        self.assertEqual(state.read_presence_key[2], "controller-b")
+        self.assertEqual(state.read_presence_generation, 8)
+        self.assertEqual(state.selected_profile_id, "race")
+        self.assertFalse(state.show_only_changes)
+
+    def test_same_a_reconnect_generation_forces_a_fresh_read(self) -> None:
+        state = screen.DeviceVsProfileScreenState(selected_profile_id="race")
+        first = _snap(step_size=64)
+        reconnected = _snap(step_size=146)
+        rp = MagicMock()
+        rp.read_current_state_with_provenance.side_effect = (
+            (first, {"step_size": True}, {}),
+            (reconnected, {"step_size": True}, {}),
+        )
+        sh = _shell(
+            self.store,
+            connected=True,
+            rp_service=rp,
+            screen_state=state,
+            stable_identifier="controller-a",
+            presence_generation=20,
+        )
+
+        with _PatchedScreen(sh) as ps:
+            ps.build()
+        self.assertIs(state.current_snapshot, first)
+
+        sh._controller_presence_generation = 22
+        with _PatchedScreen(sh) as ps:
+            ps.build()
+
+        self.assertEqual(rp.read_current_state_with_provenance.call_count, 2)
+        self.assertIs(state.current_snapshot, reconnected)
+        self.assertEqual(state.read_presence_generation, 22)
+
+    def test_cached_shell_fallback_requires_same_recognized_controller(self) -> None:
+        cached = _snap(polling_rate=PollingRate.HZ_8000)
+        mismatch = _shell(
+            self.store,
+            connected=True,
+            last_snapshot=cached,
+            last_snapshot_identity="controller-b",
+            stable_identifier="controller-a",
+        )
+        mismatch_state = screen.DeviceVsProfileScreenState()
+
+        screen._perform_read(mismatch, mismatch_state)
+
+        self.assertIsNone(mismatch_state.current_snapshot)
+        self.assertTrue(mismatch_state.read_failed)
+
+        same = _shell(
+            self.store,
+            connected=True,
+            last_snapshot=cached,
+            last_snapshot_identity="controller-a",
+            stable_identifier="controller-a",
+        )
+        same_state = screen.DeviceVsProfileScreenState()
+
+        screen._perform_read(same, same_state)
+
+        self.assertIs(same_state.current_snapshot, cached)
+        self.assertFalse(same_state.read_failed)
+
+    def test_presence_change_during_read_discards_completed_snapshot(self) -> None:
+        state = screen.DeviceVsProfileScreenState(selected_profile_id="race")
+        sh = _shell(
+            self.store,
+            connected=True,
+            screen_state=state,
+            stable_identifier="controller-a",
+            presence_generation=30,
+        )
+
+        def read_then_switch():
+            sh.device_service.state.stable_identifier = "controller-b"
+            sh._controller_presence_generation = 31
+            return _snap(step_size=146), {"step_size": True}, {}
+
+        sh.restore_point_service = SimpleNamespace(
+            read_current_state_with_provenance=read_then_switch
+        )
+        screen._perform_read(sh, state)
+
+        self.assertFalse(state.read_attempted)
+        self.assertIsNone(state.current_snapshot)
+        self.assertIsNone(state.read_presence_key)
+
 
 # ---------------------------------------------------------------------------
 # Mixed-encoding (encoding_differs) status rendering
@@ -598,10 +726,20 @@ def _record_ts(hours_ago: int = 2) -> str:
 
 
 class _FakeLastAppliedStore:
-    def __init__(self, record: LastAppliedRecord | None) -> None:
+    def __init__(
+        self,
+        record: LastAppliedRecord | None,
+        *,
+        stable_identifier: str = "controller-a",
+    ) -> None:
         self._record = record
+        self._stable_identifier = stable_identifier
 
-    def load(self) -> LastAppliedRecord | None:
+    def load_for_controller(self, stable_identifier) -> LastAppliedRecord | None:
+        if stable_identifier in (None, "", "unknown"):
+            return None
+        if stable_identifier != self._stable_identifier:
+            return None
         return self._record
 
 
@@ -613,7 +751,10 @@ def _attach_record(sh, snapshot, *, failed=(), name="race day") -> LastAppliedRe
         failed_fields=tuple(failed),
         snapshot=snapshot,
     )
-    sh.last_applied_store = _FakeLastAppliedStore(record)
+    sh.last_applied_store = _FakeLastAppliedStore(
+        record,
+        stable_identifier=sh.device_service.state.stable_identifier,
+    )
     return record
 
 
@@ -692,6 +833,23 @@ class LastAppliedColumnTests(unittest.TestCase):
         self.assertEqual(len(ps.columns), 4)
         self.assertIn(t("device_vs_profile.no_apply_recorded"), ps.text_strings())
 
+    def test_record_for_other_controller_is_suppressed(self) -> None:
+        from zd_app.i18n import t
+
+        sh = self._connected_shell()
+        record = _attach_record(sh, _snap(polling_rate=PollingRate.HZ_8000))
+        sh.last_applied_store = _FakeLastAppliedStore(
+            record,
+            stable_identifier="controller-b",
+        )
+
+        with _PatchedScreen(sh) as ps:
+            ps.build()
+
+        self.assertEqual(len(ps.columns), 4)
+        self.assertIn(t("device_vs_profile.no_apply_recorded"), ps.text_strings())
+        self.assertNotIn(record.profile_name, "\n".join(ps.text_strings()))
+
     def test_drifted_cell_uses_warn_color_and_text_marker(self) -> None:
         from zd_app.i18n import t
 
@@ -744,7 +902,7 @@ class LastAppliedColumnTests(unittest.TestCase):
         # A failed field is never counted as drift.
         self.assertIn("0 drifted", "\n".join(ps.text_strings()))
 
-    def test_disconnected_branch_still_shows_record_column(self) -> None:
+    def test_disconnected_branch_suppresses_record_without_live_identity(self) -> None:
         from zd_app.i18n import t
 
         store = _FakeStore({"race day": _snap(polling_rate=PollingRate.HZ_500)})
@@ -752,13 +910,14 @@ class LastAppliedColumnTests(unittest.TestCase):
         record = _attach_record(sh, _snap(polling_rate=PollingRate.HZ_8000))
         with _PatchedScreen(sh) as ps:
             ps.build()
-        self.assertEqual(len(ps.columns), 5)
+        self.assertEqual(len(ps.columns), 4)
         header = t(
             "device_vs_profile.last_applied_header",
             name=record.profile_name,
             ts=record.applied_at,
         )
-        self.assertIn(header, ps.text_strings())
+        self.assertNotIn(header, ps.text_strings())
+        self.assertIn(t("device_vs_profile.no_apply_recorded"), ps.text_strings())
         # No device → no drift verdicts anywhere (drift needs a readable
         # current side), so the warn-marker never appears.
         marker = f"({t('device_vs_profile.status.drifted')})"

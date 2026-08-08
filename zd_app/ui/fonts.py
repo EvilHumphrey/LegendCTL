@@ -85,9 +85,17 @@ def _add_font_with_cjk(path: Path, size: int, label: str) -> Optional[int]:
 
 def _add_font_with_korean(path: Path, size: int, label: str) -> Optional[int]:
     # force_ranges: Korean must render on every dpg 2.x, not only where 2.x
-    # auto-loads CJK glyphs (see _add_font_with_ranges).
+    # auto-loads CJK glyphs (see _add_font_with_ranges). Chinese_Full is also
+    # forced here (not just Korean) because it is the range hint that carries
+    # General Punctuation (U+2000-U+206F): without it, em dash/en dash/ellipsis
+    # in ko strings render as tofu even though Hangul itself is fine.
     return _add_font_with_ranges(
-        path, size, label, lambda: dpg.mvFontRangeHint_Korean, force_ranges=True
+        path,
+        size,
+        label,
+        lambda: dpg.mvFontRangeHint_Chinese_Full,
+        lambda: dpg.mvFontRangeHint_Korean,
+        force_ranges=True,
     )
 
 

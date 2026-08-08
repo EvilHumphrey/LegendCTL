@@ -3,9 +3,9 @@
 Two seams:
 
 - ``AppShell._refresh_read_job`` (the bottom-bar / Home "Read..." job half)
-  invokes ``device_service.read_official_summary_into_state`` AFTER the primary
-  HID settings batch, and still returns the settings snapshot — the enrichment
-  is additive and never gates the read result.
+  probes the official-app summary AFTER the primary HID settings batch, then
+  the token-checked completion folds it into DeviceState — the enrichment is
+  additive and never gates the read result or crosses controller identities.
 - END-TO-END: a populating scrape sets ``summary_sources`` such that the
   diagnostics trust-matrix gathering (``_trust_matrix_signals``) flows the
   source through and the matrix derivation renders the amber "From the official
@@ -15,12 +15,21 @@ Two seams:
 from __future__ import annotations
 
 import unittest
+import threading
 from types import SimpleNamespace
 
 from tests.r2_shell_test_helpers import empty_snapshot
-from tests.test_app_shell_worker_thread import _GatedService, _make_shell
+from tests.test_app_shell_worker_thread import (
+    _GATE_TIMEOUT_S,
+    _StoppableGatedService,
+    _capture_widget_state,
+    _drain_queued_completions,
+    _make_shell,
+    _set_connected_identity,
+)
 from tests.test_device_services import FakeSummaryProbeService
 from zd_app.services.device_service import DeviceService
+from zd_app.services.official_app_summary_service import OfficialAppSummary
 from zd_app.services.trust_matrix import (
     INFERRED,
     OFFICIAL_APP_LABEL_KEY,
@@ -30,6 +39,7 @@ from zd_app.services.trust_matrix import (
     row_label,
 )
 from zd_app.ui.screens import diagnostics
+from zd_app.ui.app_shell import threaded_hid_executor
 
 
 class RefreshReadJobOfficialSummaryWiringTests(unittest.TestCase):
@@ -37,8 +47,12 @@ class RefreshReadJobOfficialSummaryWiringTests(unittest.TestCase):
         self,
     ) -> None:
         snapshot = empty_snapshot()
-        service = _GatedService(snapshot)
+        service = _StoppableGatedService(snapshot)
         shell = _make_shell(service)
+        summary = OfficialAppSummary(firmware_version="1.18")
+        shell.device_service.official_app_summary_service.read_summary.return_value = (
+            summary
+        )
 
         outcome = shell._refresh_read_job()
 
@@ -47,9 +61,18 @@ class RefreshReadJobOfficialSummaryWiringTests(unittest.TestCase):
         self.assertIs(snap, snapshot)
         self.assertEqual(skipped, 0)
         self.assertEqual(service.read_calls, 1)  # HID settings batch ran
-        # The official-summary enrichment was invoked job-side (off the UI
-        # thread), once, after the settings batch.
-        shell.device_service.read_official_summary_into_state.assert_called_once()
+        # The probe was invoked job-side after the settings batch, but the
+        # mutable DeviceState fold waits for token-checked on_done.
+        shell.device_service.official_app_summary_service.read_summary.assert_called_once_with(
+            force_refresh=True
+        )
+        shell.device_service._apply_official_app_summary.assert_not_called()
+
+        shell.device_service._apply_official_app_summary.return_value = False
+        _capture_widget_state(
+            lambda: shell._refresh_read_on_done(outcome, include_device=True)
+        )
+        shell.device_service._apply_official_app_summary.assert_called_once_with(summary)
 
     def test_read_job_returns_snapshot_even_if_summary_step_misbehaves(self) -> None:
         # Belt-and-suspenders: the real method swallows failures internally
@@ -58,12 +81,46 @@ class RefreshReadJobOfficialSummaryWiringTests(unittest.TestCase):
         # settings snapshot as the read's deliverable. Here the summary call is
         # a no-op mock; assert the snapshot returns regardless.
         snapshot = empty_snapshot()
-        service = _GatedService(snapshot)
+        service = _StoppableGatedService(snapshot)
         shell = _make_shell(service)
 
         snap, _first_connect, _skipped = shell._refresh_read_job()
 
         self.assertIs(snap, snapshot)
+
+    def test_unit_a_probe_result_does_not_mutate_unit_b_state(self) -> None:
+        class GatedProbe:
+            def __init__(self) -> None:
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def read_summary(self, *, force_refresh=False):
+                self.started.set()
+                if not self.release.wait(timeout=_GATE_TIMEOUT_S):
+                    raise AssertionError("summary probe gate never released")
+                return OfficialAppSummary(firmware_version="A-firmware")
+
+        service = _StoppableGatedService(empty_snapshot())
+        shell = _make_shell(service, hid_executor=threaded_hid_executor)
+        shell._dpg_context_ready = True
+        _set_connected_identity(shell, "zd-unit-a")
+        probe = GatedProbe()
+        shell.device_service.official_app_summary_service = probe
+
+        _capture_widget_state(shell.refresh_from_controller)
+        self.assertTrue(probe.started.wait(_GATE_TIMEOUT_S))
+        shell.device_service.state.stable_identifier = "zd-unit-b"
+        shell.device_service.state.firmware_version = "B-existing"
+        shell._observe_controller_presence()
+        shell._invalidate_cached_controller_settings()
+        shell._restart_settings_service_for_current_presence()
+        probe.release.set()
+
+        _drain_queued_completions(shell, 1)
+        _capture_widget_state(shell._drain_hid_job_completions)
+
+        self.assertEqual(shell.device_service.state.firmware_version, "B-existing")
+        shell.device_service._apply_official_app_summary.assert_not_called()
 
 
 class OfficialSummaryReadTrustMatrixEndToEndTests(unittest.TestCase):

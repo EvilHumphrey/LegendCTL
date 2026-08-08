@@ -17,6 +17,7 @@ from zd_app.i18n import t
 from zd_app.services.settings_service import (
     BackPaddleBinding,
     ControllerSnapshot,
+    DISCONNECT_WIN32_ERRORS,
     MacroSlot,
     SettingsService,
 )
@@ -73,6 +74,8 @@ def result_error_text(result) -> str:
         message = t("apply.error.verify_failed")
     elif label == "device_not_found":
         message = t("apply.error.device_not_found")
+    elif label == "ambiguous_device":
+        message = t("apply.error.ambiguous_device")
     elif label == "open_failed":
         message = t("apply.error.open_failed")
     else:
@@ -95,6 +98,7 @@ class ApplyFailure:
     is_transient: bool
     retry_fn: Callable[[], object] | None = field(default=None, repr=False, compare=False)
     on_success: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+    sensitivity_downgrades_on_success: tuple[str, ...] = ()
 
 
 @dataclass
@@ -110,6 +114,13 @@ class ApplyResult:
     # their current result semantics.
     readback_verification: ApplyReadbackVerification | None = None
     no_restore_point: bool = False
+
+
+@dataclass
+class _ApplyWriteState:
+    abort_remaining: bool = False
+    operation_is_current: Callable[[], bool] | None = None
+    run_operation: Callable[[Callable[[], object]], object] | None = None
 
 
 def snapshot_as_sent(
@@ -222,12 +233,41 @@ class SettingsApplyCoordinator:
             return result
 
         result = ApplyResult()
-        write = self._make_writer(result)
+        write_state = _ApplyWriteState()
+        write = self._make_writer(result, write_state)
         settings_service = self._settings_service
         field_delay = self._field_trailer_delay_s
 
+        # Bind the whole operation before any service call, including the
+        # capability probe below.  A probe can overlap a stop/start; admitting
+        # only after it returns would accidentally bless the replacement
+        # session and let it inherit the original snapshot.
+        admit_operation = getattr(type(settings_service), "admit_write_operation", None)
+        admission_is_current = getattr(
+            type(settings_service),
+            "session_admission_is_current",
+            None,
+        )
+        if callable(admit_operation) and callable(admission_is_current):
+            operation_admission = admit_operation(settings_service)
+            write_state.operation_is_current = lambda: (
+                operation_admission is not None
+                and admission_is_current(settings_service, operation_admission)
+            )
+            run_operation = getattr(
+                type(settings_service),
+                "run_write_operation",
+                None,
+            )
+            if callable(run_operation) and operation_admission is not None:
+                write_state.run_operation = lambda callback: run_operation(
+                    settings_service,
+                    operation_admission,
+                    callback,
+                )
+
         # Probe the 8-point capability ONCE, up front, before any write in this
-        # apply can disconnect + _invalidate_cached_handles (which nulls the
+        # apply can disconnect + latch the controller binding (which nulls the
         # cached verdict). A lazy mid-pipeline probe — after the burst — would,
         # on a flaky just-reconnected device, fire a fresh ~500ms device probe
         # that could return a DIFFERENT verdict than the one the snapshot was
@@ -241,12 +281,38 @@ class SettingsApplyCoordinator:
         )
         use_8point = has_8point_curve and settings_service.supports_8point_sensitivity()
 
-        def trailer_write(label, fn, *, on_success=None):
+        def trailer_write(
+            label,
+            fn,
+            *,
+            on_success=None,
+            sensitivity_downgrades_on_success=(),
+        ):
+            if write_state.abort_remaining:
+                # The field is still part of the requested Apply, but it must
+                # not touch the device after identity proof is lost. Route it
+                # through the writer so the result records an explicit
+                # not-written failure (and preserves its safe Retry closure).
+                return write(
+                    label,
+                    fn,
+                    on_success=on_success,
+                    sensitivity_downgrades_on_success=(
+                        sensitivity_downgrades_on_success
+                    ),
+                )
             # Per-field trailer: sleep first so the firmware is in a quiet
             # state before the next write hits, then fire the write.
             if field_delay > 0:
                 time.sleep(field_delay)
-            write(label, fn, on_success=on_success)
+            return write(
+                label,
+                fn,
+                on_success=on_success,
+                sensitivity_downgrades_on_success=(
+                    sensitivity_downgrades_on_success
+                ),
+            )
 
         # --- Main burst (back-to-back, no inter-write settle) ---
         # Only polling_rate and back_paddle_bindings remain in the burst.
@@ -336,12 +402,15 @@ class SettingsApplyCoordinator:
                 ),
             )
         elif snapshot.sensitivity_left is not None:
-            if not use_8point and left_8point is not None:
-                result.sensitivity_downgrades += ("sens_left",)
             trailer_write(
                 "sens_left",
                 lambda: settings_service.set_left_stick_sensitivity_curve(
                     snapshot.sensitivity_left
+                ),
+                sensitivity_downgrades_on_success=(
+                    ("sens_left",)
+                    if not use_8point and left_8point is not None
+                    else ()
                 ),
             )
 
@@ -353,12 +422,15 @@ class SettingsApplyCoordinator:
                 ),
             )
         elif snapshot.sensitivity_right is not None:
-            if not use_8point and right_8point is not None:
-                result.sensitivity_downgrades += ("sens_right",)
             trailer_write(
                 "sens_right",
                 lambda: settings_service.set_right_stick_sensitivity_curve(
                     snapshot.sensitivity_right
+                ),
+                sensitivity_downgrades_on_success=(
+                    ("sens_right",)
+                    if not use_8point and right_8point is not None
+                    else ()
                 ),
             )
         if snapshot.trigger_left is not None:
@@ -412,7 +484,10 @@ class SettingsApplyCoordinator:
         # so the step_size work's separate hardware envelope (100/200/500 ms)
         # remains the source of truth for that field's settle.
         if snapshot.step_size is not None:
-            if self._step_size_trailer_delay_s > 0:
+            if (
+                not write_state.abort_remaining
+                and self._step_size_trailer_delay_s > 0
+            ):
                 time.sleep(self._step_size_trailer_delay_s)
             # Verified write: the firmware silently rejects a fraction of
             # step_size writes (WriteFile OK, device never commits), and this is
@@ -454,12 +529,65 @@ class SettingsApplyCoordinator:
         if not retry_failures:
             return retry_result
 
+        # A retry click is one logical operation, not a set of independent
+        # writes.  Bind it once so a stop/start between retry callbacks cannot
+        # split the failed fields across two physical controllers.
+        operation_is_current: Callable[[], bool] | None = None
+        run_operation: Callable[[Callable[[], object]], object] | None = None
+        settings_service = self._settings_service
+        if settings_service is not None:
+            admit_operation = getattr(
+                type(settings_service),
+                "admit_write_operation",
+                None,
+            )
+            admission_is_current = getattr(
+                type(settings_service),
+                "session_admission_is_current",
+                None,
+            )
+            if callable(admit_operation) and callable(admission_is_current):
+                operation_admission = admit_operation(settings_service)
+                operation_is_current = lambda: (
+                    operation_admission is not None
+                    and admission_is_current(settings_service, operation_admission)
+                )
+                operation_runner = getattr(
+                    type(settings_service),
+                    "run_write_operation",
+                    None,
+                )
+                if callable(operation_runner) and operation_admission is not None:
+                    run_operation = lambda callback: operation_runner(
+                        settings_service,
+                        operation_admission,
+                        callback,
+                    )
+
         for failure in retry_failures:
             if failure.retry_fn is None:
                 retry_result.failed.append(failure)
                 continue
+            if operation_is_current is not None and not operation_is_current():
+                retry_result.failed.append(
+                    ApplyFailure(
+                        setting_label=failure.setting_label,
+                        error=t("apply.error.device_not_found"),
+                        is_transient=True,
+                        retry_fn=failure.retry_fn,
+                        on_success=failure.on_success,
+                        sensitivity_downgrades_on_success=(
+                            failure.sensitivity_downgrades_on_success
+                        ),
+                    )
+                )
+                continue
             try:
-                result = failure.retry_fn()
+                result = (
+                    run_operation(failure.retry_fn)
+                    if run_operation is not None
+                    else failure.retry_fn()
+                )
             except Exception as exc:
                 retry_result.failed.append(
                     ApplyFailure(
@@ -468,6 +596,9 @@ class SettingsApplyCoordinator:
                         is_transient=False,
                         retry_fn=failure.retry_fn,
                         on_success=failure.on_success,
+                        sensitivity_downgrades_on_success=(
+                            failure.sensitivity_downgrades_on_success
+                        ),
                     )
                 )
                 continue
@@ -490,6 +621,10 @@ class SettingsApplyCoordinator:
 
             outcome = getattr(result, "outcome", None)
             if outcome_is_success(outcome):
+                retry_result.sensitivity_downgrades = _merge_sensitivity_downgrades(
+                    retry_result.sensitivity_downgrades,
+                    failure.sensitivity_downgrades_on_success,
+                )
                 retry_result.succeeded += 1
                 if outcome_used_retry(outcome):
                     retry_result.retry_recoveries += 1
@@ -503,6 +638,9 @@ class SettingsApplyCoordinator:
                     is_transient=result_is_transient(result),
                     retry_fn=failure.retry_fn,
                     on_success=failure.on_success,
+                    sensitivity_downgrades_on_success=(
+                        failure.sensitivity_downgrades_on_success
+                    ),
                 )
             )
 
@@ -511,16 +649,60 @@ class SettingsApplyCoordinator:
     def _make_writer(
         self,
         result: ApplyResult,
+        write_state: _ApplyWriteState,
     ) -> Callable[..., bool]:
         def write(
             label: str,
             write_fn: Callable[[], object],
             *,
             on_success: Callable[[], None] | None = None,
+            sensitivity_downgrades_on_success: tuple[str, ...] = (),
         ) -> bool:
+            if write_state.abort_remaining:
+                # This label was applicable to the requested snapshot, but no
+                # device write was attempted after the earlier disconnect.
+                # Keep it out of write-success / verification baselines and in
+                # the Retry set without invoking its setter on a stale session.
+                result.total_attempted += 1
+                result.failed.append(
+                    ApplyFailure(
+                        setting_label=label,
+                        error=t("apply.error.identity_changed_not_written"),
+                        is_transient=True,
+                        retry_fn=write_fn,
+                        on_success=on_success,
+                        sensitivity_downgrades_on_success=(
+                            sensitivity_downgrades_on_success
+                        ),
+                    )
+                )
+                return False
+            if (
+                write_state.operation_is_current is not None
+                and not write_state.operation_is_current()
+            ):
+                write_state.abort_remaining = True
+                result.total_attempted += 1
+                result.failed.append(
+                    ApplyFailure(
+                        setting_label=label,
+                        error=t("apply.error.device_not_found"),
+                        is_transient=True,
+                        retry_fn=write_fn,
+                        on_success=on_success,
+                        sensitivity_downgrades_on_success=(
+                            sensitivity_downgrades_on_success
+                        ),
+                    )
+                )
+                return False
             result.total_attempted += 1
             try:
-                outcome_result = write_fn()
+                outcome_result = (
+                    write_state.run_operation(write_fn)
+                    if write_state.run_operation is not None
+                    else write_fn()
+                )
             except Exception as exc:
                 result.failed.append(
                     ApplyFailure(
@@ -529,12 +711,19 @@ class SettingsApplyCoordinator:
                         is_transient=False,
                         retry_fn=write_fn,
                         on_success=on_success,
+                        sensitivity_downgrades_on_success=(
+                            sensitivity_downgrades_on_success
+                        ),
                     )
                 )
                 return False
 
             outcome = getattr(outcome_result, "outcome", None)
             if outcome_is_success(outcome):
+                result.sensitivity_downgrades = _merge_sensitivity_downgrades(
+                    result.sensitivity_downgrades,
+                    sensitivity_downgrades_on_success,
+                )
                 if getattr(outcome_result, "verify_inconclusive", False) is True:
                     result.unverified_writes = _merge_unverified_writes(
                         result.unverified_writes,
@@ -552,8 +741,17 @@ class SettingsApplyCoordinator:
                     is_transient=result_is_transient(outcome_result),
                     retry_fn=write_fn,
                     on_success=on_success,
+                    sensitivity_downgrades_on_success=(
+                        sensitivity_downgrades_on_success
+                    ),
                 )
             )
+            if getattr(outcome_result, "error_code", None) in DISCONNECT_WIN32_ERRORS:
+                # The service has lost proof that later setters still target
+                # the controller this Apply was admitted against. Do not even
+                # invoke them: a replacement device must never inherit the
+                # remainder of the burst.
+                write_state.abort_remaining = True
             return False
 
         return write
