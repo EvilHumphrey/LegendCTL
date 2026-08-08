@@ -37,11 +37,15 @@ git diff -- requirements-release.in requirements-release.lock
 ```
 
 The refresh command bootstraps its pinned `pip-tools` version from the separate
-hash lock `requirements-lock-tools.lock`, ignores ambient pip configuration,
-and forwards `--only-binary=:all:` to its resolver. It therefore resolves only
-the declared roots as wheels before downloading the selected release wheels
-again with hash verification. Review the resulting lock diff and run the normal
-test gate before committing.
+hash lock `requirements-lock-tools.lock`. `pip-tools --no-config` ignores its
+own configuration. The script also strips inherited `PIP_*` variables before
+work begins because `PIP_CONFIG_FILE` is read before isolated mode takes effect.
+Forwarded `pip --isolated --only-binary=:all:` then ignores user pip config
+while restricting resolution to wheels; its hash-locked wheel downloads use
+`pip --isolated` as well. It therefore resolves only the declared roots as
+wheels before downloading the selected release wheels again with hash
+verification. Review the resulting lock diff and run the normal test gate
+before committing.
 
 This patch does not change the independently tracked Inno Setup / Chocolatey
 installation path. That remains an explicit residual release-supply-chain risk

@@ -49,13 +49,23 @@ $toolWheelhouse = Join-Path $temporaryRoot "tool-wheelhouse"
 $releaseWheelhouse = Join-Path $temporaryRoot "release-wheelhouse"
 $toolVenv = Join-Path $temporaryRoot "tool-venv"
 $toolPython = Join-Path $toolVenv "Scripts\python.exe"
+$savedPipEnvironment = @{}
+
+# pip's --isolated ignores user config and ordinary PIP_* settings, but pip
+# reads PIP_CONFIG_FILE before that mode can take effect. Remove every inherited
+# PIP_* variable for this process as well; restore them in finally so an invoked
+# script scope never leaks an environment change back to a calling session.
+Get-ChildItem Env: | Where-Object { $_.Name -like 'PIP_*' } | ForEach-Object {
+    $savedPipEnvironment[$_.Name] = $_.Value
+    Remove-Item -LiteralPath ("Env:\" + $_.Name)
+}
 
 try {
     New-Item -ItemType Directory -Path $toolWheelhouse, $releaseWheelhouse | Out-Null
 
     # Bootstrap only from the committed, hash-locked tooling closure.
     Invoke-NativeCommand -Label "download hash-locked pip-tools wheelhouse" -ScriptBlock {
-        & $py312 -m pip download --disable-pip-version-check --only-binary=:all: --no-deps `
+        & $py312 -m pip --isolated download --disable-pip-version-check --only-binary=:all: --no-deps `
             --require-hashes --dest $toolWheelhouse -r requirements-lock-tools.lock
     }
     Invoke-NativeCommand -Label "create lock tooling venv" -ScriptBlock {
@@ -69,14 +79,15 @@ try {
         & $toolPython -m pip check
     }
 
-    # This is the intentional live resolution. Ignore ambient pip configuration
-    # and forward the wheel-only rule to pip so pip-tools cannot select an sdist
-    # or execute a build backend before the later wheelhouse proof. The command
-    # remains explicit and deterministic for the pinned roots, and writes hashes
-    # fetched from PyPI into the lock.
+    # This is the intentional live resolution. --no-config disables pip-tools'
+    # own config, while the forwarded --isolated disables pip configuration and
+    # PIP_* environment variables inside the resolver. Pair it with wheel-only
+    # resolution so pip-tools cannot select an sdist or execute a build backend
+    # before the later wheelhouse proof. The command remains explicit and
+    # deterministic for the pinned roots, and writes hashes fetched from PyPI.
     Invoke-NativeCommand -Label "compile release dependency lock" -ScriptBlock {
         & $toolPython -m piptools compile --no-config --allow-unsafe --generate-hashes --strip-extras `
-            --pip-args '--only-binary=:all:' `
+            --pip-args '--isolated --only-binary=:all:' `
             --output-file requirements-release.lock requirements-release.in
     }
     # pip-tools retains --pip-args in its generated command echo, but omits
@@ -95,12 +106,15 @@ try {
     # SHA-256 entries. --no-deps prevents a hidden second resolver from adding
     # a package that is absent from the reviewed lock.
     Invoke-NativeCommand -Label "verify release lock wheel closure" -ScriptBlock {
-        & $py312 -m pip download --disable-pip-version-check --only-binary=:all: --no-deps `
+        & $py312 -m pip --isolated download --disable-pip-version-check --only-binary=:all: --no-deps `
             --require-hashes --dest $releaseWheelhouse -r requirements-release.lock
     }
 
     Write-Host "Release lock refreshed and hash-verified. Review requirements-release.lock before committing." -ForegroundColor Green
 } finally {
+    foreach ($name in $savedPipEnvironment.Keys) {
+        Set-Item -LiteralPath ("Env:\" + $name) -Value $savedPipEnvironment[$name]
+    }
     if (Test-Path -LiteralPath $temporaryRoot) {
         Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
     }

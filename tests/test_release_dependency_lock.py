@@ -8,6 +8,9 @@ complete wheel set, then install and audit the same venv offline.
 from __future__ import annotations
 
 import re
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -21,6 +24,7 @@ CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 SETUP = ROOT / "tools" / "setup_dev_env.ps1"
 BUILD = ROOT / "tools" / "build_release.ps1"
 REFRESH = ROOT / "tools" / "refresh_release_lock.ps1"
+PY312 = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / "Python312" / "python.exe"
 
 
 def _locked_sections(path: Path) -> dict[str, str]:
@@ -103,16 +107,45 @@ class ReleaseOfflineInstallationTests(unittest.TestCase):
     def test_refresher_bootstraps_from_its_own_hash_lock_and_verifies_the_new_lock(self) -> None:
         refresh = REFRESH.read_text(encoding="utf-8")
         self.assertIn("requirements-lock-tools.lock", refresh)
+        self.assertIn("Where-Object { $_.Name -like 'PIP_*' }", refresh)
         self.assertIn("--no-index --find-links $toolWheelhouse", refresh)
+        self.assertEqual(refresh.count("-m pip --isolated download --disable-pip-version-check"), 2)
         self.assertIn("-m piptools compile --no-config --allow-unsafe --generate-hashes", refresh)
-        self.assertIn("--pip-args '--only-binary=:all:'", refresh)
+        self.assertIn("--pip-args '--isolated --only-binary=:all:'", refresh)
         self.assertIn("verify release lock wheel closure", refresh)
         self.assertIn("--require-hashes --dest $releaseWheelhouse", refresh)
 
     def test_generated_lock_header_records_the_no_config_wheel_only_resolution(self) -> None:
         header = "\n".join(LOCK.read_text(encoding="utf-8").splitlines()[:8])
         self.assertIn("--no-config", header)
-        self.assertIn("--pip-args='--only-binary=:all:'", header)
+        self.assertIn("--pip-args='--isolated --only-binary=:all:'", header)
+        self.assertIn("--only-binary :all:", LOCK.read_text(encoding="utf-8"))
+
+    @unittest.skipUnless(PY312.is_file(), "requires the supported local Python 3.12 refresh runtime")
+    def test_refresher_ignores_hostile_pip_environment(self) -> None:
+        """The real refresh path must ignore hostile pip env/config, not just name flags."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = Path(temp_dir) / "hostile-pip.conf"
+            config.write_text(
+                "[global]\nindex-url = http://127.0.0.1:9/simple\nno-index = true\n",
+                encoding="utf-8",
+            )
+            environment = os.environ | {
+                "PIP_CONFIG_FILE": str(config),
+                "PIP_INDEX_URL": "http://127.0.0.1:9/simple",
+                "PIP_NO_INDEX": "1",
+                "PIP_NO_CACHE_DIR": "1",
+            }
+            completed = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(REFRESH)],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("Release lock refreshed and hash-verified.", completed.stdout)
 
 
 if __name__ == "__main__":
