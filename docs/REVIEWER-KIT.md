@@ -93,7 +93,7 @@ LegendCTL's pitch is the inverse, and it's verifiable rather than asserted.
   (firmware v1.18 incl. 8K, v1.24 incl. 8-point sensitivity). The controller ships
   in six variants; other variants/firmware are best-effort — see the
   [compatibility matrix](compatibility-matrix.md) for the current evidence ledger.
-- **Unsigned** today (SmartScreen warning expected; signing is planned via the
+- **Unsigned** today (a SmartScreen warning may appear; signing is planned via the
   SignPath Foundation OSS program once eligible).
 - **AI-assisted**, human-directed and reviewed — disclosed in the
   [Acknowledgments](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md#acknowledgments); the code is open and

@@ -1,11 +1,11 @@
 ---
-title: Installing LegendCTL on Windows (and the SmartScreen warning)
-description: How to download, verify, and run LegendCTL on Windows — including why Windows shows a SmartScreen warning for unsigned apps, how to verify your download is genuine, and how to verify each release's build provenance.
+title: Installing LegendCTL on Windows (and possible SmartScreen warnings)
+description: How to download, verify, and run LegendCTL on Windows — including why Windows may show a SmartScreen warning for unsigned or low-reputation downloads, how to verify your download is genuine, and how to verify each release's build provenance.
 ---
 
 # Installing LegendCTL on Windows
 
-LegendCTL is a free, open-source, standalone configurator for the ZD Ultimate Legend — no official ZD app required, no drivers, no background service, no telemetry. This page covers downloading it, getting past the Windows SmartScreen warning, and **verifying your download is genuine** so you don't have to take "unsigned" on faith.
+LegendCTL is a free, open-source, standalone configurator for the ZD Ultimate Legend — no official ZD app required, no drivers, no background service, no telemetry. This page covers downloading it, handling a possible Windows SmartScreen warning, and **verifying your download is genuine** so you don't have to take "unsigned" on faith.
 
 ## 1. Download
 
@@ -14,11 +14,11 @@ From the [Releases page](https://github.com/EvilHumphrey/LegendCTL/releases/late
 - **`ZDUltimateLegend-v<version>-windows.zip`** — portable. Unzip anywhere and run `ZD Ultimate Legend.exe`. Nothing is installed; delete the folder to remove it. **Recommended if you just want to try it.**
 - **`ZDUltimateLegend-v<version>-Setup.exe`** — installer (adds Start-Menu / Desktop shortcuts; uninstall via Settings → Apps).
 
-## 2. Why Windows shows "Windows protected your PC"
+## 2. Why Windows may show "Windows protected your PC"
 
-LegendCTL is **not code-signed** (a code-signing certificate is gated, for an open-source project, on first building download reputation — see below). So Windows SmartScreen shows a blue **"Windows protected your PC"** dialog for it, the same as it does for most new, independent software.
+LegendCTL is **not code-signed** and its downloads may have limited reputation. Depending on the file's reputation, how it was downloaded, and system or enterprise policy, Windows SmartScreen may show a blue **"Windows protected your PC"** dialog.
 
-**This warning is about reputation, not safety** — it means "Windows hasn't seen this file downloaded by enough people yet," not "this file is harmful." You don't have to trust that blindly, though — you can **verify the download yourself** (next section).
+**This warning is a reputation signal, not by itself a malware verdict.** It does not mean that Windows proved the file harmful. You don't have to trust the download blindly, though — you can **verify it yourself** (next section).
 
 To run it:
 
@@ -56,7 +56,7 @@ Releases **v2.4.1 and earlier were built locally** by the maintainer and are **n
 **What this proves / doesn't prove — honestly:**
 
 - **Proves:** the file you downloaded is byte-identical to what this repository's public workflow built from the public source. If someone swapped, modified, or re-uploaded a release file after the build, verification **fails** — so you can detect tampering rather than having to trust that it didn't happen.
-- **Does NOT prove:** that the app is code-signed (it isn't yet), that SmartScreen won't warn (it will — see section 2), or that the software is risk-free. Provenance is about *origin*, not a safety rating.
+- **Does NOT prove:** that the app is code-signed (it isn't yet), that SmartScreen won't warn (it may still warn — see section 2), or that the software is risk-free. Provenance is about *origin*, not a safety rating.
 
 Checking it needs the [GitHub CLI](https://cli.github.com/) (**v2.67.0 or newer** — older versions had a verification exit-code bug):
 
