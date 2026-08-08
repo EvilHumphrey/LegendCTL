@@ -299,9 +299,16 @@ window doesn't appear, re-run with `python` to see startup errors in the console
 **Build a release:**
 
 ```powershell
+.\tools\setup_dev_env.ps1
 .\tools\build_release.ps1
 .\tools\smoke_release.ps1 -DurationSeconds 5
 ```
+
+The release setup downloads the reviewed Python closure once, verifies every
+wheel against `requirements-release.lock`, then installs the build environment
+offline. `build_release.ps1` refuses an unproven venv and does not resolve or
+install packages itself. See [the release dependency lock](docs/release-dependency-lock.md)
+for the refresh procedure and the separate Inno Setup/Chocolatey residual.
 
 Output: `dist/ZDUltimateLegend-v<version>/ZD Ultimate Legend.exe` plus a
 distributable ZIP. If [Inno Setup 6](https://jrsoftware.org/isdl.php) is installed

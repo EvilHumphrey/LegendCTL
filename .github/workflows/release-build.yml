@@ -41,7 +41,7 @@ name: Release build (CI-built, attested)
 # building. (ci.yml only runs on push/PR to main, not on tags — without this
 # mirror, a tag push would build and attest unverified code.)
 #
-# Supply-chain pins:
+# Supply-chain pins and residuals:
 #   - runs-on is pinned to `windows-2025`, the image family the proven-good
 #     CI run used (run 28626143061 resolved windows-latest to image
 #     "windows-2025-vs2026", version 20260628.158.1 — since June 2026 the
@@ -50,13 +50,14 @@ name: Release build (CI-built, attested)
 #   - Inno Setup is pinned (chocolatey package 6.7.1) and asserted
 #     post-install, matching the maintainer's local 6.7.1 so CI builds and
 #     local builds are the same toolchain.
-#   - ACCEPTED RISK (deliberate, documented): Python dependencies are
-#     version-pinned via requirements.txt / requirements-build.txt but NOT
-#     hash-pinned (no pip --require-hashes / pip-compile --generate-hashes).
-#     Full hash-locking of the transitive tree is a maintenance burden
-#     disproportionate to this project today; revisit if byte-reproducible
-#     builds become a goal. Standing mitigations: exact version pins,
-#     Dependabot freshness, and the pip-audit gate in this workflow.
+#   - Python: requirements-release.lock is a transitive-complete exact-version
+#     SHA-256 lock for the runtime, PyInstaller, and pinned pip-audit closure.
+#     The workflow downloads the reviewed lock exactly once into a temporary
+#     wheelhouse, then creates the build/audit/PyInstaller venv offline with
+#     --no-index. See docs/release-dependency-lock.md for refresh procedure.
+#   - Residual (not changed here): Inno Setup is obtained through Chocolatey.
+#     Its package-version assertion is retained, but that separate installer
+#     supply chain is not authenticated by the Python wheel lock.
 #   - CPython: pinned exactly to 3.13.14, the 2026-07-03 CVE sweep's primary
 #     recommendation. Staying on 3.12 was preferred (all local suite evidence
 #     is 3.12) but is not securable in CI: 3.12 is in security-only phase and
@@ -106,7 +107,6 @@ jobs:
           # Exact pin (see the CPython supply-chain note in the header). Keep
           # in sync with the floor asserted below.
           python-version: '3.13.14'
-          cache: pip
 
       - name: Assert Python security-patch floor
         shell: pwsh
@@ -168,10 +168,26 @@ jobs:
             throw "Tag $tag does not point to a commit on public main — refusing an off-branch release."
           }
 
-      - name: Install runtime dependencies (test gate)
+      - name: Download hash-verified release wheelhouse
+        shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          # The one intentional PyPI access in the artifact path. Every
+          # selected distribution is already pinned and hash checked; --no-deps
+          # prevents pip from resolving an unreviewed extra package.
+          New-Item -ItemType Directory -Path .release-wheelhouse | Out-Null
+          python -m pip download --disable-pip-version-check --only-binary=:all: --no-deps `
+            --require-hashes --dest .release-wheelhouse -r requirements-release.lock
+
+      - name: Create and install the exact offline build venv (.venv-zd)
+        shell: pwsh
+        run: |
+          python -m venv .venv-zd
+          .\.venv-zd\Scripts\python.exe -m pip install --disable-pip-version-check --no-index `
+            --find-links .release-wheelhouse --only-binary=:all: --no-deps `
+            --require-hashes -r requirements-release.lock
+          .\.venv-zd\Scripts\python.exe -m pip check
+          $lockHash = (Get-FileHash -LiteralPath requirements-release.lock -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath .venv-zd\.legendctl-release-lock.sha256 -Value $lockHash -Encoding ascii -NoNewline
 
       - name: Run test suite before building (constraint gates included)
         shell: pwsh
@@ -184,7 +200,7 @@ jobs:
           # signed/unsigned 0xC0000005 form) are allowed.
           # unittest writes to stderr, hence 2>&1.
           $ErrorActionPreference = 'Continue'
-          python -m unittest discover -s tests 2>&1 | Tee-Object -FilePath test_output.txt
+          .\.venv-zd\Scripts\python.exe -m unittest discover -s tests 2>&1 | Tee-Object -FilePath test_output.txt
           $code = $LASTEXITCODE
           & .\.github\scripts\evaluate-unittest-result.ps1 `
             -LogPath test_output.txt `
@@ -192,22 +208,11 @@ jobs:
             -MinimumTestCount 3000
           exit $LASTEXITCODE
 
-      - name: Audit dependencies for known CVEs before building (pip-audit)
+      - name: Audit the exact build venv for known CVEs (pinned pip-audit)
         run: |
-          # Mirrors ci.yml's audit job. Same triage pattern applies: suppress a
-          # non-applicable finding with a written --ignore-vuln reason rather
-          # than dropping the gate.
-          python -m pip install --upgrade pip-audit
-          pip install -r requirements-build.txt
-          pip-audit
-
-      - name: Create the build venv (.venv-zd)
-        shell: pwsh
-        run: |
-          # tools/build_release.ps1 expects the repo-root venv .venv-zd and
-          # itself installs the pinned build toolchain into it
-          # (requirements-build.txt, which chains requirements.txt).
-          python -m venv .venv-zd
+          # Audit the same hash-locked venv that immediately invokes
+          # PyInstaller, not a separately live-resolved audit environment.
+          .\.venv-zd\Scripts\python.exe -m pip_audit
 
       - name: Install Inno Setup 6 (pinned 6.7.1)
         shell: pwsh

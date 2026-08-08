@@ -1,5 +1,6 @@
 -r requirements.txt
 pyinstaller==6.21.0
 
-# Before tagging a release, run `pip-audit` against the resolved environment
-# (these pins) to catch known CVEs in the shipped dependency set.
+# Release builds additionally install the transitive, hash-locked closure in
+# requirements-release.lock. That closure pins pip-audit and audits the exact
+# venv that invokes PyInstaller.

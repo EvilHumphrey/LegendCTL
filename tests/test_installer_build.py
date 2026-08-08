@@ -165,9 +165,12 @@ class BuildReleaseScriptTests(unittest.TestCase):
     def test_invokes_iss_script_at_expected_path(self) -> None:
         self.assertIn(r"tools\installer\inno_setup_zd_wrapper.iss", self.body)
 
-    def test_installs_pinned_build_requirements_not_floating_pyinstaller(self) -> None:
-        """Build installs the pinned requirements-build.txt, never floats/upgrades PyInstaller."""
-        self.assertIn("-r requirements-build.txt", self.body)
+    def test_uses_prepared_hash_locked_build_environment_not_a_live_resolver(self) -> None:
+        """The builder may not install/resolve Python packages after setup."""
+        self.assertIn("requirements-release.lock", self.body)
+        self.assertIn(".legendctl-release-lock.sha256", self.body)
+        self.assertIn("pip check (hash-locked release venv)", self.body)
+        self.assertNotIn("pip install --quiet -r requirements-build.txt", self.body)
         self.assertNotIn("--upgrade pyinstaller", self.body)
 
     def test_writes_sha256sums_artifact(self) -> None:
@@ -252,15 +255,15 @@ class BuildReleaseNativeCommandHardeningTests(unittest.TestCase):
             "helper must restore prior preference in finally",
         )
 
-    def test_pip_invocation_routes_through_helper(self) -> None:
-        """pip install (requirements-build.txt) must run inside Invoke-NativeCommand."""
+    def test_pip_check_invocation_routes_through_helper(self) -> None:
+        """The release-lock venv integrity check must route through the helper."""
         self.assertRegex(
             self.body,
             re.compile(
-                r'Invoke-NativeCommand\s+-Label\s+"[^"]*pip install[^"]*"\s+-ScriptBlock\s*\{[^}]*\$python\s+-m\s+pip\s+install[^}]*\}',
+                r'Invoke-NativeCommand\s+-Label\s+"[^"]*pip check[^"]*"\s+-ScriptBlock\s*\{[^}]*\$python\s+-m\s+pip\s+check[^}]*\}',
                 re.IGNORECASE,
             ),
-            "pip install must be wrapped by Invoke-NativeCommand with a pip-labelled -Label and a -ScriptBlock that runs `$python -m pip install`",
+            "pip check must be wrapped by Invoke-NativeCommand with a pip-labelled -Label and a -ScriptBlock that runs `$python -m pip check`",
         )
 
     def test_pyinstaller_invocation_routes_through_helper(self) -> None:

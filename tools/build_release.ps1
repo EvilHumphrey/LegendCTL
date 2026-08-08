@@ -45,6 +45,16 @@ $python = Join-Path $repoRoot ".venv-zd\Scripts\python.exe"
 if (-not (Test-Path $python)) {
     Write-Error "Expected venv at .venv-zd; run ``tools\setup_dev_env.ps1`` first."
 }
+$releaseLock = Join-Path $repoRoot "requirements-release.lock"
+$lockMarker = Join-Path $repoRoot ".venv-zd\.legendctl-release-lock.sha256"
+if (-not (Test-Path -LiteralPath $releaseLock) -or -not (Test-Path -LiteralPath $lockMarker)) {
+    Write-Error "Expected a hash-locked release venv; run ``tools\setup_dev_env.ps1`` first."
+}
+$expectedLockHash = (Get-FileHash -LiteralPath $releaseLock -Algorithm SHA256).Hash.ToLowerInvariant()
+$recordedLockHash = (Get-Content -LiteralPath $lockMarker -Raw).Trim()
+if ($recordedLockHash -ne $expectedLockHash) {
+    Write-Error "The release venv does not match requirements-release.lock; run ``tools\setup_dev_env.ps1 -Recreate``."
+}
 
 $versionPy = Get-Content "zd_app\version.py" -Raw
 if ($versionPy -match '__version__\s*=\s*"([^"]+)"') {
@@ -72,10 +82,11 @@ Set-Content "zd_app\version.py" -Value $patchedVersionPy -Encoding UTF8 -NoNewli
 Write-Host "Building ZDUltimateLegend v$version" -ForegroundColor Cyan
 
 try {
-    # Install the pinned build toolchain (PyInstaller==<pinned> via
-    # requirements-build.txt). No --upgrade: the tool that produces the
-    # shipped binary must not drift between builds.
-    Invoke-NativeCommand -Label "pip install (requirements-build.txt)" -ScriptBlock { & $python -m pip install --quiet -r requirements-build.txt }
+    # setup_dev_env.ps1 already installed this exact release lock from a
+    # hash-verified wheelhouse. Do not run pip install here: a second resolver
+    # would undermine the offline artifact-build boundary.
+    Invoke-NativeCommand -Label "pip check (hash-locked release venv)" -ScriptBlock { & $python -m pip check }
+    Invoke-NativeCommand -Label "pip-audit (hash-locked release venv)" -ScriptBlock { & $python -m pip_audit }
 
     if (Test-Path "build") {
         Remove-Item -Recurse -Force "build"

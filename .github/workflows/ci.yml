@@ -87,10 +87,15 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install deps + pip-audit
+      - name: Download and install the hash-locked audit closure
+        shell: pwsh
         run: |
-          python -m pip install --upgrade pip pip-audit
-          pip install -r requirements.txt -r requirements-build.txt
+          New-Item -ItemType Directory -Path .audit-wheelhouse | Out-Null
+          python -m pip download --disable-pip-version-check --only-binary=:all: --no-deps `
+            --require-hashes --dest .audit-wheelhouse -r requirements-release.lock
+          python -m pip install --disable-pip-version-check --no-index --find-links .audit-wheelhouse `
+            --only-binary=:all: --no-deps --require-hashes -r requirements-release.lock
+          python -m pip check
 
       - name: Audit installed environment for known CVEs
         # requirements-build.txt itself asks for this before tagging a release;
@@ -104,4 +109,4 @@ jobs:
         # Tip: in branch protection, keep `test` required but leave this `audit`
         # job non-required until the baseline is clean, so a day-one transitive
         # advisory doesn't block merges while you add the justified ignore.
-        run: pip-audit
+        run: python -m pip_audit
