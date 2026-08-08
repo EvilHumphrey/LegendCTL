@@ -49,9 +49,9 @@ short version is **trust you can verify**:
 - **Open source, MIT-licensed.** Every line is on GitHub — read it, build it
   yourself, fork it. Nothing is hidden.
 - **Fully local — no network, no telemetry.** The LegendCTL process makes
-  **zero** network calls — no telemetry, no analytics, no auto-update. (The one
-  outbound action is the About screen's GitHub links, which hand a URL to your
-  browser; the app itself opens no socket.) You don't have to take any of that
+  **zero** network calls — no telemetry, no analytics, no auto-update. (The
+  About and Compatibility Report GitHub buttons hand a URL to your browser; the
+  app itself opens no socket.) You don't have to take any of that
   on faith: you can
   [confirm the no-network behavior yourself](docs/verifying-no-network.md) in a
   couple of minutes.
@@ -191,7 +191,8 @@ same way — the write-only back-paddle bindings are reported as sent, not verif
 - Back-paddle bindings: 1-step controller-button-only (8 paddles: M1–M4, LM, RM, LK, RK);
   existing on-controller paddle mappings are not readable over USB, so LegendCTL
   says plainly when a value is "Not set in LegendCTL" instead of inventing one
-- Wrapper profiles: save / apply / delete with full controller state
+- Wrapper profiles: save / apply / delete profile-scoped controller settings,
+  with optional polling-rate and step-size capture
 
 Controller lifecycle & trust surfaces:
 

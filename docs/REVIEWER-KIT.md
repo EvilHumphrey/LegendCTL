@@ -39,10 +39,10 @@ Portable ZIP is the low-friction path — no admin, no installer:
 
 1. Download `ZDUltimateLegend-v<version>-windows.zip` from the
    [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest).
-2. The build is currently **unsigned**, so the first run shows Windows SmartScreen
-   ("Windows protected your PC"). That's expected for any new unsigned app — if
-   you like, verify the **SHA-256** against `SHA256SUMS.txt` in the release first,
-   then **More info → Run anyway**.
+2. The build is currently **unsigned**, so Windows SmartScreen may show
+   "Windows protected your PC" on first run. That can happen for unsigned or
+   low-reputation downloads — if you like, verify the **SHA-256** against
+   `SHA256SUMS.txt` in the release first, then **More info → Run anyway**.
 3. Extract anywhere and run `ZD Ultimate Legend.exe` (the window/exe still carry
    the project's legacy name — same program).
 
@@ -93,7 +93,7 @@ LegendCTL's pitch is the inverse, and it's verifiable rather than asserted.
   (firmware v1.18 incl. 8K, v1.24 incl. 8-point sensitivity). The controller ships
   in six variants; other variants/firmware are best-effort — see the
   [compatibility matrix](compatibility-matrix.md) for the current evidence ledger.
-- **Unsigned** today (SmartScreen warning expected; signing is planned via the
+- **Unsigned** today (a SmartScreen warning may appear; signing is planned via the
   SignPath Foundation OSS program once eligible).
 - **AI-assisted**, human-directed and reviewed — disclosed in the
   [Acknowledgments](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md#acknowledgments); the code is open and

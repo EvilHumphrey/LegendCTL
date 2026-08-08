@@ -1656,7 +1656,7 @@
   "trust_self_check.scan.reason.parse_failures": "some package files could not be parsed",
   "trust_self_check.scan.reason.unreadable": "the package tree could not be read",
   "trust_self_check.network.evidence.findings": "Static scan of zd_app found {count} networking import(s): {findings}.",
-  "trust_self_check.network.evidence.handoff": "Deliberate, user-clicked browser handoff: About buttons call {callsites}; any traffic belongs to the default browser process, not LegendCTL telemetry.",
+  "trust_self_check.network.evidence.handoff": "Deliberate, user-clicked browser handoff: About and Compatibility Report buttons use {callsites}; any traffic belongs to the default browser process, not LegendCTL telemetry.",
   "trust_self_check.network.evidence.no_handoff": "No webbrowser.open handoff was found in zd_app.",
   "trust_self_check.drivers.claim": "No drivers / virtual devices: this shipped app footprint contains no driver or virtual-device package artifacts.",
   "trust_self_check.drivers.evidence.clean": "Static scan of zd_app found 0 driver/virtual-device artifacts across {file_count} package file(s).",

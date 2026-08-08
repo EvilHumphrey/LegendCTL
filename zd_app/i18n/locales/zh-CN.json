@@ -1656,7 +1656,7 @@
   "trust_self_check.scan.reason.parse_failures": "部分程序包文件无法解析",
   "trust_self_check.scan.reason.unreadable": "无法读取程序包目录",
   "trust_self_check.network.evidence.findings": "对 zd_app 的静态扫描发现 {count} 个网络导入：{findings}。",
-  "trust_self_check.network.evidence.handoff": "有意的、由用户点击触发的浏览器交接：关于页按钮会调用 {callsites}；后续流量属于默认浏览器进程，不属于 LegendCTL 遥测。",
+  "trust_self_check.network.evidence.handoff": "有意的、由用户点击触发的浏览器交接：关于页和兼容性报告按钮会使用 {callsites}；后续流量属于默认浏览器进程，不属于 LegendCTL 遥测。",
   "trust_self_check.network.evidence.no_handoff": "未在 zd_app 中发现 webbrowser.open 交接。",
   "trust_self_check.drivers.claim": "无驱动 / 无虚拟设备：随应用发布的文件足迹不包含驱动或虚拟设备包产物。",
   "trust_self_check.drivers.evidence.clean": "对 zd_app 的静态扫描在 {file_count} 个包文件中发现 0 个驱动/虚拟设备产物。",

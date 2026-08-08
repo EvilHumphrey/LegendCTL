@@ -15,15 +15,16 @@ this page is the concrete path. [LegendCTL](https://github.com/EvilHumphrey/Lege
 local Windows app for the ZD Ultimate Legend — and the smart move with *any* unsigned utility is to verify rather than
 trust.
 
-**Quick answer:** SmartScreen appears because the build is currently **unsigned**, not because it's known to be
-harmful. Download only from the official release page, **verify the SHA-256** of the file against the published
-`SHA256SUMS.txt`, then choose **More info → Run anyway**.
+**Quick answer:** because the build is currently **unsigned** and may have limited reputation, SmartScreen may show a
+warning. That warning is not, by itself, a malware verdict. Download only from the official release page, **verify the
+SHA-256** of the file against the published `SHA256SUMS.txt`, then choose **More info → Run anyway** if you trust it.
 
 ## Why SmartScreen can appear on unsigned builds
 
-Microsoft Defender SmartScreen warns on programs that don't yet have download **reputation**. New, unsigned apps from
-new publishers haven't built that reputation, so the prompt is expected — it is not, by itself, a malware verdict.
-Reputation accrues over time; code signing (planned, below) starts that clock but doesn't remove the prompt instantly.
+Microsoft Defender SmartScreen uses app and download **reputation** as part of its evaluation. New, unsigned apps from
+new publishers may not have built that reputation, so the prompt may appear — it is not, by itself, a malware verdict.
+Reputation can accrue over time; code signing (planned, below) can help establish publisher reputation but does not
+guarantee that a prompt will disappear.
 
 ## Download only from the project's release source
 
@@ -96,8 +97,8 @@ regardless of where the folder lives, so remove that separately if you want them
 ## After launch: verify no network activity
 
 The LegendCTL process makes **zero** network calls. You don't have to take that on faith — confirm it in a couple of
-minutes with the built-in check in [verifying-no-network.md](verifying-no-network.md) (the only outbound action
-anywhere is the About screen's GitHub links, which hand a URL to your default browser; the app opens no socket itself).
+minutes with the built-in check in [verifying-no-network.md](verifying-no-network.md) (the About and Compatibility
+Report GitHub buttons hand a URL to your default browser; the app opens no socket itself).
 
 ## Code signing is planned
 

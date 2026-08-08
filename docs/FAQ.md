@@ -20,9 +20,9 @@ and the verifying paths read the value back and compare it.
 
 ### Does it phone home? Any telemetry or tracking?
 No. The LegendCTL process makes **zero** network calls — no telemetry, no
-analytics, no auto-update, no "usage data." The only outbound action anywhere in
-the app is the About screen's GitHub links, which hand a URL to your default
-browser; the app itself opens no socket. You don't have to take that on faith:
+analytics, no auto-update, no "usage data." The About and Compatibility Report
+GitHub buttons hand a URL to your default browser; the app itself opens no
+socket. You don't have to take that on faith:
 open the in-app **Trust Self-Check** (Diagnostics), which scans the shipped code
 for networking and driver/virtual-device imports and shows the evidence it found
 (it inspects the app's own footprint, not system-wide services), then copies
@@ -55,10 +55,10 @@ is planned once the project is eligible — see the
 ## Installing & running
 
 ### Why does Windows show "Windows protected your PC" (SmartScreen)?
-Because the build is currently **unsigned**. That prompt is what Windows shows for
-*any* new unsigned app until it builds download reputation — it is not, by itself,
-a sign of malware. Verify the SHA-256 (above), then choose **More info → Run
-anyway**. Full detail under [Distribution safety](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md#distribution-safety).
+Because the build is currently **unsigned**. SmartScreen may show that prompt for
+unsigned or low-reputation downloads — it is not, by itself, a sign of malware.
+Verify the SHA-256 (above), then choose **More info → Run anyway**. Full detail
+under [First-run SmartScreen, and verifying your download](../README.md#first-run-smartscreen-and-verifying-your-download).
 
 ### My antivirus flagged it — is it a virus?
 Often a false positive for this packaging pattern — but verify rather than

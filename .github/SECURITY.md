@@ -19,9 +19,10 @@ not aspirational promises:
 - **No network calls.** The app never connects to the internet — no accounts,
   no remote config, no analytics endpoints. You can confirm this yourself with
   TCPView — see [docs/verifying-no-network.md](../docs/verifying-no-network.md). The
-  one deliberate exception is the About screen's GitHub links, which hand a URL
-  to your **default browser** (a separate process) on click; the app process
-  itself still opens no socket and has no network stack or telemetry.
+  deliberate browser handoffs are the About and Compatibility Report GitHub
+  buttons, which hand a URL to your **default browser** (a separate process) on
+  click; the app process itself still opens no socket and has no network stack
+  or telemetry.
 - **No telemetry.** Nothing about you, your machine, or your controller is
   collected or transmitted.
 - **No auto-update.** The app never downloads or runs code after install. You
@@ -45,8 +46,9 @@ certificate). Distribution is manual: builds are published with their
 `SHA256SUMS.txt` so you can verify integrity before running. Code-signing via
 the SignPath Foundation OSS program is planned — see
 [docs/code-signing-policy.md](../docs/code-signing-policy.md). See the README's
-"Distribution safety" section for what to expect from SmartScreen and antivirus,
-and how to verify the hash.
+["First-run SmartScreen, and verifying your download"](../README.md#first-run-smartscreen-and-verifying-your-download)
+section for what to expect from SmartScreen and antivirus, and how to verify the
+hash.
 
 ## How to report a vulnerability
 
