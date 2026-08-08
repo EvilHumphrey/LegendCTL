@@ -13,16 +13,25 @@ venv.
 What it does:
   1. Locate Python 3.12 at the expected install path. Exit non-zero with a
      clear hint if missing.
-  2. If .venv-zd already has a Scripts\python.exe, do nothing.
+  2. If .venv-zd's recorded lock hash matches, do nothing; otherwise require
+     explicit -Recreate before replacing a populated venv.
   3. If .venv-zd exists but is empty (stale shell, antivirus aftermath),
      log and recreate it.
-  4. Run `py312 -m venv .venv-zd`, then install requirements-build.txt
-     into it (same toolchain build_release.ps1 needs).
+  4. Download the complete release lock into a temporary hash-verified
+     wheelhouse, then install it offline into .venv-zd.
   5. On pip failure, remove the half-populated .venv-zd so the next run
      starts clean.
 
-After this script exits 0, `tools\build_release.ps1` can be run directly.
+After this script exits 0, `tools\build_release.ps1` can be run directly. The
+build script verifies this setup marker and never resolves packages itself.
 #>
+[CmdletBinding()]
+param(
+    # Recreate a populated venv when requirements-release.lock changed. This
+    # is explicit because replacing an existing local environment is destructive.
+    [switch]$Recreate
+)
+
 $ErrorActionPreference = "Stop"
 
 function Invoke-NativeCommand {
@@ -65,10 +74,27 @@ Install Python 3.12 from https://www.python.org/downloads/release/python-3120/
 
 $venvDir    = Join-Path $repoRoot ".venv-zd"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
+$releaseLock = Join-Path $repoRoot "requirements-release.lock"
+$lockMarker = Join-Path $venvDir ".legendctl-release-lock.sha256"
+
+if (-not (Test-Path -LiteralPath $releaseLock)) {
+    Write-Error "Missing requirements-release.lock. Refusing an unlocked release setup."
+}
+$lockHash = (Get-FileHash -LiteralPath $releaseLock -Algorithm SHA256).Hash.ToLowerInvariant()
 
 if (Test-Path $venvPython) {
-    Write-Host "venv already populated at .venv-zd (Scripts\python.exe present). Nothing to do." -ForegroundColor Green
-    exit 0
+    $recordedHash = if (Test-Path -LiteralPath $lockMarker) { (Get-Content -LiteralPath $lockMarker -Raw).Trim() } else { "" }
+    if ($recordedHash -eq $lockHash) {
+        Write-Host "venv already matches requirements-release.lock. Nothing to do." -ForegroundColor Green
+        exit 0
+    }
+    if (-not $Recreate) {
+        Write-Error @"
+The existing .venv-zd is not proven to match requirements-release.lock.
+Run .\tools\setup_dev_env.ps1 -Recreate to replace it with a hash-locked offline build venv.
+"@
+    }
+    Write-Host "Recreating .venv-zd at explicit request because its release-lock marker is missing or stale." -ForegroundColor Yellow
 }
 
 if (Test-Path $venvDir) {
@@ -94,11 +120,24 @@ if (-not (Test-Path $venvPython)) {
     Write-Error "venv create reported success but $venvPython is missing."
 }
 
-Write-Host "Installing requirements-build.txt into venv..." -ForegroundColor Cyan
+$wheelhouse = Join-Path $repoRoot (".release-wheelhouse-" + [Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $wheelhouse | Out-Null
+
+Write-Host "Downloading the hash-locked release wheelhouse..." -ForegroundColor Cyan
 try {
-    Invoke-NativeCommand -Label "pip install (requirements-build.txt)" -ScriptBlock {
-        & $venvPython -m pip install --quiet -r (Join-Path $repoRoot "requirements-build.txt")
+    Invoke-NativeCommand -Label "pip download (requirements-release.lock)" -ScriptBlock {
+        & $py312 -m pip download --disable-pip-version-check --only-binary=:all: --no-deps `
+            --require-hashes --dest $wheelhouse -r $releaseLock
     }
+    Write-Host "Installing the release toolchain offline..." -ForegroundColor Cyan
+    Invoke-NativeCommand -Label "offline pip install (requirements-release.lock)" -ScriptBlock {
+        & $venvPython -m pip install --disable-pip-version-check --no-index --find-links $wheelhouse `
+            --only-binary=:all: --no-deps --require-hashes -r $releaseLock
+    }
+    Invoke-NativeCommand -Label "pip check (release venv)" -ScriptBlock {
+        & $venvPython -m pip check
+    }
+    Set-Content -LiteralPath $lockMarker -Value $lockHash -Encoding ASCII -NoNewline
 } catch {
     # Half-populated venv on pip failure — remove so next run starts clean.
     Write-Warning "pip install failed; removing partially-populated .venv-zd so retry is clean."
@@ -108,6 +147,10 @@ try {
         Write-Warning "Could not remove partial venv at $venvDir : $_"
     }
     throw
+} finally {
+    if (Test-Path -LiteralPath $wheelhouse) {
+        Remove-Item -LiteralPath $wheelhouse -Recurse -Force
+    }
 }
 
 Write-Host ""

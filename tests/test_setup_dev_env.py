@@ -55,15 +55,15 @@ class SetupScriptContentTests(unittest.TestCase):
             "setup script must target the .venv-zd directory (matches build_release.ps1)",
         )
 
-    def test_installs_requirements_build(self) -> None:
+    def test_installs_hash_locked_release_closure_offline(self) -> None:
         body = _read(_SETUP_PATH)
-        # `pip install -r requirements-build.txt` (matches build_release.ps1
-        # so the venv is build-ready after setup).
-        self.assertRegex(
-            body,
-            re.compile(r"pip\s+install\b[^\n]*requirements-build\.txt"),
-            "setup script must install requirements-build.txt into the venv",
-        )
+        # The setup path must first download the reviewed wheel closure with
+        # hash enforcement, then install only from that wheelhouse. This is
+        # stronger than a live `pip install -r requirements-build.txt`.
+        self.assertIn("pip download --disable-pip-version-check --only-binary=:all: --no-deps", body)
+        self.assertIn("--require-hashes --dest $wheelhouse -r $releaseLock", body)
+        self.assertIn("--no-index --find-links $wheelhouse", body)
+        self.assertIn("requirements-release.lock", body)
 
     def test_resolves_python_312_at_expected_path(self) -> None:
         """The setup script encodes the canonical Python 3.12 install path.
@@ -78,16 +78,18 @@ class SetupScriptContentTests(unittest.TestCase):
             "setup script must reference the canonical per-user Python 3.12 install path",
         )
 
-    def test_short_circuits_when_venv_already_populated(self) -> None:
-        """Idempotent re-runs must not blow away an existing working venv."""
+    def test_short_circuits_only_when_venv_matches_the_release_lock(self) -> None:
+        """Idempotent re-runs preserve a venv only when its lock marker matches."""
         body = _read(_SETUP_PATH)
-        # The script tests for Scripts\python.exe inside the venv and exits 0
-        # early when present.
+        # A bare Scripts\python.exe is not enough: it could have been populated
+        # by an unreviewed live resolver.
         self.assertRegex(
             body,
             re.compile(r"Test-Path\s+\$venvPython"),
-            "setup script must short-circuit when .venv-zd\\Scripts\\python.exe already exists",
+            "setup script must inspect .venv-zd\\Scripts\\python.exe",
         )
+        self.assertIn(".legendctl-release-lock.sha256", body)
+        self.assertIn("$recordedHash -eq $lockHash", body)
 
 
 class BuildReleaseErrorPointsAtSetupScript(unittest.TestCase):

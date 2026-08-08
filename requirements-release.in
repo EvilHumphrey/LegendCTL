@@ -1,0 +1,16 @@
+# Human-maintained roots for the CI/local release build environment.
+#
+# `tools/refresh_release_lock.ps1` resolves these roots and writes the complete,
+# hash-verified wheel lock consumed by both the release workflow and the local
+# release builder. Keep runtime and PyInstaller roots in their existing files
+# so Dependabot can continue to propose familiar, reviewable updates.
+-r requirements-build.txt
+
+# This command audits the exact venv that invokes PyInstaller; pin it too so
+# auditing cannot introduce a floating resolver into the release path.
+pip-audit==2.10.1
+
+# pip-audit imports pip's internal API. Keep the compatible pip release that
+# the deterministic pip-tools refresher also uses; this is part of the audited
+# build venv, not an implicit upgrader.
+pip==26.1.2
