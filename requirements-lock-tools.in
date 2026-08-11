@@ -4,4 +4,4 @@ pip-tools==7.6.0
 
 # pip-tools 7.6.0 imports this pip internal compatibility symbol. Pin it so a
 # future pip release cannot break the lock refresh command at runtime.
-pip==26.1.2
+pip==26.2.1
