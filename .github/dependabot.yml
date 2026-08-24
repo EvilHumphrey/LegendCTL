@@ -17,14 +17,18 @@ updates:
     commit-message:
       prefix: deps
 
-  # GitHub Actions pinned in the CI workflow (actions/checkout, setup-python, …).
-  # Keeps action versions current; complements (or lets you later move to)
-  # full-SHA pinning for supply-chain hardening.
+  # GitHub Actions pinned by full SHA in the workflows (checkout, CodeQL, …).
+  # Group CodeQL's coupled init/analyze entry points so Dependabot cannot open
+  # individually broken version-mismatch PRs for the same upstream action.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    groups:
+      codeql-components:
+        patterns:
+          - "github/codeql-action/*"
     labels:
       - dependencies
       - ci

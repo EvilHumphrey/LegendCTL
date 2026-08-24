@@ -283,19 +283,18 @@ pygments==2.20.0 \
     --hash=sha256:6757cd03768053ff99f3039c1a36d6c0aa0b263438fcab17520b30a303a82b5f \
     --hash=sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176
     # via rich
-pyinstaller==6.21.0 \
-    --hash=sha256:327d132389f37912609e01be62810cf96b5aa95b613903e4b8692e0d12fb0eda \
-    --hash=sha256:42395ec76df8e8120c36b13339d9db8cab83e316a12839ee303cc00fc941bb74 \
-    --hash=sha256:4e3108b3f02384560da70e39b8bf22b0ad597d02bd68a40d76ea91c1cfa00cad \
-    --hash=sha256:5fa56746c1e76f93634d018502301378a2d0c382553d37d8c3c34ff436c12dd1 \
-    --hash=sha256:605169523a6b5ace39f13dfbff21add9f2bc43df99c7daf9394fefb2c45e8b6f \
-    --hash=sha256:697532279f535ad572bda613db4f821540e235c7854ca6da4d3bf0373f4415ee \
-    --hash=sha256:6b6374d652107dd4a2eeece903ff82bb4045bb5e1006c5a158a6dcdbefe84bf2 \
-    --hash=sha256:7071d4b094d5b40deeef5fa3d3b98a1b846087f7562b49209663d5f9281fe251 \
-    --hash=sha256:7fae06c494ce0ebfe6bd3055c0e409def884f63af2e3705d06bd431ad9237fc7 \
-    --hash=sha256:bb9fab705983e393a2d1cac77d6972513057ad800215fd861dc15ff5272e98fd \
-    --hash=sha256:c6b28d30d8fd99ce162ff3aab5013ed44dbfb747566b1f01b9bed7964d7c14e9 \
-    --hash=sha256:f13c95c9c03fb567217135919f93815c305813126780b0ed6e0123cb8acaf025
+pyinstaller==6.22.2 \
+    --hash=sha256:0260eaad6be3f6fbc1affffe6dc7b8e5b636dbca51b463224daba971610b6fc1 \
+    --hash=sha256:06d7b3827a8049db4a2d47e3ec4ae2f69a1041577d8833b8f169745cde573ab4 \
+    --hash=sha256:7bee432404eca5dc3ef37c36811c266561b03988f6d3e70ab0fa5352dd5de9e4 \
+    --hash=sha256:8c2c4b14caad38c1f3df8e9bf5276fc265e27fe8b4180cab4a37864288427bc0 \
+    --hash=sha256:9622686ecc5d5fa492fe6cde29d47df9dd41138cff8177be9f901ca3260f2096 \
+    --hash=sha256:9a078877caa3920558a3242d0a7019fe5b825cff4b65ed380c7d1e1bd200ddd9 \
+    --hash=sha256:9b990fa6bbe143572f06644a984ad0d7aa2e2ccc6929d4916031343a5888e9a7 \
+    --hash=sha256:afb6f9a95d19b6dcd3a7decc40d9adb6ba9c4f8802ddd6c972dfb552953f384e \
+    --hash=sha256:becb47ad78272bede87acf2ed830d7545a8f65ab11d06a68fe2b99ba1afaac6d \
+    --hash=sha256:ebd1b1ca932d7cf25d7366ce691aaf79a5ff9425811ed7328b5116e4471b6d6d \
+    --hash=sha256:f5ccb847451df4207bce18bf53a57b124c9bb4e7e4bad08c5ecc627bcf00b28c
     # via -r requirements-build.txt
 pyinstaller-hooks-contrib==2026.6 \
     --hash=sha256:bef5002c32f4f50bd55b005da12cff64eca8783e7eaf86a06a62410164bab725 \
@@ -386,9 +385,8 @@ urllib3==2.7.0 \
     # via requests
 
 # The following packages are considered to be unsafe in a requirements file:
-pip==26.1.2 \
-    --hash=sha256:382ff9f685ee3bc25864f820aa50505825f10f5458ffff07e30a6d96e5715cab \
-    --hash=sha256:f49cd134c61cf2fd75e0ce2676db03e4054504a5a4986d00f8299ae632dc4605
+pip==26.2.1 \
+    --hash=sha256:71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e
     # via
     #   -r requirements-release.in
     #   pip-api

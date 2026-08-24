@@ -13,4 +13,4 @@ pip-audit==2.10.1
 # pip-audit imports pip's internal API. Keep the compatible pip release that
 # the deterministic pip-tools refresher also uses; this is part of the audited
 # build venv, not an implicit upgrader.
-pip==26.1.2
+pip==26.2.1
