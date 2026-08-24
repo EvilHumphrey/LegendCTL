@@ -50,21 +50,14 @@ USING_RISK_CLASSIFIER = True
 
 
 # --- Import guards (size / depth) -------------------------------------------
-# Prefer the classifier's promoted shared module, then v1's profile_store, then inline
-# constants. All three are equivalent; the fallback only matters before the classifier
-# promotes the guards into ``_import_guards``.
-try:  # pragma: no cover - exercised only once the guards are promoted into _import_guards
-    from zd_app.storage._import_guards import (  # type: ignore
-        MAX_IMPORT_BYTES,
-        MAX_IMPORT_JSON_DEPTH,
-        _max_json_depth as _max_json_depth_text,
-    )
-except ImportError:
-    from zd_app.storage.profile_store import (  # type: ignore
-        MAX_IMPORT_BYTES,
-        MAX_IMPORT_JSON_DEPTH,
-        _max_json_depth as _max_json_depth_text,
-    )
+from zd_app.storage._import_guards import (
+    MAX_IMPORT_BYTES,
+    MAX_IMPORT_JSON_DEPTH,
+    ImportFileTooLargeError,
+    UnsafeImportPathError,
+    _max_json_depth as _max_json_depth_text,
+    read_guarded_text,
+)
 
 
 # Categories the user can choose to import (Automation/Blocked are never
@@ -289,7 +282,11 @@ def classify_import(raw_payload: dict, *, existing_names: set[str]) -> ImportRes
             error_detail=str(exc),
         )
 
-    display_name = _clean_display_name(raw_payload.get("name")) or t(
+    # The services classifier already sanitizes and disambiguates the display
+    # name against ``existing_names``. Preserve that result in the preview;
+    # reconstructing the raw name here used to show a colliding default even
+    # though the audit id had been uniquified.
+    display_name = _clean_display_name(risk.generated_name) or t(
         "safe_import.default_name"
     )
     existing_slugs = {slugify(name) for name in existing_names if slugify(name)}
@@ -349,14 +346,10 @@ def prepare_import(path: str, *, existing_names: set[str]) -> ImportResult:
 
     source = Path(path)
     try:
-        size = source.stat().st_size
-    except OSError:
-        return _failed("safe_import.error.unreadable", source_filename=source.name)
-    if size > MAX_IMPORT_BYTES:
+        text = read_guarded_text(path, local_only=True)
+    except ImportFileTooLargeError:
         return _failed("safe_import.error.too_large", source_filename=source.name)
-    try:
-        text = source.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnsafeImportPathError):
         return _failed("safe_import.error.unreadable", source_filename=source.name)
     except UnicodeDecodeError:
         return _failed("safe_import.error.invalid_json", source_filename=source.name)

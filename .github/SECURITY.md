@@ -42,9 +42,12 @@ not aspirational promises:
 ## Distribution & signing
 
 The released executable is currently **unsigned** (no Authenticode code-signing
-certificate). Distribution is manual: builds are published with their
-`SHA256SUMS.txt` so you can verify integrity before running. Code-signing via
-the SignPath Foundation OSS program is planned — see
+certificate). Official release assets from v2.5.0 onward are built from the
+release tag in this repository's GitHub Actions workflow, publish
+`SHA256SUMS.txt`, and carry GitHub build-provenance attestations that can be
+checked with `gh attestation verify`. Download and updates remain manual;
+LegendCTL has no auto-updater. Code-signing via the SignPath Foundation OSS
+program is planned — see
 [docs/code-signing-policy.md](../docs/code-signing-policy.md). See the README's
 ["First-run SmartScreen, and verifying your download"](../README.md#first-run-smartscreen-and-verifying-your-download)
 section for what to expect from SmartScreen and antivirus, and how to verify the

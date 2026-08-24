@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from zd_app.models import WrapperProfile
 from zd_app.services.settings_service import (
@@ -218,6 +219,14 @@ class ImportFromFileTests(unittest.TestCase):
         with self.assertRaises(WrapperProfileError):
             self.store.import_from_file(str(source))
         self.assertEqual(list(self.base_dir.glob("*.json")), [])
+
+    def test_unc_source_rejected_before_filesystem_probe(self) -> None:
+        with (
+            patch.object(Path, "open", side_effect=AssertionError("opened remote path")),
+            patch.object(Path, "stat", side_effect=AssertionError("statted remote path")),
+        ):
+            with self.assertRaisesRegex(WrapperProfileError, "local filesystem"):
+                self.store.import_from_file(r"\\server\share\incoming.json")
 
     def test_deeply_nested_rejected_before_parse(self) -> None:
         depth = MAX_IMPORT_JSON_DEPTH + 5

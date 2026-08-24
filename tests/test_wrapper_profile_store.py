@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from dataclasses import replace
@@ -408,6 +409,58 @@ class AtomicSaveTests(unittest.TestCase):
 
             self.assertEqual(profiles, [])
             self.assertEqual(skipped, [])
+
+
+class AtomicSaveNewTests(unittest.TestCase):
+    def test_save_new_never_overwrites_an_occupied_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = WrapperProfileStore(tmpdir)
+            occupied = Path(tmpdir) / "occupied.json"
+            occupied.write_text(
+                json.dumps(_profile("Different Internal Name").to_dict()),
+                encoding="utf-8",
+            )
+            original_bytes = occupied.read_bytes()
+            incoming = _profile("Occupied")
+
+            path = store.save_new(incoming)
+
+            self.assertEqual(path.name, "occupied-2.json")
+            self.assertEqual(incoming.name, "Occupied (2)")
+            self.assertEqual(occupied.read_bytes(), original_bytes)
+
+    def test_save_new_retries_when_destination_appears_at_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = WrapperProfileStore(tmpdir)
+            real_link = os.link
+            raced = False
+            competitor = _profile("Competing Writer", description="must survive")
+            competitor_bytes = json.dumps(competitor.to_dict(), indent=2).encode(
+                "utf-8"
+            )
+
+            def racing_link(source, destination):
+                nonlocal raced
+                destination = Path(destination)
+                if not raced and destination.name == "race.json":
+                    raced = True
+                    destination.write_bytes(competitor_bytes)
+                return real_link(source, destination)
+
+            incoming = _profile("Race", description="new profile")
+            with patch(
+                "zd_app.storage.wrapper_profile_store.os.link",
+                side_effect=racing_link,
+            ):
+                path = store.save_new(incoming)
+
+            self.assertTrue(raced)
+            self.assertEqual(path.name, "race-2.json")
+            self.assertEqual(incoming.name, "Race (2)")
+            self.assertEqual(
+                (Path(tmpdir) / "race.json").read_bytes(), competitor_bytes
+            )
+            self.assertEqual(list(Path(tmpdir).glob("*.tmp")), [])
 
 
 if __name__ == "__main__":

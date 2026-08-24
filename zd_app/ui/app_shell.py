@@ -110,7 +110,12 @@ from zd_app.storage.restore_point_models import (
 from zd_app.storage.restore_point_store import RestorePointStore
 from zd_app.storage.settings_store import SettingsStore
 from zd_app.storage.snapshot_codec import snapshot_to_dict
-from zd_app.storage.wrapper_profile_store import WrapperProfileError, WrapperProfileStore
+from zd_app.storage.wrapper_profile_store import (
+    WrapperProfileError,
+    WrapperProfileStore,
+    slugify,
+    unique_display_name,
+)
 from zd_app.ui import (
     diagnostic_bundle_preview,
     right_rail,
@@ -7606,6 +7611,47 @@ class AppShell:
             key="safe_import_cancel_confirm",
         )
 
+    def _safe_import_unique_name_for_save(self, requested_name: object) -> str:
+        """Resolve a safe, non-overwriting identity from the live profile store.
+
+        The scan preview's name is only a proposal: profiles can be created or
+        renamed while the preview remains open, and the operator can type a new
+        colliding name. Re-enumerate immediately before the write and include
+        skipped/corrupt filenames so Safe Import never replaces an existing
+        profile merely because that profile could not be decoded.
+        """
+
+        try:
+            listed = self.wrapper_profile_store.list_profiles()
+        except Exception as exc:
+            raise WrapperProfileError(
+                f"Could not enumerate existing profiles before import: {exc}"
+            ) from exc
+
+        skipped = []
+        if isinstance(listed, tuple) and len(listed) == 2:
+            profiles, skipped = listed
+        else:
+            profiles = listed
+        existing_slugs = {
+            slug
+            for profile in profiles
+            if (slug := slugify(getattr(profile, "name", "")))
+        }
+        existing_slugs.update(
+            path.stem
+            for path in skipped
+            if isinstance(path, Path) and path.stem
+        )
+        return unique_display_name(requested_name, existing_slugs)
+
+    @staticmethod
+    def _record_safe_import_saved_identity(result, name: str) -> None:
+        """Make the result modal describe the profile that reached disk."""
+
+        result.generated_name = name
+        result.audit.generated_profile_id = slugify(name)
+
     def safe_import_apply(self, apply_to_controller: bool = False) -> None:
         """Save the imported profile; optionally apply + verify as a HID job.
 
@@ -7657,15 +7703,14 @@ class AppShell:
             if not self._hid_write_available_or_refuse():
                 return
 
-        name = result.generated_name
+        requested_name = result.generated_name
         if dpg.does_item_exist(safe_import.NAME_INPUT):
-            entered = (dpg.get_value(safe_import.NAME_INPUT) or "").strip()
+            entered = dpg.get_value(safe_import.NAME_INPUT) or ""
             if entered:
-                name = entered
+                requested_name = entered
 
         selected = set(self._safe_import_selected)
         snapshot = filtered_snapshot(result.profile.snapshot, selected)
-        profile = WrapperProfile(name=name, snapshot=snapshot)
 
         audit = result.audit
         audit.selected_categories = [
@@ -7681,7 +7726,10 @@ class AppShell:
 
         if not (apply_to_controller and self.settings_service is not None):
             try:
-                self.wrapper_profile_store.save(profile)
+                name = self._safe_import_unique_name_for_save(requested_name)
+                profile = WrapperProfile(name=name, snapshot=snapshot)
+                self.wrapper_profile_store.save_new(profile)
+                name = profile.name
             except WrapperProfileError as exc:
                 safe_import.close_modals()
                 self._record_settings_apply_result(
@@ -7689,6 +7737,7 @@ class AppShell:
                 )
                 self.refresh_shell()
                 return
+            self._record_safe_import_saved_identity(result, name)
             # Plain Save (or no service wired): store-only — the render
             # thread never waits on the controller here, and the disk save
             # above already happened synchronously. Modal-swap hop: the
@@ -7762,6 +7811,8 @@ class AppShell:
                 import_presence_generation,
             )
 
+        saved_identity: dict[str, str] = {}
+
         def job() -> tuple[str, WrapperProfileError | None, ApplyResult | None]:
             # Safe Import's checkpoint is a hard precondition. The same worker
             # owns capture, the now-post-capture profile save, and the device
@@ -7781,9 +7832,14 @@ class AppShell:
             if not presence_guard():
                 return "device_changed_before_write", None, None
             try:
-                self.wrapper_profile_store.save(profile)
+                name = self._safe_import_unique_name_for_save(requested_name)
+                profile = WrapperProfile(name=name, snapshot=snapshot)
+                self.wrapper_profile_store.save_new(profile)
+                name = profile.name
             except WrapperProfileError as exc:
                 return "save_failed", exc, None
+            saved_identity["name"] = name
+            self._record_safe_import_saved_identity(result, name)
 
             if not presence_guard():
                 return "device_changed_before_write", None, None
@@ -7859,6 +7915,11 @@ class AppShell:
                 return
             if apply_result is None:
                 raise AssertionError("Safe Import applied without an ApplyResult")
+            name = saved_identity.get("name")
+            if name is None:
+                raise AssertionError(
+                    "Safe Import applied without a persisted profile identity"
+                )
             self._record_last_applied_safe(
                 name,
                 snapshot,

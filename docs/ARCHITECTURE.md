@@ -16,10 +16,11 @@ device, overlay, or background service.
 Ten product constraints define the design space: HID-only writes (MI_02 feature
 reports), no drivers, no virtual devices, no input injection, no game-process hooking,
 no background service, no automation (no macros/turbo/scripting), no network calls, ​
-honest write reporting (a normal Apply reports each field's write outcome, then reads
-back and compares every readable field it wrote, refreshing on-screen state; Restore /
-Safe Import / inline-deadzone writes likewise read back and compare each readable field;
-step-size and lighting writes additionally verify/retry inline;
+honest write reporting (every write reports its outcome; profile Apply then reads back
+and compares every readable field it attempted, refreshing on-screen state; Restore /
+Safe Import / inline-deadzone writes perform their own read-back checks; individual
+setting writes have narrower verification, while step-size and lighting writes inside
+profile Apply use field-specific verify/retry paths;
 back-paddle bindings are write-only), local-only data
 (`%APPDATA%\ZDUltimateLegend\`, plain JSON/JSONL).
 
@@ -35,8 +36,8 @@ Enforcement lives in the test suite, not in promises:
   empty values.
 - **Honest write reporting** — every controller write reports its **write outcome**:
   whether the synchronous `WriteFile` call succeeded for the full report (not a device
-  ACK — the normal write path does not wait for one). A normal Apply then reads the
-  device back and compares every readable field it wrote, reporting each field as
+  ACK — a plain write call does not wait for one). The AppShell profile Apply job then
+  reads the device back and compares every readable field it attempted, reporting each field as
   matched, mismatched, or could-not-verify in the Apply details — a field that cannot
   be re-read (unreadable, or skipped by the read budget) is disclosed as
   could-not-verify, never presented as verified — and refreshes on-screen state from
@@ -49,12 +50,14 @@ Enforcement lives in the test suite, not in promises:
   compare) and classifies write-only entries as unverifiable, though a readable entry
   missing from its read-back is reported as a mismatch rather than unverifiable; the
   inline-deadzone panel confirms the settled value of each change and reports a
-  confirm read it couldn't complete as sent-unverified. Step-size and lighting writes
-  additionally go through read-back-and-retry setters during the Apply itself. Those setters are best-effort:
+  confirm read it couldn't complete as sent-unverified. Within profile Apply, step-size
+  and lighting writes additionally go through read-back-and-retry setters. Those setters are best-effort:
   a confirmed mismatch (a successful read returning a different value) is surfaced as
   not-committed once the retry budget is exhausted, never as a false success — and a
-  setter read-back that could not be read at all collapses to the plain write outcome,
-  with the post-apply sweep still reporting that field's verify state separately.
+  setter read-back that could not be read at all collapses to the plain write outcome.
+  When that setter runs inside profile Apply, the post-apply sweep still reports the
+  field's verify state separately. Other individual setting writes do not implicitly
+  inherit the profile-wide sweep.
   Write-only surfaces (back-paddle bindings) have no read path and are reported as sent,
   not verified.
 
@@ -66,16 +69,16 @@ Enforcement lives in the test suite, not in promises:
   - `settings_service.py` — raw HID transport + per-field read/write codecs on the
     `1055aaXX` feature-report family; single `WriteOutcome` enum; batch reads carry a
     deadline budget and per-field provenance.
-  - `settings_apply_coordinator.py` — apply pipeline with per-field trailer writes
+  - `settings_apply_coordinator.py` — write pipeline with per-field trailer writes
     (the firmware silently rejects some fields inside multi-field bursts; trailers +
-    settles + retry-once mitigate the documented quirk family). A normal Apply reports
-    each field's write outcome, then runs a post-apply read-back sweep comparing every
-    readable field it attempted (per-field matched / mismatched / could-not-verify,
-    surfaced in the Apply details); step size and lighting zones additionally go
-    through verify/retry setters during the write (best-effort — an unreadable setter
-    read-back collapses to the plain write outcome, with the sweep still reporting the
-    field's verify state). The restore/Safe-Import/inline-deadzone paths keep their own
-    apply-then-compare verification.
+    settles + retry-once mitigate the documented quirk family). Each write reports its
+    own outcome; step size and lighting zones additionally use field-specific
+    verify/retry setters (best-effort — an unreadable setter read-back collapses to the
+    plain write outcome). The AppShell profile Apply job composes this pipeline with a
+    post-apply sweep over every readable field it attempted (per-field matched /
+    mismatched / could-not-verify, surfaced in Apply details). The
+    restore/Safe-Import/inline-deadzone paths keep their own apply-then-compare
+    verification.
   - `restore_point_service.py` + `storage/restore_point_store.py` — full-state
     capture/restore with provenance-honest reads (`_do_fresh_read` returns snapshot +
     read_success + read_errors), per-entry restore verification, retention pruning,
@@ -90,9 +93,10 @@ Enforcement lives in the test suite, not in promises:
   - `device_service.py`, `xinput_poll_service.py`, `preflight_service.py` — presence
     polling, live XInput diagnostics, transport preflight.
 - `storage/` — JSON/JSONL stores: wrapper profiles, app settings, restore points,
-  last-applied record (`last_applied_store.py`), snapshot codec. All writes are atomic
-  temp-then-replace; corrupt files degrade to disclosure cards or logged no-ops, never
-  crashes.
+  last-applied record (`last_applied_store.py`), snapshot codec. Writes use temporary
+  files plus atomic publication: updates replace the destination, while new wrapper
+  profiles use collision-safe hard-link publication so an existing profile cannot be
+  overwritten. Corrupt files degrade to disclosure cards or logged no-ops, never crashes.
 - `ui/` — DearPyGui screens + the `AppShell` coordinator (`app_shell.py`). One screen
   module per sidebar entry under `ui/screens/`. Two load-bearing seams live here:
   - **Threaded HID-job seam** — long device flows (profile apply, restore, full read,
