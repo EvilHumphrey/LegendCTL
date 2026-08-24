@@ -549,7 +549,7 @@ class EntryPointBusyRefusalTests(_BusyWindowTestCase):
         # Refused as a whole: no half-completed action (nothing saved to
         # disk, nothing applied, audit untouched).
         get_value.assert_not_called()
-        shell.wrapper_profile_store.save.assert_not_called()
+        shell.wrapper_profile_store.save_new.assert_not_called()
         shell._apply_snapshot_to_controller.assert_not_called()
         self.assertFalse(hasattr(audit, "selected_categories"))
         self.assertEqual(values["footer_status_text"], _busy_banner())
@@ -570,7 +570,7 @@ class EntryPointBusyRefusalTests(_BusyWindowTestCase):
             _drain_queued_completions(shell, 1)
             _capture_widget_state(shell._drain_hid_job_completions)
 
-        shell.wrapper_profile_store.save.assert_called_once()
+        shell.wrapper_profile_store.save_new.assert_called_once()
         shell._apply_snapshot_to_controller.assert_called_once()
 
     def test_save_without_apply_stays_available_while_busy(self) -> None:
@@ -596,7 +596,7 @@ class EntryPointBusyRefusalTests(_BusyWindowTestCase):
                 lambda: shell.safe_import_apply(apply_to_controller=False)
             )
 
-        shell.wrapper_profile_store.save.assert_called_once()
+        shell.wrapper_profile_store.save_new.assert_called_once()
         shell._apply_snapshot_to_controller.assert_not_called()
         self.assertEqual(
             shell._safe_import_result.audit.controller_write, "not_performed"
@@ -1006,7 +1006,7 @@ class SafeImportApplyJobbingTests(unittest.TestCase):
             # down at job start and the busy flag is up
             # while the worker sits mid-burst.
             self.assertIsNone(returned[0])
-            shell.wrapper_profile_store.save.assert_called_once()
+            shell.wrapper_profile_store.save_new.assert_called_once()
             self.assertTrue(started.wait(_GATE_TIMEOUT_S))
             self.assertTrue(shell._hid_job_in_flight)
             deleted = {call.args[0] for call in delete_item.call_args_list}
@@ -1173,7 +1173,7 @@ class SafeImportApplyJobbingTests(unittest.TestCase):
             )
 
         get_value.assert_not_called()
-        shell.wrapper_profile_store.save.assert_not_called()
+        shell.wrapper_profile_store.save_new.assert_not_called()
         shell.restore_point_service.capture.assert_not_called()
         shell._apply_snapshot_to_controller.assert_not_called()
         deleted = {call.args[0] for call in delete_item.call_args_list}
@@ -1328,7 +1328,7 @@ class SafeImportApplyJobbingTests(unittest.TestCase):
                 safe_import_screen.RESULT_MODAL,
             },
         )
-        shell.wrapper_profile_store.save.assert_called_once()
+        shell.wrapper_profile_store.save_new.assert_called_once()
         shell._apply_snapshot_to_controller.assert_not_called()
         self.assertEqual(audit.controller_write, "not_performed")
         self.assertEqual(service.read_calls, 0)
@@ -1342,7 +1342,7 @@ class SafeImportApplyJobbingTests(unittest.TestCase):
         shell._dpg_context_ready = True
         self._plant_import(shell)
         shell.rebuild_current_screen = lambda: order.append("rebuild")
-        shell.wrapper_profile_store.save.side_effect = (
+        shell.wrapper_profile_store.save_new.side_effect = (
             lambda profile: order.append("save")
         )
         shell._apply_snapshot_to_controller = MagicMock(

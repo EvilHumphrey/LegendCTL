@@ -226,7 +226,7 @@ class ListVanishedFileTests(unittest.TestCase):
     def test_file_deleted_between_glob_and_read_skips_silently(self) -> None:
         # Captures (and their prunes) run on worker threads
         # now, while the RP screen lists the vault on the render thread. A
-        # file unlinked between the glob and read_text is a benign race —
+        # file unlinked between the glob and the guarded open is a benign race —
         # it must NOT land in ``skipped`` (which renders a corrupt-file
         # disclosure card), just a debug log.
         with tempfile.TemporaryDirectory() as tmp:
@@ -239,14 +239,14 @@ class ListVanishedFileTests(unittest.TestCase):
             store.save(keeper)
             vanishing_path = store.save(vanishing)
 
-            original_read_text = Path.read_text
+            original_open = Path.open
 
-            def racy_read_text(self, *args, **kwargs):
+            def racy_open(self, *args, **kwargs):
                 if self.name == vanishing_path.name:
                     raise FileNotFoundError(2, "vanished mid-list", str(self))
-                return original_read_text(self, *args, **kwargs)
+                return original_open(self, *args, **kwargs)
 
-            with patch.object(Path, "read_text", racy_read_text), self.assertLogs(
+            with patch.object(Path, "open", racy_open), self.assertLogs(
                 "zd_app.storage.restore_point_store", level="DEBUG"
             ) as logs:
                 valid, skipped = store.list()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,12 @@ from unittest.mock import patch
 
 from zd_app.models import Profile, create_default_profile, diff_profile_count
 from zd_app.services.profile_service import ProfileService
+from zd_app.storage import _import_guards as import_guards
+from zd_app.storage._import_guards import (
+    UnsafeImportPathError,
+    read_guarded_json,
+    require_local_import_path,
+)
 from zd_app.storage.profile_store import (
     MAX_IMPORT_BYTES,
     MAX_IMPORT_JSON_DEPTH,
@@ -214,6 +221,14 @@ class ProfileStorePathSafetyTests(unittest.TestCase):
             self.store.import_profile(str(source))
         self.assertEqual(list(self.base_dir.glob("*.json")), [])
 
+    def test_legacy_import_rejects_unc_before_filesystem_probe(self) -> None:
+        with (
+            patch.object(Path, "open", side_effect=AssertionError("opened remote path")),
+            patch.object(Path, "stat", side_effect=AssertionError("statted remote path")),
+        ):
+            with self.assertRaises(UnsafeImportPathError):
+                self.store.import_profile(r"\\server\share\incoming.json")
+
     def test_import_rejects_deeply_nested_json(self) -> None:
         source = Path(self.temp_dir.name) / "deep.json"
         depth = MAX_IMPORT_JSON_DEPTH + 5
@@ -251,6 +266,229 @@ class ProfileStorePathSafetyTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.import_profile(str(source))
         self.assertEqual(list(self.base_dir.glob("*.json")), [])
+
+
+class SharedImportGuardTests(unittest.TestCase):
+    def test_rejects_unc_and_device_namespaces_without_filesystem_probe(self) -> None:
+        hostile_paths = (
+            r"\\server\share\incoming.json",
+            r"\\?\C:\incoming.json",
+            r"\\.\PIPE\incoming",
+            r"\??\C:\incoming.json",
+        )
+        with (
+            patch.object(Path, "open", side_effect=AssertionError("opened remote path")),
+            patch.object(Path, "stat", side_effect=AssertionError("statted remote path")),
+        ):
+            for hostile_path in hostile_paths:
+                with self.subTest(path=hostile_path):
+                    with self.assertRaises(UnsafeImportPathError):
+                        require_local_import_path(hostile_path)
+
+    def test_rejects_mapped_remote_drive_without_filesystem_probe(self) -> None:
+        with (
+            patch(
+                "zd_app.storage._import_guards._get_windows_drive_type",
+                return_value=4,
+            ),
+            patch.object(Path, "open", side_effect=AssertionError("opened remote path")),
+            patch.object(Path, "stat", side_effect=AssertionError("statted remote path")),
+        ):
+            with self.assertRaises(UnsafeImportPathError):
+                require_local_import_path(r"Z:\incoming.json")
+
+    def test_relative_path_checks_resolved_drive_and_opens_same_absolute_path(self) -> None:
+        checked = r"Z:\workspace\incoming.json"
+        with (
+            patch(
+                "zd_app.storage._import_guards.ntpath.abspath",
+                return_value=checked,
+            ),
+            patch(
+                "zd_app.storage._import_guards._get_windows_drive_type",
+                return_value=3,
+            ) as drive_type,
+            patch(
+                "zd_app.storage._import_guards._read_windows_local_no_reparse",
+                return_value=b'{"ok": true}',
+            ) as native_read,
+        ):
+            self.assertEqual(
+                read_guarded_json("incoming.json", local_only=True),
+                {"ok": True},
+            )
+
+        drive_type.assert_called_once_with(checked)
+        native_read.assert_called_once_with(checked, MAX_IMPORT_BYTES)
+
+    def test_relative_path_on_mapped_current_drive_is_rejected_before_open(self) -> None:
+        checked = r"Z:\workspace\incoming.json"
+        with (
+            patch(
+                "zd_app.storage._import_guards.ntpath.abspath",
+                return_value=checked,
+            ),
+            patch(
+                "zd_app.storage._import_guards._get_windows_drive_type",
+                return_value=4,
+            ) as drive_type,
+            patch(
+                "zd_app.storage._import_guards._read_windows_local_no_reparse",
+                side_effect=AssertionError("opened mapped-drive path"),
+            ),
+        ):
+            with self.assertRaises(UnsafeImportPathError):
+                read_guarded_json("incoming.json", local_only=True)
+
+        drive_type.assert_called_once_with(checked)
+
+    @unittest.skipUnless(os.name == "nt", "Windows reparse-point policy")
+    def test_rejects_leaf_symlink_to_unc_before_open(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            link = Path(directory) / "chosen.json"
+            try:
+                os.symlink(r"\\nonexistent.invalid\share\chosen.json", link)
+            except OSError as exc:
+                self.skipTest(f"symlink creation unavailable: {exc}")
+
+            with patch.object(
+                Path,
+                "open",
+                side_effect=AssertionError("opened symlink target"),
+            ):
+                with self.assertRaisesRegex(UnsafeImportPathError, "symlink or junction"):
+                    read_guarded_json(link, local_only=True)
+
+    @unittest.skipUnless(os.name == "nt", "Windows reparse-point policy")
+    def test_rejects_parent_symlink_to_unc_before_python_open(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pivot = Path(directory) / "pivot"
+            try:
+                os.symlink(
+                    r"\\nonexistent.invalid\share",
+                    pivot,
+                    target_is_directory=True,
+                )
+            except OSError as exc:
+                self.skipTest(f"directory symlink creation unavailable: {exc}")
+
+            child = pivot / "chosen.json"
+            with patch.object(
+                Path,
+                "open",
+                side_effect=AssertionError("opened symlink target"),
+            ):
+                with self.assertRaisesRegex(UnsafeImportPathError, "symlink or junction"):
+                    read_guarded_json(child, local_only=True)
+
+    @unittest.skipUnless(os.name == "nt", "Windows no-reparse atomic open")
+    def test_atomic_open_rejects_leaf_swapped_to_unc_after_path_check(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "chosen.json"
+            source.write_text('{"safe": true}', encoding="utf-8")
+            real_require = import_guards.require_local_import_path
+
+            def check_then_pivot(candidate: str | Path) -> str:
+                checked_path = real_require(candidate)
+                source.unlink()
+                os.symlink(r"\\nonexistent.invalid\share\chosen.json", source)
+                return checked_path
+
+            with (
+                patch(
+                    "zd_app.storage._import_guards.require_local_import_path",
+                    side_effect=check_then_pivot,
+                ),
+                patch.object(
+                    Path,
+                    "open",
+                    side_effect=AssertionError("fell back to a following open"),
+                ),
+            ):
+                with self.assertRaisesRegex(UnsafeImportPathError, "symlink or junction"):
+                    read_guarded_json(source, local_only=True)
+
+    @unittest.skipUnless(os.name == "nt", "Windows no-reparse atomic open")
+    def test_atomic_open_rejects_parent_swapped_to_unc_after_path_check(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "chosen"
+            parent.mkdir()
+            source = parent / "profile.json"
+            source.write_text('{"safe": true}', encoding="utf-8")
+            real_require = import_guards.require_local_import_path
+
+            def check_then_pivot(candidate: str | Path) -> str:
+                checked_path = real_require(candidate)
+                source.unlink()
+                parent.rmdir()
+                os.symlink(
+                    r"\\nonexistent.invalid\share",
+                    parent,
+                    target_is_directory=True,
+                )
+                return checked_path
+
+            with (
+                patch(
+                    "zd_app.storage._import_guards.require_local_import_path",
+                    side_effect=check_then_pivot,
+                ),
+                patch.object(
+                    Path,
+                    "open",
+                    side_effect=AssertionError("fell back to a following open"),
+                ),
+            ):
+                with self.assertRaisesRegex(UnsafeImportPathError, "symlink or junction"):
+                    read_guarded_json(source, local_only=True)
+
+    @unittest.skipUnless(os.name == "nt", "Windows native-handle cleanup")
+    def test_native_descriptor_closes_if_fdopen_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "chosen.json"
+            source.write_text('{"safe": true}', encoding="utf-8")
+            real_close = os.close
+            closed: list[int] = []
+
+            def tracked_close(descriptor: int) -> None:
+                closed.append(descriptor)
+                real_close(descriptor)
+
+            with (
+                patch(
+                    "zd_app.storage._import_guards.os.fdopen",
+                    side_effect=OSError("fdopen failed"),
+                ),
+                patch(
+                    "zd_app.storage._import_guards.os.close",
+                    side_effect=tracked_close,
+                ),
+            ):
+                with self.assertRaisesRegex(OSError, "fdopen failed"):
+                    read_guarded_json(source, local_only=True)
+
+            self.assertEqual(len(closed), 1)
+
+    def test_guarded_json_uses_one_handle_without_stat(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "incoming.json"
+            source.write_text('{"ok": true}', encoding="utf-8")
+            with patch.object(
+                Path,
+                "stat",
+                side_effect=AssertionError("stat-then-read race returned"),
+            ):
+                self.assertEqual(read_guarded_json(source), {"ok": True})
+
+    def test_app_owned_read_does_not_apply_local_only_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "stored.json"
+            source.write_text('{"ok": true}', encoding="utf-8")
+            with patch(
+                "zd_app.storage._import_guards.require_local_import_path",
+                side_effect=AssertionError("local-only policy applied"),
+            ):
+                self.assertEqual(read_guarded_json(source), {"ok": True})
 
 
 class ProfileFromDictNormalizationTests(unittest.TestCase):

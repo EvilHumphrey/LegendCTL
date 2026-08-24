@@ -99,7 +99,7 @@ class ProfileStore:
         return destination
 
     def import_profile(self, path: str) -> Profile:
-        payload = read_guarded_json(path)
+        payload = read_guarded_json(path, local_only=True)
         profile = Profile.from_dict(payload)
         # Ignore the imported profile_id entirely and mint a fresh, filesystem
         # -safe id. A hostile id such as ``..\\..\\Startup\\evil`` therefore can

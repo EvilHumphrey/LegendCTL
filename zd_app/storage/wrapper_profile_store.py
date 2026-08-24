@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+import unicodedata
 from pathlib import Path
+from uuid import uuid4
 
 from zd_app.models import WrapperProfile, utc_now_iso
 from zd_app.storage._import_guards import read_guarded_json
 from zd_app.storage.settings_store import initialize_user_data_dir
 
 
-_SLUG_RE = re.compile(r"[^a-z0-9]+")
+_LEGACY_SLUG_RE = re.compile(r"[^a-z0-9]+")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 MAX_PROFILE_NAME_LEN = 64
 DEFAULT_IMPORTED_NAME = "Imported Profile"
@@ -22,10 +25,28 @@ logger = logging.getLogger(__name__)
 
 
 def slugify(name: str) -> str:
-    """Normalize a profile name to a filesystem-safe slug."""
+    """Return a compatible, ASCII-only filesystem identity for ``name``.
 
-    lowered = name.strip().lower()
-    return _SLUG_RE.sub("-", lowered).strip("-")
+    Existing profiles keep the exact legacy ASCII slug they were saved under.
+    A valid name whose legacy slug is empty (for example a pure Chinese or
+    Korean display name) receives a deterministic hash of its NFKC/casefolded
+    text. This separates localized display identity from the path while path
+    separators, symbols, and formatting characters can never reach a filename.
+    """
+
+    legacy = _LEGACY_SLUG_RE.sub("-", name.strip().lower()).strip("-")
+    normalized = unicodedata.normalize("NFKC", name).strip().casefold()
+    # Every nonempty legacy result is a persisted identity, including numeric
+    # suffixes from names such as "配置 (2)" -> "2". Preserve it exactly so an
+    # upgrade never orphans a profile. New-name collision handling enumerates
+    # these stems and save_new publishes atomically, so separate localized
+    # defaults that propose the same numeric suffix are retried safely.
+    if legacy:
+        return legacy
+    if not any(character.isalnum() for character in normalized):
+        return ""
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+    return f"profile-{digest}"
 
 
 def sanitize_display_name(name: object) -> str:
@@ -152,6 +173,85 @@ class WrapperProfileStore:
         temp_path.replace(path)
         return path
 
+    def save_new(self, profile: WrapperProfile) -> Path:
+        """Atomically save a collision-free new profile without overwriting.
+
+        The UI's pre-save name scan is advisory: a valid file can have an
+        internal name that differs from its filename, and another process can
+        create the proposed destination after enumeration. Publish a complete
+        temporary file with ``os.link`` so the final path is created only when
+        it does not already exist. On collision, retry with a friendly numeric
+        suffix. The hard-link operation is same-volume and atomic; a crash can
+        leave only an ignored ``*.tmp`` link, never a partial visible profile.
+        """
+
+        base_name = unique_display_name(profile.name, set())
+        counter = 1
+        while True:
+            if counter == 1:
+                candidate = base_name
+            else:
+                suffix = f" ({counter})"
+                candidate = (
+                    f"{base_name[:MAX_PROFILE_NAME_LEN - len(suffix)]}{suffix}"
+                )
+            slug = self._slug_or_raise(candidate)
+            path = self._path_for_slug(slug)
+            temp_path = _contained(
+                self.base_dir,
+                f".{slug}.{uuid4().hex}.json{TEMP_SUFFIX}",
+            )
+            profile.name = candidate
+            profile.last_modified_at = utc_now_iso()
+            payload = json.dumps(profile.to_dict(), indent=2)
+
+            try:
+                with open(temp_path, "x", encoding="utf-8") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    try:
+                        os.fsync(handle.fileno())
+                    except OSError:
+                        logger.debug(
+                            "fsync unavailable for %s", temp_path, exc_info=True
+                        )
+            except OSError as exc:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.debug(
+                        "Could not clean failed profile temp %s",
+                        temp_path,
+                        exc_info=True,
+                    )
+                raise WrapperProfileError(
+                    f"Could not prepare new profile {candidate!r}: {exc}"
+                ) from exc
+
+            collision = False
+            try:
+                os.link(temp_path, path)
+            except FileExistsError:
+                collision = True
+            except OSError as exc:
+                raise WrapperProfileError(
+                    f"Could not publish new profile {candidate!r}: {exc}"
+                ) from exc
+            finally:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning(
+                        "Could not remove published profile temp %s",
+                        temp_path.name,
+                        exc_info=True,
+                    )
+
+            if collision:
+                counter += 1
+                continue
+            return path
+
     def delete(self, name: str) -> bool:
         """Remove a profile by name. Returns True if a file was removed."""
 
@@ -194,7 +294,7 @@ class WrapperProfileStore:
         """
 
         try:
-            payload = read_guarded_json(path)
+            payload = read_guarded_json(path, local_only=True)
         except (OSError, ValueError) as exc:
             raise WrapperProfileError(f"Could not read import file {path!r}: {exc}") from exc
         if not isinstance(payload, dict):

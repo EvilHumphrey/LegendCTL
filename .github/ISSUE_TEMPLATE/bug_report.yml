@@ -61,13 +61,16 @@ body:
   - type: textarea
     id: log
     attributes:
-      label: Log file / Diagnostic Bundle
+      label: Raw app log (strongly recommended)
       description: |
-        Attach the log from `%APPDATA%\ZDUltimateLegend\logs\zd_wrapper.log`, or a
-        Diagnostic Bundle exported from the in-app **Diagnostics** screen. Drag the
-        file into this box to attach it.
+        If you're comfortable sharing it, attach
+        `%APPDATA%\ZDUltimateLegend\logs\zd_wrapper.log`. It is required for
+        untested / unsupported-device reports. A Diagnostic Bundle exported from the
+        in-app **Diagnostics** screen is useful optional context, but it excludes the
+        raw app log and does not replace it. Drag the log (and, optionally, the bundle)
+        into this box to attach them.
     validations:
-      required: true
+      required: false
   - type: textarea
     id: av-evidence
     attributes:

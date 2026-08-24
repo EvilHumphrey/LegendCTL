@@ -1,9 +1,104 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from zd_app import i18n
 from zd_app.ui import support_reference
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _squash(text: str) -> str:
+    return " ".join(text.split())
+
+
+class PublicSupportPolicyTests(unittest.TestCase):
+    def test_public_docs_scope_full_sweep_to_profile_apply(self) -> None:
+        readme = _squash((_REPO_ROOT / "README.md").read_text(encoding="utf-8"))
+        architecture = _squash(
+            (_REPO_ROOT / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+        )
+
+        self.assertIn(
+            "A profile Apply reads back and compares every readable field it attempted",
+            readme,
+        )
+        self.assertIn(
+            "individual setting writes have narrower, setting-specific verification",
+            readme,
+        )
+        self.assertNotIn(
+            "a normal Apply reports each field's write outcome, reads back and compares "
+            "every readable field it wrote",
+            readme,
+        )
+        self.assertIn(
+            "The AppShell profile Apply job then reads the device back and compares "
+            "every readable field it attempted",
+            architecture,
+        )
+        self.assertIn(
+            "Other individual setting writes do not implicitly inherit the profile-wide "
+            "sweep",
+            architecture,
+        )
+        self.assertIn(
+            "step-size and lighting writes inside profile Apply use field-specific "
+            "verify/retry paths",
+            architecture,
+        )
+        self.assertNotIn(
+            "with step-size and lighting writes using field-specific verify/retry paths",
+            architecture,
+        )
+        self.assertNotIn("A normal Apply then reads the device back", architecture)
+        self.assertNotIn(
+            "A normal Apply reports each field's write outcome, then runs a post-apply",
+            architecture,
+        )
+
+    def test_architecture_describes_atomic_publication_without_replace_overclaim(
+        self,
+    ) -> None:
+        architecture = _squash(
+            (_REPO_ROOT / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+        )
+
+        self.assertIn("Writes use temporary files plus atomic publication", architecture)
+        self.assertIn("updates replace the destination", architecture)
+        self.assertIn(
+            "new wrapper profiles use collision-safe hard-link publication",
+            architecture,
+        )
+        self.assertNotIn("All writes are atomic temp-then-replace", architecture)
+
+    def test_security_policy_describes_current_release_provenance(self) -> None:
+        policy = (_REPO_ROOT / ".github" / "SECURITY.md").read_text(encoding="utf-8")
+
+        self.assertIn("currently **unsigned**", policy)
+        self.assertIn("from v2.5.0 onward", policy)
+        self.assertIn("GitHub Actions workflow", policy)
+        self.assertIn("`SHA256SUMS.txt`", policy)
+        self.assertIn("GitHub build-provenance attestations", policy)
+        self.assertIn("`gh attestation verify`", policy)
+
+    def test_bug_template_respects_log_privacy_and_unsupported_device_policy(self) -> None:
+        template = (
+            _REPO_ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml"
+        ).read_text(encoding="utf-8")
+        support = (_REPO_ROOT / ".github" / "SUPPORT.md").read_text(encoding="utf-8")
+        log_field = template.split("    id: log", 1)[1].split("  - type:", 1)[0]
+
+        self.assertIn("label: Raw app log (strongly recommended)", log_field)
+        self.assertIn("If you're comfortable sharing it", log_field)
+        self.assertIn("required for\n        untested / unsupported-device reports", log_field)
+        self.assertIn("useful optional context", log_field)
+        self.assertIn("it excludes the\n        raw app log and does not replace it", log_field)
+        self.assertIn("required: false", log_field)
+        self.assertIn("when you're comfortable sharing it", support)
+        self.assertIn("untested / unsupported-device reports", support)
 
 
 class SupportReferenceTests(unittest.TestCase):

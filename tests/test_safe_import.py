@@ -37,6 +37,7 @@ from zd_app.services.settings_service import (
     TriggerVibrationMode,
     VibrationSettings,
 )
+from zd_app.storage.wrapper_profile_store import WrapperProfileStore, slugify
 from zd_app.ui import safe_import_badges
 from zd_app.ui.safe_import_badges import BadgeKind
 from zd_app.ui import safe_import_model as model
@@ -191,8 +192,37 @@ class ClassifierTests(unittest.TestCase):
         raw = _export_dict(name="A\x00pex\x1f")
         result = model.classify_import(raw, existing_names={"Apex"})
         self.assertNotIn("\x00", result.generated_name)
-        # slug collides with existing "Apex" -> disambiguated id
-        self.assertTrue(result.audit.generated_profile_id.startswith("apex"))
+        self.assertEqual(result.generated_name, "Apex (2)")
+        self.assertEqual(result.audit.generated_profile_id, "apex-2")
+
+    def test_blank_generated_name_uses_each_locale_default(self) -> None:
+        self.addCleanup(i18n.set_locale, "en")
+        for locale in ("en", "zh-CN", "ko"):
+            with self.subTest(locale=locale):
+                i18n.set_locale(locale)
+                result = model.classify_import(
+                    _export_dict(name="\x00\n\x1f"),
+                    existing_names=set(),
+                )
+                self.assertEqual(
+                    result.generated_name,
+                    i18n.t("safe_import.default_name"),
+                )
+
+    def test_localized_blank_generated_name_is_uniquified(self) -> None:
+        self.addCleanup(i18n.set_locale, "en")
+        for locale in ("en", "zh-CN", "ko"):
+            with self.subTest(locale=locale):
+                i18n.set_locale(locale)
+                localized_default = i18n.t("safe_import.default_name")
+                result = model.classify_import(
+                    _export_dict(name="\x00\n\x1f"),
+                    existing_names={localized_default},
+                )
+                self.assertEqual(
+                    result.generated_name,
+                    f"{localized_default} (2)",
+                )
 
     def test_filtered_snapshot_clears_unselected_device(self) -> None:
         result = model.classify_import(_export_dict(), existing_names=set())
@@ -296,6 +326,32 @@ class PrepareImportGuardTests(unittest.TestCase):
         result = model.prepare_import(path, existing_names=set())
         self.assertFalse(result.ok)
         self.assertEqual(result.error_key, "safe_import.error.too_large")
+
+    def test_unc_source_is_unreadable_before_filesystem_probe(self) -> None:
+        with (
+            patch.object(Path, "open", side_effect=AssertionError("opened remote path")),
+            patch.object(Path, "stat", side_effect=AssertionError("statted remote path")),
+        ):
+            result = model.prepare_import(
+                r"\\server\share\incoming.json", existing_names=set()
+            )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_key, "safe_import.error.unreadable")
+
+    def test_mapped_drive_is_unreadable_before_filesystem_probe(self) -> None:
+        with (
+            patch(
+                "zd_app.storage._import_guards._get_windows_drive_type",
+                return_value=4,
+            ),
+            patch.object(Path, "open", side_effect=AssertionError("opened remote path")),
+            patch.object(Path, "stat", side_effect=AssertionError("statted remote path")),
+        ):
+            result = model.prepare_import(r"Z:\incoming.json", existing_names=set())
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_key, "safe_import.error.unreadable")
 
     def test_happy_path_sets_source_filename(self) -> None:
         path = self._write("apex.json", json.dumps(_export_dict()))
@@ -476,10 +532,89 @@ class PreviewRenderTests(_DpgTestCase):
         self._scan(shell, _export_dict())
         shell.safe_import_apply(apply_to_controller=False)
 
-        shell.wrapper_profile_store.save.assert_called()
+        shell.wrapper_profile_store.save_new.assert_called()
         self.assertEqual(shell._safe_import_result.audit.controller_write, "not_performed")
         self.assertTrue(dpg.does_item_exist(safe_import.RESULT_MODAL))
         self._assert_no_placeholders(safe_import.RESULT_MODAL)
+
+    def test_save_as_new_uniquifies_default_collision_and_preserves_original(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            store = WrapperProfileStore(Path(d))
+            original = WrapperProfile(
+                name="Apex Feel",
+                snapshot=_snapshot(
+                    vibration=VibrationSettings(
+                        1, 2, 3, 4, TriggerVibrationMode.NATIVE
+                    )
+                ),
+            )
+            store.save(original)
+            original_payload = store.load("Apex Feel").to_dict()
+
+            shell = make_shell(settings_service=MagicMock())
+            shell.wrapper_profile_store = store
+            self._full_ui(shell)
+            self._scan(shell, _export_dict(name="Apex Feel"))
+            shell.safe_import_apply(apply_to_controller=False)
+
+            names = {profile.name for profile in store.list_profiles()[0]}
+            self.assertEqual(names, {"Apex Feel", "Apex Feel (2)"})
+            self.assertEqual(store.load("Apex Feel").to_dict(), original_payload)
+            result = shell._safe_import_result
+            self.assertEqual(result.generated_name, "Apex Feel (2)")
+            self.assertEqual(result.audit.generated_profile_id, "apex-feel-2")
+
+    def _assert_save_as_new_persists_localized_default_identity(
+        self, locale: str
+    ) -> None:
+        self.addCleanup(i18n.set_locale, "en")
+        with tempfile.TemporaryDirectory() as d:
+            store = WrapperProfileStore(Path(d))
+            shell = make_shell(settings_service=MagicMock())
+            shell.wrapper_profile_store = store
+            i18n.set_locale(locale)
+            expected_name = i18n.t("safe_import.default_name")
+            self._full_ui(shell)
+            self._scan(shell, _export_dict(name="\x00\n\x1f"))
+            self.assertEqual(shell._safe_import_result.generated_name, expected_name)
+            self.assertEqual(dpg.get_value(safe_import.NAME_INPUT), expected_name)
+
+            shell.safe_import_apply(apply_to_controller=False)
+
+            self.assertEqual(store.load(expected_name).name, expected_name)
+            result = shell._safe_import_result
+            self.assertEqual(result.generated_name, expected_name)
+            self.assertEqual(result.audit.generated_profile_id, slugify(expected_name))
+
+    def test_save_as_new_persists_zh_cn_default_identity(self) -> None:
+        self._assert_save_as_new_persists_localized_default_identity("zh-CN")
+
+    def test_save_as_new_persists_ko_default_identity(self) -> None:
+        self._assert_save_as_new_persists_localized_default_identity("ko")
+
+    def test_save_as_new_reserves_valid_filename_even_when_internal_name_differs(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            store = WrapperProfileStore(Path(d))
+            occupied = Path(d) / "occupied.json"
+            occupied.write_text(
+                json.dumps(_export_dict(name="Different Internal Name")),
+                encoding="utf-8",
+            )
+            original_bytes = occupied.read_bytes()
+
+            shell = make_shell(settings_service=MagicMock())
+            shell.wrapper_profile_store = store
+            self._full_ui(shell)
+            self._scan(shell, _export_dict(name="Occupied"))
+            shell.safe_import_apply(apply_to_controller=False)
+
+            self.assertEqual(occupied.read_bytes(), original_bytes)
+            self.assertTrue((Path(d) / "occupied-2.json").is_file())
+            result = shell._safe_import_result
+            self.assertEqual(result.generated_name, "Occupied (2)")
+            self.assertEqual(result.audit.generated_profile_id, "occupied-2")
 
     def test_save_and_apply_requires_confirm_then_writes(self) -> None:
         shell = make_shell(settings_service=MagicMock())
@@ -509,6 +644,87 @@ class PreviewRenderTests(_DpgTestCase):
         # A restore point was saved before applying (current snapshot present).
         self.assertIsNotNone(shell._safe_import_result.audit.restore_point_name)
 
+    def test_save_and_apply_sanitizes_custom_collision_and_preserves_original(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            store = WrapperProfileStore(Path(d))
+            original = WrapperProfile(
+                name="Custom Name",
+                snapshot=_snapshot(
+                    vibration=VibrationSettings(
+                        1, 2, 3, 4, TriggerVibrationMode.NATIVE
+                    )
+                ),
+            )
+            store.save(original)
+            original_payload = store.load("Custom Name").to_dict()
+
+            shell = make_shell(settings_service=MagicMock())
+            shell.wrapper_profile_store = store
+            shell.last_controller_snapshot = _snapshot()
+            applied: dict = {}
+
+            def fake_apply(snapshot):
+                applied["snapshot"] = snapshot
+                return SimpleNamespace(failed=[])
+
+            shell._apply_snapshot_to_controller = MagicMock(side_effect=fake_apply)
+            shell.restore_point_service.read_current_state_with_provenance = MagicMock(
+                side_effect=lambda: (applied["snapshot"], {}, {})
+            )
+            self._full_ui(shell)
+            self._scan(shell, _export_dict(name="Imported"))
+            dpg.set_value(safe_import.NAME_INPUT, " Custom\x1f Name ")
+
+            with patch("zd_app.ui.app_shell.time.sleep"):
+                shell.safe_import_apply(apply_to_controller=True)
+
+            names = {profile.name for profile in store.list_profiles()[0]}
+            self.assertEqual(names, {"Custom Name", "Custom Name (2)"})
+            self.assertEqual(store.load("Custom Name").to_dict(), original_payload)
+            result = shell._safe_import_result
+            self.assertEqual(result.generated_name, "Custom Name (2)")
+            self.assertEqual(result.audit.generated_profile_id, "custom-name-2")
+
+    def _assert_save_and_apply_persists_localized_default_identity(
+        self, locale: str
+    ) -> None:
+        self.addCleanup(i18n.set_locale, "en")
+        with tempfile.TemporaryDirectory() as d:
+            store = WrapperProfileStore(Path(d))
+            shell = make_shell(settings_service=MagicMock())
+            shell.wrapper_profile_store = store
+            shell.last_controller_snapshot = _snapshot()
+            i18n.set_locale(locale)
+            expected_name = i18n.t("safe_import.default_name")
+            applied: dict = {}
+
+            def fake_apply(snapshot):
+                applied["snapshot"] = snapshot
+                return SimpleNamespace(failed=[])
+
+            shell._apply_snapshot_to_controller = MagicMock(side_effect=fake_apply)
+            shell.restore_point_service.read_current_state_with_provenance = MagicMock(
+                side_effect=lambda: (applied["snapshot"], {}, {})
+            )
+            self._full_ui(shell)
+            self._scan(shell, _export_dict(name="\x00\n\x1f"))
+            self.assertEqual(shell._safe_import_result.generated_name, expected_name)
+            self.assertEqual(dpg.get_value(safe_import.NAME_INPUT), expected_name)
+
+            with patch("zd_app.ui.app_shell.time.sleep"):
+                shell.safe_import_apply(apply_to_controller=True)
+
+            self.assertEqual(store.load(expected_name).name, expected_name)
+            result = shell._safe_import_result
+            self.assertEqual(result.generated_name, expected_name)
+            self.assertEqual(result.audit.generated_profile_id, slugify(expected_name))
+
+    def test_save_and_apply_persists_zh_cn_default_identity(self) -> None:
+        self._assert_save_and_apply_persists_localized_default_identity("zh-CN")
+
+    def test_save_and_apply_persists_ko_default_identity(self) -> None:
+        self._assert_save_and_apply_persists_localized_default_identity("ko")
+
     def test_save_and_apply_aborts_before_profile_or_controller_write_without_restore_point(self) -> None:
         shell = make_shell(settings_service=MagicMock())
         shell.last_controller_snapshot = _snapshot()
@@ -520,7 +736,7 @@ class PreviewRenderTests(_DpgTestCase):
         shell.safe_import_apply(apply_to_controller=True)
 
         audit = shell._safe_import_result.audit
-        shell.wrapper_profile_store.save.assert_not_called()
+        shell.wrapper_profile_store.save_new.assert_not_called()
         shell._apply_snapshot_to_controller.assert_not_called()
         self.assertIsNone(audit.restore_point_name)
         self.assertEqual(audit.controller_write, "aborted")
@@ -640,7 +856,7 @@ class ModalThreadDeferralTests(_DpgTestCase):
         # The disk save happened on the callback pass; the modal swap
         # (preview teardown, then open_result's pure create) waits for
         # the render-thread passes.
-        shell.wrapper_profile_store.save.assert_called()
+        shell.wrapper_profile_store.save_new.assert_called()
         self.assertEqual(
             shell._safe_import_result.audit.controller_write, "not_performed"
         )
@@ -730,7 +946,7 @@ class ModalThreadDeferralTests(_DpgTestCase):
         with patch("zd_app.ui.app_shell.time.sleep"):
             shell.safe_import_apply(apply_to_controller=True)
 
-        saved_profile = shell.wrapper_profile_store.save.call_args.args[0]
+        saved_profile = shell.wrapper_profile_store.save_new.call_args.args[0]
         self.assertEqual(saved_profile.name, "Smoke Custom Name")
 
     def test_failed_save_apply_replaces_hidden_failure_modal_over_two_passes(self) -> None:
@@ -1064,7 +1280,7 @@ class ApplyVerifyTests(_DpgTestCase):
         self.assertEqual(audit.verify_mismatched, [])
         self.assertEqual(audit.verify_unverifiable, [])
         # Verify is best-effort: the flow completed — profile saved, modal up.
-        shell.wrapper_profile_store.save.assert_called()
+        shell.wrapper_profile_store.save_new.assert_called()
         self.assertTrue(dpg.does_item_exist(safe_import.RESULT_MODAL))
         joined = "\n".join(self._labels(safe_import.RESULT_MODAL))
         self.assertIn(i18n.t("safe_import.result.write_sent_verify_failed"), joined)

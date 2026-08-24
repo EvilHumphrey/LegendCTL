@@ -39,6 +39,65 @@ def _locked_sections(path: Path) -> dict[str, str]:
     return sections
 
 
+def _normalized_package_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _exact_requirement_roots(
+    path: Path, *, _seen: set[Path] | None = None
+) -> dict[str, str]:
+    """Recursively collect exact ``name==version`` roots from input files."""
+
+    seen = _seen if _seen is not None else set()
+    resolved = path.resolve()
+    if resolved in seen:
+        return {}
+    seen.add(resolved)
+
+    roots: dict[str, str] = {}
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for line_number, raw_line in enumerate(lines, 1):
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        include = re.fullmatch(r"(?:-r|--requirement)\s+(.+)", line)
+        if include:
+            included_path = (path.parent / include.group(1).strip()).resolve()
+            included_roots = _exact_requirement_roots(included_path, _seen=seen)
+            for name, version in included_roots.items():
+                if name in roots and roots[name] != version:
+                    raise AssertionError(
+                        f"conflicting exact pins for {name}: {roots[name]} and {version}"
+                    )
+                roots[name] = version
+            continue
+
+        requirement = re.fullmatch(
+            r"([A-Za-z0-9][A-Za-z0-9_.-]*)==([^\s;\\]+)(?:\s*;.*)?", line
+        )
+        if requirement is None:
+            raise AssertionError(
+                f"{path.name}:{line_number} is not an exact requirement root: {line!r}"
+            )
+        name = _normalized_package_name(requirement.group(1))
+        version = requirement.group(2)
+        if name in roots and roots[name] != version:
+            raise AssertionError(
+                f"conflicting exact pins for {name}: {roots[name]} and {version}"
+            )
+        roots[name] = version
+    return roots
+
+
+def _locked_versions(path: Path) -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for name, section in _locked_sections(path).items():
+        match = re.match(r"[A-Za-z0-9][A-Za-z0-9_.-]*==([^\s]+)", section)
+        if match:
+            versions[_normalized_package_name(name)] = match.group(1)
+    return versions
+
+
 class ReleaseLockClosureTests(unittest.TestCase):
     def test_release_lock_is_complete_and_hashes_the_pyinstaller_and_audit_closures(self) -> None:
         self.assertTrue(LOCK.is_file())
@@ -83,6 +142,26 @@ class ReleaseLockClosureTests(unittest.TestCase):
         self.assertIn("pip-tools==7.6.1", lock_tools["pip-tools"])
         self.assertIn("--hash=sha256:", lock_tools["pip-tools"])
         self.assertIn("pip==26.2.1", lock_tools["pip"])
+
+    def test_release_lock_versions_match_all_recursive_build_roots(self) -> None:
+        lock_versions = _locked_versions(LOCK)
+        # Parse the build file independently as well as the full release input:
+        # this keeps a future edit to either include graph from hiding drift.
+        human_roots: dict[str, str] = {}
+        for input_path in (BUILD_INPUT, LOCK_INPUT):
+            for name, version in _exact_requirement_roots(input_path).items():
+                self.assertTrue(
+                    name not in human_roots or human_roots[name] == version,
+                    f"conflicting human-maintained pins for {name}: "
+                    f"{human_roots.get(name)} and {version}",
+                )
+                human_roots[name] = version
+
+        self.assertTrue(human_roots)
+        for name, expected_version in human_roots.items():
+            with self.subTest(package=name):
+                self.assertIn(name, lock_versions)
+                self.assertEqual(lock_versions[name], expected_version)
 
 
 class ReleaseOfflineInstallationTests(unittest.TestCase):

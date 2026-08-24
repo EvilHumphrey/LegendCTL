@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from dataclasses import replace
@@ -187,6 +188,9 @@ class WrapperProfileStoreTests(unittest.TestCase):
             "Apex Tuned": "apex-tuned",
             "FPS Default": "fps-default",
             "  Casual  ! ": "casual",
+            "Café": "caf",
+            "Apex 配置": "apex",
+            "ＦＰＳ　Default": "default",
             "": "",
             "   ": "",
             "!!!": "",
@@ -195,6 +199,54 @@ class WrapperProfileStoreTests(unittest.TestCase):
         for raw, expected in cases.items():
             with self.subTest(raw=raw):
                 self.assertEqual(slugify(raw), expected)
+
+        for localized in ("导入的配置", "가져온 프로필"):
+            with self.subTest(localized=localized):
+                identity = slugify(localized)
+                self.assertRegex(identity, r"^profile-[0-9a-f]{24}$")
+                self.assertEqual(identity, slugify(localized))
+
+    def test_numeric_only_legacy_suffix_identity_is_preserved(self) -> None:
+        self.assertEqual(slugify("配置 (2)"), "2")
+        self.assertEqual(slugify("프로필 (2)"), "2")
+
+    def test_localized_name_round_trips_through_storage_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = WrapperProfileStore(tmpdir)
+            for name in ("导入的配置", "가져온 프로필"):
+                with self.subTest(name=name):
+                    path = store.save(_profile(name))
+                    self.assertEqual(path.stem, slugify(name))
+                    self.assertTrue(path.name.isascii())
+                    self.assertTrue(store.exists(name))
+                    self.assertEqual(store.load(name).name, name)
+
+    def test_legacy_mixed_script_files_keep_their_existing_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = WrapperProfileStore(tmpdir)
+            for name, legacy_stem in (
+                ("Café", "caf"),
+                ("Apex 配置", "apex"),
+                ("配置 (2)", "2"),
+            ):
+                with self.subTest(name=name):
+                    legacy_path = Path(tmpdir) / f"{legacy_stem}.json"
+                    legacy_path.write_text(
+                        json.dumps(_profile(name, description="legacy").to_dict()),
+                        encoding="utf-8",
+                    )
+
+                    self.assertEqual(slugify(name), legacy_stem)
+                    self.assertTrue(store.exists(name))
+                    self.assertEqual(store.load(name).description, "legacy")
+                    store.save(_profile(name, description="updated"))
+                    self.assertEqual(store.load(name).description, "updated")
+                    self.assertEqual(
+                        sorted(path.name for path in Path(tmpdir).glob("*.json")),
+                        [f"{legacy_stem}.json"],
+                    )
+                    self.assertTrue(store.delete(name))
+                    self.assertFalse(legacy_path.exists())
 
     def test_slugify_collision_overwrites(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -408,6 +460,107 @@ class AtomicSaveTests(unittest.TestCase):
 
             self.assertEqual(profiles, [])
             self.assertEqual(skipped, [])
+
+
+class AtomicSaveNewTests(unittest.TestCase):
+    def test_save_new_treats_legacy_mixed_script_filename_as_occupied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = WrapperProfileStore(tmpdir)
+            legacy_path = Path(tmpdir) / "caf.json"
+            legacy_path.write_text(
+                json.dumps(_profile("Café", description="legacy").to_dict()),
+                encoding="utf-8",
+            )
+            original_bytes = legacy_path.read_bytes()
+            incoming = _profile("Café", description="new")
+
+            path = store.save_new(incoming)
+
+            self.assertEqual(incoming.name, "Café (2)")
+            self.assertEqual(path.name, "caf-2.json")
+            self.assertEqual(legacy_path.read_bytes(), original_bytes)
+
+    def test_save_new_retries_cross_script_numeric_suffix_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = WrapperProfileStore(tmpdir)
+            store.save(_profile("导入的配置"))
+            chinese_duplicate = _profile("导入的配置")
+            store.save_new(chinese_duplicate)
+            store.save(_profile("가져온 프로필"))
+            korean_duplicate = _profile("가져온 프로필")
+
+            path = store.save_new(korean_duplicate)
+
+            self.assertEqual(chinese_duplicate.name, "导入的配置 (2)")
+            self.assertEqual(korean_duplicate.name, "가져온 프로필 (3)")
+            self.assertEqual(path.name, "3.json")
+            self.assertEqual(
+                store.load(korean_duplicate.name).name,
+                korean_duplicate.name,
+            )
+
+    def test_save_new_preserves_and_uniquifies_localized_names(self) -> None:
+        for name in ("导入的配置", "가져온 프로필"):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmpdir:
+                store = WrapperProfileStore(tmpdir)
+                store.save(_profile(name))
+                incoming = _profile(name)
+
+                path = store.save_new(incoming)
+
+                self.assertEqual(incoming.name, f"{name} (2)")
+                self.assertEqual(path.stem, slugify(incoming.name))
+                self.assertEqual(store.load(incoming.name).name, incoming.name)
+
+    def test_save_new_never_overwrites_an_occupied_filename(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = WrapperProfileStore(tmpdir)
+            occupied = Path(tmpdir) / "occupied.json"
+            occupied.write_text(
+                json.dumps(_profile("Different Internal Name").to_dict()),
+                encoding="utf-8",
+            )
+            original_bytes = occupied.read_bytes()
+            incoming = _profile("Occupied")
+
+            path = store.save_new(incoming)
+
+            self.assertEqual(path.name, "occupied-2.json")
+            self.assertEqual(incoming.name, "Occupied (2)")
+            self.assertEqual(occupied.read_bytes(), original_bytes)
+
+    def test_save_new_retries_when_destination_appears_at_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = WrapperProfileStore(tmpdir)
+            real_link = os.link
+            raced = False
+            competitor = _profile("Competing Writer", description="must survive")
+            competitor_bytes = json.dumps(competitor.to_dict(), indent=2).encode(
+                "utf-8"
+            )
+
+            def racing_link(source, destination):
+                nonlocal raced
+                destination = Path(destination)
+                if not raced and destination.name == "race.json":
+                    raced = True
+                    destination.write_bytes(competitor_bytes)
+                return real_link(source, destination)
+
+            incoming = _profile("Race", description="new profile")
+            with patch(
+                "zd_app.storage.wrapper_profile_store.os.link",
+                side_effect=racing_link,
+            ):
+                path = store.save_new(incoming)
+
+            self.assertTrue(raced)
+            self.assertEqual(path.name, "race-2.json")
+            self.assertEqual(incoming.name, "Race (2)")
+            self.assertEqual(
+                (Path(tmpdir) / "race.json").read_bytes(), competitor_bytes
+            )
+            self.assertEqual(list(Path(tmpdir).glob("*.tmp")), [])
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ scrollbars does each screen have?" at the AppShell wrapper layer. This bench
 answers the finer question the card-clip lane needs: **which individual cards
 (child_windows) clip their own content and grow an INNER scrollbar** when
 rendered at the SHIPPED fonts (Inter 14 body / Inter SemiBold 18 section titles,
-Noto Sans SC for zh-CN) with realistic content.
+Noto Sans SC for zh-CN, Noto Sans KR for ko) with realistic content.
 
 Why a dedicated bench: a card built as ``dpg.child_window(height=<fixed px>)``
 silently clips when its real rendered content exceeds that hardcoded height —
@@ -63,6 +63,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 # Make the repo root importable so ``tests`` + ``zd_app`` resolve when this is
@@ -96,6 +97,9 @@ SCREENS = (
 # Extra modules sub-views worth measuring (compare card is a known fixed-height
 # suspect). Keyed by the ModulesScreenState.view to force before rendering.
 SETTLE_FRAMES = 45  # autosize layout needs several passes to converge
+MATRIX_CHILD_TIMEOUT_SECONDS = 3 * 60
+MATRIX_TIMEOUT_EXIT_CODE = 124
+DIAGNOSTIC_ERROR_EXIT_CODE = 2
 
 RESULT_PREFIX = "RESULT"
 CLIP_THRESHOLD = 0.5  # px of scroll-max that counts as a real clip
@@ -853,6 +857,22 @@ def _measure_safe_import_modal(dpg, shell, tmp: Path) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+def _guard_measurement(label: str, operation) -> tuple[list[dict] | None, bool]:
+    """Run one render/measurement step and preserve failures for the exit code."""
+
+    try:
+        return operation(), False
+    except Exception as exc:  # pragma: no cover - exercised through helper test
+        print(f"  {label:<18} ERROR: {type(exc).__name__}: {exc}", flush=True)
+        return None, True
+
+
+def _diagnostic_exit_code(*, any_clip: bool, measurement_error: bool) -> int:
+    if measurement_error:
+        return DIAGNOSTIC_ERROR_EXIT_CODE
+    return 1 if any_clip else 0
+
+
 def _run(screens: list[str], locale: str, width: int, height: int) -> int:
     import dearpygui.dearpygui as dpg
     from unittest.mock import MagicMock
@@ -893,40 +913,49 @@ def _run(screens: list[str], locale: str, width: int, height: int) -> int:
         flush=True,
     )
     any_clip = False
+    measurement_error = False
 
     measurements: list[tuple[str, list[dict]]] = []
     for screen in screens:
-        try:
-            cards = _measure_screen(dpg, shell, screen)
-        except Exception as exc:  # pragma: no cover - diagnostic resilience
-            print(f"  {screen:<18} ERROR: {type(exc).__name__}: {exc}", flush=True)
-            continue
-        measurements.append((screen, cards))
+        cards, failed = _guard_measurement(
+            screen, lambda screen=screen: _measure_screen(dpg, shell, screen)
+        )
+        measurement_error |= failed
+        if cards is not None:
+            measurements.append((screen, cards))
 
     # Modules compare sub-view (force the COMPARE state).
     if "modules" in screens:
-        try:
-            cards = _measure_screen(dpg, shell, "modules", view_setup=_force_modules_compare)
+        cards, failed = _guard_measurement(
+            "modules:compare",
+            lambda: _measure_screen(
+                dpg, shell, "modules", view_setup=_force_modules_compare
+            ),
+        )
+        measurement_error |= failed
+        if cards is not None:
             measurements.append(("modules:compare", cards))
-        except Exception as exc:  # pragma: no cover
-            print(f"  modules:compare ERROR: {type(exc).__name__}: {exc}", flush=True)
 
     # Restore Points detail sub-view (force DETAIL on a seeded point).
     if "restore_points" in screens:
-        try:
-            cards = _measure_screen(
+        cards, failed = _guard_measurement(
+            "restore_points:detail",
+            lambda: _measure_screen(
                 dpg, shell, "restore_points", view_setup=_force_restore_detail
-            )
+            ),
+        )
+        measurement_error |= failed
+        if cards is not None:
             measurements.append(("restore_points:detail", cards))
-        except Exception as exc:  # pragma: no cover
-            print(f"  restore_points:detail ERROR: {type(exc).__name__}: {exc}", flush=True)
-        try:
-            cards = _measure_screen(
+        cards, failed = _guard_measurement(
+            "restore_points:result",
+            lambda: _measure_screen(
                 dpg, shell, "restore_points", view_setup=_force_restore_result
-            )
+            ),
+        )
+        measurement_error |= failed
+        if cards is not None:
             measurements.append(("restore_points:result", cards))
-        except Exception as exc:  # pragma: no cover
-            print(f"  restore_points:result ERROR: {type(exc).__name__}: {exc}", flush=True)
 
     # Modules content-heavy sub-views the original probe never reached: an
     # EXPANDED fingerprint (active + archived), the archived list, and the trends
@@ -939,21 +968,27 @@ def _run(screens: list[str], locale: str, width: int, height: int) -> int:
             ("modules:archived+exp", _force_modules_archived_detail_expanded),
             ("modules:trends", _force_modules_trends),
         ):
-            try:
-                cards = _measure_screen(dpg, shell, "modules", view_setup=setup)
+            cards, failed = _guard_measurement(
+                label,
+                lambda setup=setup: _measure_screen(
+                    dpg, shell, "modules", view_setup=setup
+                ),
+            )
+            measurement_error |= failed
+            if cards is not None:
                 measurements.append((label, cards))
-            except Exception as exc:  # pragma: no cover
-                print(f"  {label} ERROR: {type(exc).__name__}: {exc}", flush=True)
 
     # Readiness Check DONE verdict (RED + 4 observations) — the verdict card :244.
     if "readiness_check" in screens:
-        try:
-            cards = _measure_screen(
+        cards, failed = _guard_measurement(
+            "readiness:done",
+            lambda: _measure_screen(
                 dpg, shell, "readiness_check", view_setup=_force_readiness_done_red
-            )
+            ),
+        )
+        measurement_error |= failed
+        if cards is not None:
             measurements.append(("readiness:done", cards))
-        except Exception as exc:  # pragma: no cover
-            print(f"  readiness:done ERROR: {type(exc).__name__}: {exc}", flush=True)
 
     for screen, cards in measurements:
         clippers = [c for c in cards if _clip_kind(c) == "real"]
@@ -971,10 +1006,14 @@ def _run(screens: list[str], locale: str, width: int, height: int) -> int:
         for c in intentional:
             print(f"      - (intentional scroll) {_format_card(c)}", flush=True)
 
-    # Safe Import modal measurement (best-effort; isolated so a seeding failure
-    # cannot abort the whole run).
-    try:
-        si_cards = _measure_safe_import_modal(dpg, shell, Path(tmpdir.name))
+    # Safe Import modal measurement is isolated so a failure does not suppress
+    # the other results, but it still makes the overall diagnostic fail hard.
+    si_cards, failed = _guard_measurement(
+        "safe_import:modal",
+        lambda: _measure_safe_import_modal(dpg, shell, Path(tmpdir.name)),
+    )
+    measurement_error |= failed
+    if si_cards is not None:
         clippers = [c for c in si_cards if _clip_kind(c) == "real"]
         intentional = [c for c in si_cards if _clip_kind(c) == "intentional"]
         if si_cards:
@@ -991,15 +1030,19 @@ def _run(screens: list[str], locale: str, width: int, height: int) -> int:
                 print(f"      - CLIP  {_format_card(c)}", flush=True)
             for c in intentional:
                 print(f"      - (intentional scroll) {_format_card(c)}", flush=True)
-    except Exception as exc:  # pragma: no cover
-        print(f"  safe_import:modal skipped: {exc}", flush=True)
 
-    print(f"{RESULT_PREFIX} locale={locale} size={width}x{height} any_clip={any_clip}", flush=True)
+    print(
+        f"{RESULT_PREFIX} locale={locale} size={width}x{height} "
+        f"any_clip={any_clip} measurement_error={measurement_error}",
+        flush=True,
+    )
     sys.stdout.flush()
 
     dpg.destroy_context()
     tmpdir.cleanup()
-    return 1 if any_clip else 0
+    return _diagnostic_exit_code(
+        any_clip=any_clip, measurement_error=measurement_error
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1008,9 +1051,10 @@ def _run(screens: list[str], locale: str, width: int, height: int) -> int:
 
 
 def _run_matrix() -> int:
-    locales = ["en", "zh-CN"]
+    locales = ["en", "zh-CN", "ko"]
     sizes = [(1480, 920), (1920, 1040), (1180, 760)]
-    rc = 0
+    saw_clip = False
+    hard_failure: int | None = None
     for locale in locales:
         for w, h in sizes:
             cmd = [
@@ -1024,11 +1068,36 @@ def _run_matrix() -> int:
                 str(h),
             ]
             print(f"\n########## {locale} {w}x{h} ##########", flush=True)
-            proc = subprocess.run(cmd)
-            # rc 1 just means a clip was found; surface but keep going.
-            if proc.returncode not in (0, 1):
-                rc = proc.returncode
-    return rc
+            try:
+                proc = subprocess.run(cmd, timeout=MATRIX_CHILD_TIMEOUT_SECONDS)
+                child_rc = proc.returncode
+            except subprocess.TimeoutExpired:
+                child_rc = MATRIX_TIMEOUT_EXIT_CODE
+                print(
+                    f"ERROR: card-clip child exceeded "
+                    f"{MATRIX_CHILD_TIMEOUT_SECONDS}s",
+                    flush=True,
+                )
+            except OSError as exc:
+                child_rc = DIAGNOSTIC_ERROR_EXIT_CODE
+                print(
+                    f"ERROR: could not launch card-clip child: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+
+            # Exit 1 is the diagnostic's expected "clipping found" result. Keep
+            # running the complete matrix, but do not lose that signal when a
+            # later cell is green. Other exit codes are execution failures; the
+            # first one wins so the aggregate result is deterministic.
+            if child_rc == 1:
+                saw_clip = True
+            elif child_rc != 0 and hard_failure is None:
+                hard_failure = child_rc
+
+    if hard_failure is not None:
+        return hard_failure
+    return 1 if saw_clip else 0
 
 
 def main() -> None:
@@ -1049,7 +1118,12 @@ def main() -> None:
     else:
         screens = list(SCREENS)
 
-    raise SystemExit(_run(screens, locale, width, height))
+    try:
+        result = _run(screens, locale, width, height)
+    except Exception:  # keep an aborted child distinct from "clipping found"
+        traceback.print_exc()
+        result = DIAGNOSTIC_ERROR_EXIT_CODE
+    raise SystemExit(result)
 
 
 if __name__ == "__main__":

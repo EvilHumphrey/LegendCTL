@@ -41,7 +41,8 @@ Please fill it in completely:
 - Windows version (e.g. Windows 11 23H2)
 - Controller **VID/PID** and variant, and firmware version if known
 - Exact steps to reproduce, plus what you expected vs. what actually happened
-- The generated **log file** (see below)
+- The generated **log file** when you're comfortable sharing it (required for
+  untested / unsupported-device reports; see below)
 - For SmartScreen / antivirus / install problems: a screenshot of the warning
   and the **SHA-256** of the file you downloaded
 
