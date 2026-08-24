@@ -19,6 +19,8 @@ ROOT = Path(__file__).resolve().parents[1]
 LOCK = ROOT / "requirements-release.lock"
 LOCK_INPUT = ROOT / "requirements-release.in"
 LOCK_TOOLS = ROOT / "requirements-lock-tools.lock"
+LOCK_TOOLS_INPUT = ROOT / "requirements-lock-tools.in"
+BUILD_INPUT = ROOT / "requirements-build.txt"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release-build.yml"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 SETUP = ROOT / "tools" / "setup_dev_env.ps1"
@@ -65,13 +67,22 @@ class ReleaseLockClosureTests(unittest.TestCase):
                 self.assertIn("--hash=sha256:", section)
 
     def test_human_roots_and_refresher_tool_are_exactly_pinned(self) -> None:
-        self.assertIn("pip-audit==2.10.1", LOCK_INPUT.read_text(encoding="utf-8"))
-        self.assertIn("pip==26.1.2", LOCK_INPUT.read_text(encoding="utf-8"))
+        build_input = BUILD_INPUT.read_text(encoding="utf-8")
+        release_input = LOCK_INPUT.read_text(encoding="utf-8")
+        tools_input = LOCK_TOOLS_INPUT.read_text(encoding="utf-8")
+        release_lock = _locked_sections(LOCK)
         lock_tools = _locked_sections(LOCK_TOOLS)
+        self.assertIn("pyinstaller==6.22.2", build_input)
+        self.assertIn("pyinstaller==6.22.2", release_lock["pyinstaller"])
+        self.assertIn("pip-audit==2.10.1", release_input)
+        self.assertIn("pip==26.2.1", release_input)
+        self.assertIn("pip==26.2.1", release_lock["pip"])
+        self.assertIn("pip-tools==7.6.1", tools_input)
+        self.assertIn("pip==26.2.1", tools_input)
         self.assertIn("pip-tools", lock_tools)
-        self.assertIn("pip-tools==7.6.0", lock_tools["pip-tools"])
+        self.assertIn("pip-tools==7.6.1", lock_tools["pip-tools"])
         self.assertIn("--hash=sha256:", lock_tools["pip-tools"])
-        self.assertIn("pip==26.1.2", lock_tools["pip"])
+        self.assertIn("pip==26.2.1", lock_tools["pip"])
 
 
 class ReleaseOfflineInstallationTests(unittest.TestCase):
