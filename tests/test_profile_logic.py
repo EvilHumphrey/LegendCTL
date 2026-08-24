@@ -297,6 +297,51 @@ class SharedImportGuardTests(unittest.TestCase):
             with self.assertRaises(UnsafeImportPathError):
                 require_local_import_path(r"Z:\incoming.json")
 
+    def test_relative_path_checks_resolved_drive_and_opens_same_absolute_path(self) -> None:
+        checked = r"Z:\workspace\incoming.json"
+        with (
+            patch(
+                "zd_app.storage._import_guards.ntpath.abspath",
+                return_value=checked,
+            ),
+            patch(
+                "zd_app.storage._import_guards._get_windows_drive_type",
+                return_value=3,
+            ) as drive_type,
+            patch(
+                "zd_app.storage._import_guards._read_windows_local_no_reparse",
+                return_value=b'{"ok": true}',
+            ) as native_read,
+        ):
+            self.assertEqual(
+                read_guarded_json("incoming.json", local_only=True),
+                {"ok": True},
+            )
+
+        drive_type.assert_called_once_with(checked)
+        native_read.assert_called_once_with(checked, MAX_IMPORT_BYTES)
+
+    def test_relative_path_on_mapped_current_drive_is_rejected_before_open(self) -> None:
+        checked = r"Z:\workspace\incoming.json"
+        with (
+            patch(
+                "zd_app.storage._import_guards.ntpath.abspath",
+                return_value=checked,
+            ),
+            patch(
+                "zd_app.storage._import_guards._get_windows_drive_type",
+                return_value=4,
+            ) as drive_type,
+            patch(
+                "zd_app.storage._import_guards._read_windows_local_no_reparse",
+                side_effect=AssertionError("opened mapped-drive path"),
+            ),
+        ):
+            with self.assertRaises(UnsafeImportPathError):
+                read_guarded_json("incoming.json", local_only=True)
+
+        drive_type.assert_called_once_with(checked)
+
     @unittest.skipUnless(os.name == "nt", "Windows reparse-point policy")
     def test_rejects_leaf_symlink_to_unc_before_open(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -343,10 +388,11 @@ class SharedImportGuardTests(unittest.TestCase):
             source.write_text('{"safe": true}', encoding="utf-8")
             real_require = import_guards.require_local_import_path
 
-            def check_then_pivot(candidate: str | Path) -> None:
-                real_require(candidate)
+            def check_then_pivot(candidate: str | Path) -> str:
+                checked_path = real_require(candidate)
                 source.unlink()
                 os.symlink(r"\\nonexistent.invalid\share\chosen.json", source)
+                return checked_path
 
             with (
                 patch(
@@ -371,8 +417,8 @@ class SharedImportGuardTests(unittest.TestCase):
             source.write_text('{"safe": true}', encoding="utf-8")
             real_require = import_guards.require_local_import_path
 
-            def check_then_pivot(candidate: str | Path) -> None:
-                real_require(candidate)
+            def check_then_pivot(candidate: str | Path) -> str:
+                checked_path = real_require(candidate)
                 source.unlink()
                 parent.rmdir()
                 os.symlink(
@@ -380,6 +426,7 @@ class SharedImportGuardTests(unittest.TestCase):
                     parent,
                     target_is_directory=True,
                 )
+                return checked_path
 
             with (
                 patch(

@@ -190,7 +190,7 @@ def _read_windows_local_no_reparse(path: str, max_bytes: int) -> bytes:
         return handle.read(max_bytes + 1)
 
 
-def require_local_import_path(path: str | Path) -> None:
+def require_local_import_path(path: str | Path) -> str:
     """Reject network and Windows device paths before any filesystem access.
 
     User-selected imports are local-only. In particular, probing a UNC path or
@@ -205,8 +205,19 @@ def require_local_import_path(path: str | Path) -> None:
     windows_path = raw_path.replace("/", "\\")
     if windows_path.startswith("\\\\") or windows_path.startswith("\\??\\"):
         raise UnsafeImportPathError("Import path must be on a local filesystem")
-    if _get_windows_drive_type(windows_path) == _DRIVE_REMOTE:
+    if os.name != "nt":
+        return os.path.abspath(raw_path)
+
+    # The file chooser is editable, so relative input is valid. Bind the
+    # mapped-drive check and the native open to one lexical absolute path:
+    # checking the raw relative spelling and resolving it later could miss a
+    # remote current drive (for example, incoming.json while CWD is Z:).
+    checked_path = ntpath.normpath(ntpath.abspath(windows_path))
+    if checked_path.startswith("\\\\") or checked_path.startswith("\\??\\"):
+        raise UnsafeImportPathError("Import path must be on a local filesystem")
+    if _get_windows_drive_type(checked_path) == _DRIVE_REMOTE:
         raise UnsafeImportPathError("Import path must not use a mapped network drive")
+    return checked_path
 
 
 def _max_json_depth(text: str) -> int:
@@ -256,12 +267,13 @@ def read_guarded_text(
     network paths.
     """
 
+    checked_path = os.fspath(path)
     if local_only:
-        require_local_import_path(path)
+        checked_path = require_local_import_path(path)
     if local_only and os.name == "nt":
-        payload = _read_windows_local_no_reparse(os.fspath(path), max_bytes)
+        payload = _read_windows_local_no_reparse(checked_path, max_bytes)
     else:
-        source = Path(path)
+        source = Path(checked_path)
         with source.open("rb") as handle:
             payload = handle.read(max_bytes + 1)
     if len(payload) > max_bytes:

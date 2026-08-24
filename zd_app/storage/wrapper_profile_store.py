@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+import unicodedata
 from pathlib import Path
 from uuid import uuid4
 
@@ -14,7 +16,7 @@ from zd_app.storage._import_guards import read_guarded_json
 from zd_app.storage.settings_store import initialize_user_data_dir
 
 
-_SLUG_RE = re.compile(r"[^a-z0-9]+")
+_LEGACY_SLUG_RE = re.compile(r"[^a-z0-9]+")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
 MAX_PROFILE_NAME_LEN = 64
 DEFAULT_IMPORTED_NAME = "Imported Profile"
@@ -23,10 +25,28 @@ logger = logging.getLogger(__name__)
 
 
 def slugify(name: str) -> str:
-    """Normalize a profile name to a filesystem-safe slug."""
+    """Return a compatible, ASCII-only filesystem identity for ``name``.
 
-    lowered = name.strip().lower()
-    return _SLUG_RE.sub("-", lowered).strip("-")
+    Existing profiles keep the exact legacy ASCII slug they were saved under.
+    A valid name whose legacy slug is empty (for example a pure Chinese or
+    Korean display name) receives a deterministic hash of its NFKC/casefolded
+    text. This separates localized display identity from the path while path
+    separators, symbols, and formatting characters can never reach a filename.
+    """
+
+    legacy = _LEGACY_SLUG_RE.sub("-", name.strip().lower()).strip("-")
+    normalized = unicodedata.normalize("NFKC", name).strip().casefold()
+    # Every nonempty legacy result is a persisted identity, including numeric
+    # suffixes from names such as "配置 (2)" -> "2". Preserve it exactly so an
+    # upgrade never orphans a profile. New-name collision handling enumerates
+    # these stems and save_new publishes atomically, so separate localized
+    # defaults that propose the same numeric suffix are retried safely.
+    if legacy:
+        return legacy
+    if not any(character.isalnum() for character in normalized):
+        return ""
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+    return f"profile-{digest}"
 
 
 def sanitize_display_name(name: object) -> str:

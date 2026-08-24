@@ -40,7 +40,7 @@ from zd_app.models import WrapperProfile
 from zd_app.services import import_classifier
 from zd_app.services.import_classifier import DEVICE_SETTING_KEYS, RiskCategory
 from zd_app.storage.snapshot_codec import snapshot_to_dict
-from zd_app.storage.wrapper_profile_store import slugify
+from zd_app.storage.wrapper_profile_store import slugify, unique_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -286,10 +286,17 @@ def classify_import(raw_payload: dict, *, existing_names: set[str]) -> ImportRes
     # name against ``existing_names``. Preserve that result in the preview;
     # reconstructing the raw name here used to show a colliding default even
     # though the audit id had been uniquified.
-    display_name = _clean_display_name(risk.generated_name) or t(
-        "safe_import.default_name"
-    )
     existing_slugs = {slugify(name) for name in existing_names if slugify(name)}
+    supplied_name = _clean_display_name(raw_payload.get("name"))
+    if supplied_name:
+        display_name = _clean_display_name(risk.generated_name) or supplied_name
+    else:
+        # The storage-layer classifier deliberately uses an English fallback;
+        # the UI must localize that fallback while retaining collision safety.
+        display_name = unique_display_name(
+            t("safe_import.default_name"),
+            existing_slugs,
+        )
     audit.generated_profile_id = _unique_slug(display_name, existing_slugs)
 
     categories = _bucket_snapshot(profile)

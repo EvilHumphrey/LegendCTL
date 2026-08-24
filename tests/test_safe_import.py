@@ -37,7 +37,7 @@ from zd_app.services.settings_service import (
     TriggerVibrationMode,
     VibrationSettings,
 )
-from zd_app.storage.wrapper_profile_store import WrapperProfileStore
+from zd_app.storage.wrapper_profile_store import WrapperProfileStore, slugify
 from zd_app.ui import safe_import_badges
 from zd_app.ui.safe_import_badges import BadgeKind
 from zd_app.ui import safe_import_model as model
@@ -194,6 +194,35 @@ class ClassifierTests(unittest.TestCase):
         self.assertNotIn("\x00", result.generated_name)
         self.assertEqual(result.generated_name, "Apex (2)")
         self.assertEqual(result.audit.generated_profile_id, "apex-2")
+
+    def test_blank_generated_name_uses_each_locale_default(self) -> None:
+        self.addCleanup(i18n.set_locale, "en")
+        for locale in ("en", "zh-CN", "ko"):
+            with self.subTest(locale=locale):
+                i18n.set_locale(locale)
+                result = model.classify_import(
+                    _export_dict(name="\x00\n\x1f"),
+                    existing_names=set(),
+                )
+                self.assertEqual(
+                    result.generated_name,
+                    i18n.t("safe_import.default_name"),
+                )
+
+    def test_localized_blank_generated_name_is_uniquified(self) -> None:
+        self.addCleanup(i18n.set_locale, "en")
+        for locale in ("en", "zh-CN", "ko"):
+            with self.subTest(locale=locale):
+                i18n.set_locale(locale)
+                localized_default = i18n.t("safe_import.default_name")
+                result = model.classify_import(
+                    _export_dict(name="\x00\n\x1f"),
+                    existing_names={localized_default},
+                )
+                self.assertEqual(
+                    result.generated_name,
+                    f"{localized_default} (2)",
+                )
 
     def test_filtered_snapshot_clears_unselected_device(self) -> None:
         result = model.classify_import(_export_dict(), existing_names=set())
@@ -535,6 +564,34 @@ class PreviewRenderTests(_DpgTestCase):
             self.assertEqual(result.generated_name, "Apex Feel (2)")
             self.assertEqual(result.audit.generated_profile_id, "apex-feel-2")
 
+    def _assert_save_as_new_persists_localized_default_identity(
+        self, locale: str
+    ) -> None:
+        self.addCleanup(i18n.set_locale, "en")
+        with tempfile.TemporaryDirectory() as d:
+            store = WrapperProfileStore(Path(d))
+            shell = make_shell(settings_service=MagicMock())
+            shell.wrapper_profile_store = store
+            i18n.set_locale(locale)
+            expected_name = i18n.t("safe_import.default_name")
+            self._full_ui(shell)
+            self._scan(shell, _export_dict(name="\x00\n\x1f"))
+            self.assertEqual(shell._safe_import_result.generated_name, expected_name)
+            self.assertEqual(dpg.get_value(safe_import.NAME_INPUT), expected_name)
+
+            shell.safe_import_apply(apply_to_controller=False)
+
+            self.assertEqual(store.load(expected_name).name, expected_name)
+            result = shell._safe_import_result
+            self.assertEqual(result.generated_name, expected_name)
+            self.assertEqual(result.audit.generated_profile_id, slugify(expected_name))
+
+    def test_save_as_new_persists_zh_cn_default_identity(self) -> None:
+        self._assert_save_as_new_persists_localized_default_identity("zh-CN")
+
+    def test_save_as_new_persists_ko_default_identity(self) -> None:
+        self._assert_save_as_new_persists_localized_default_identity("ko")
+
     def test_save_as_new_reserves_valid_filename_even_when_internal_name_differs(
         self,
     ) -> None:
@@ -627,6 +684,46 @@ class PreviewRenderTests(_DpgTestCase):
             result = shell._safe_import_result
             self.assertEqual(result.generated_name, "Custom Name (2)")
             self.assertEqual(result.audit.generated_profile_id, "custom-name-2")
+
+    def _assert_save_and_apply_persists_localized_default_identity(
+        self, locale: str
+    ) -> None:
+        self.addCleanup(i18n.set_locale, "en")
+        with tempfile.TemporaryDirectory() as d:
+            store = WrapperProfileStore(Path(d))
+            shell = make_shell(settings_service=MagicMock())
+            shell.wrapper_profile_store = store
+            shell.last_controller_snapshot = _snapshot()
+            i18n.set_locale(locale)
+            expected_name = i18n.t("safe_import.default_name")
+            applied: dict = {}
+
+            def fake_apply(snapshot):
+                applied["snapshot"] = snapshot
+                return SimpleNamespace(failed=[])
+
+            shell._apply_snapshot_to_controller = MagicMock(side_effect=fake_apply)
+            shell.restore_point_service.read_current_state_with_provenance = MagicMock(
+                side_effect=lambda: (applied["snapshot"], {}, {})
+            )
+            self._full_ui(shell)
+            self._scan(shell, _export_dict(name="\x00\n\x1f"))
+            self.assertEqual(shell._safe_import_result.generated_name, expected_name)
+            self.assertEqual(dpg.get_value(safe_import.NAME_INPUT), expected_name)
+
+            with patch("zd_app.ui.app_shell.time.sleep"):
+                shell.safe_import_apply(apply_to_controller=True)
+
+            self.assertEqual(store.load(expected_name).name, expected_name)
+            result = shell._safe_import_result
+            self.assertEqual(result.generated_name, expected_name)
+            self.assertEqual(result.audit.generated_profile_id, slugify(expected_name))
+
+    def test_save_and_apply_persists_zh_cn_default_identity(self) -> None:
+        self._assert_save_and_apply_persists_localized_default_identity("zh-CN")
+
+    def test_save_and_apply_persists_ko_default_identity(self) -> None:
+        self._assert_save_and_apply_persists_localized_default_identity("ko")
 
     def test_save_and_apply_aborts_before_profile_or_controller_write_without_restore_point(self) -> None:
         shell = make_shell(settings_service=MagicMock())
