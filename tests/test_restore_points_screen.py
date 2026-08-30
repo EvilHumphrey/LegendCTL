@@ -13,6 +13,9 @@ the tests are fully deterministic and never touch the filesystem.
 from __future__ import annotations
 
 from dataclasses import replace
+import re
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -2215,24 +2218,34 @@ class ListRowDeleteFlowTests(unittest.TestCase):
 
 class DuplicateRestoreRowAliasTests(unittest.TestCase):
     def test_copied_restore_point_ids_keep_unique_rendered_action_aliases(self) -> None:
-        import dearpygui.dearpygui as dpg
-
-        shell = _shell_with(_FakeService(valid=[_rp(id="copied-id"), _rp(id="copied-id")]))
-        dpg.create_context()
+        # This native context must not share the discovered suite's process:
+        # an A/B run implicated it in a later module's dpg.window crash.
+        test_id = (
+            "tests.isolated_restore_points_aliases.IsolatedRestorePointsAliasTests."
+            "test_copied_restore_point_ids_keep_unique_rendered_action_aliases"
+        )
         try:
-            with dpg.window(tag="duplicate_restore_host"):
-                pass
-            screen.build(shell, "duplicate_restore_host")
-            tags = [
-                dpg.get_item_alias(item) for item in dpg.get_all_items()
-                if dpg.get_item_alias(item).startswith("restore_points_row_action_")
+            result = subprocess.run(
+                [sys.executable, "-X", "faulthandler", "-m", "unittest", test_id],
+                cwd=Path(__file__).resolve().parents[1],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+            )
+        except subprocess.TimeoutExpired as exc:
+            parts = [
+                part.decode("utf-8", errors="replace") if isinstance(part, bytes) else part
+                for part in (exc.stdout, exc.stderr) if part
             ]
-            self.assertEqual(len(tags), 8)
-            self.assertEqual(len(set(tags)), 8)
-            for action in ("view", "restore", "export", "delete"):
-                self.assertEqual(sum(tag.endswith("_" + action) for tag in tags), 2)
-        finally:
-            dpg.destroy_context()
+            self.fail("Isolated duplicate-ID build timed out.\n" + "\n".join(parts))
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, f"Isolated duplicate-ID build failed.\n{output}")
+        self.assertIsNotNone(
+            re.search(r"(?:^|\n)Ran 1 test in [0-9.]+s\n\nOK\s*\Z", result.stderr),
+            f"Isolated duplicate-ID build has no complete one-test OK summary.\n{output}",
+        )
 
 
 if __name__ == "__main__":
