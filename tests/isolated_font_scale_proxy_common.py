@@ -320,7 +320,11 @@ def _nearest_scroll_surface(item, fallback):
         if not parent:
             break
         try:
-            if float(dpg.get_y_scroll_max(parent)) > CLIP_THRESHOLD:
+            # A non-scrolling table reports its host window's scroll range in
+            # DPG, but has no window rectangle. Keep walking to the real page.
+            is_table = dpg.get_item_type(parent) == "mvAppItemType::mvTable"
+            is_scroll_table = is_table and dpg.get_item_configuration(parent).get("scrollY", False)
+            if (not is_table or is_scroll_table) and float(dpg.get_y_scroll_max(parent)) > CLIP_THRESHOLD:
                 return parent
         except Exception:
             pass
