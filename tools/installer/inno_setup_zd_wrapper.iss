@@ -27,6 +27,10 @@ AppPublisher=EvilHumphrey
 ; command-line-overridable (no PrivilegesRequiredOverridesAllowed): allowing a
 ; downgrade to a user-writable path would reintroduce the very risk this fixes.
 DefaultDirName={autopf}\ZDUltimateLegend
+; The final path is checked in PrepareToInstall too: hiding this page alone
+; does not prevent /DIR or /LOADINF from supplying a different destination.
+DisableDirPage=yes
+UsePreviousAppDir=no
 DefaultGroupName=ZD Ultimate Legend Wrapper
 PrivilegesRequired=admin
 OutputDir=..\..\dist
@@ -58,3 +62,19 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; \
 Filename: "{app}\ZD Ultimate Legend.exe"; \
     Description: "Launch ZD Ultimate Legend Wrapper"; \
     Flags: nowait postinstall skipifsilent runasoriginaluser
+
+[Code]
+#include "install_directory_policy.iss"
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ManagedDir: String;
+begin
+  ManagedDir := ExpandConstant('{autopf}\ZDUltimateLegend');
+  Result := '';
+  if not IsAdminInstallMode or
+     not LegendInstallDirectoryAllowed(ExpandConstant('{app}'), ManagedDir) or
+     not LegendPreviousInstallAllowed(ManagedDir) then
+    { Reuse Inno's translated error; detailed reason codes go to its /LOG. }
+    Result := SetupMessage(msgInvalidDirName);
+end;

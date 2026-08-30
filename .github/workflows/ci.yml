@@ -48,6 +48,9 @@ jobs:
 
       - name: Run test suite (constraint gates included)
         shell: pwsh
+        env:
+          # Exercise every supported locale and text-size layout combination.
+          ZD_RENDER_MATRIX: full
         run: |
           # tests/__init__.py installs a shared Dear PyGui context shim so
           # `unittest discover` runs clean in a single process. Historically a
