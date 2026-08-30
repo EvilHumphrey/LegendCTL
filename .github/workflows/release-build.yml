@@ -33,8 +33,9 @@ name: Release build (CI-built, attested)
 # id-token:write + attestations:write; it attests and drafts the release from
 # the build job's artifact after re-verifying the hashes. No third-party
 # release action — the preinstalled gh CLI does the release step — so the
-# only non-actions/* link in the build trust chain is Inno Setup (installed
-# from chocolatey at build time, pinned below).
+# Inno Setup input is authenticated against the reviewed repository hash lock
+# before its installer runs, and the actual compiler closure is checked again
+# at use by the shared local/CI build script.
 #
 # An attested release must not skip the honesty gates: the build job runs the
 # same summary-based unittest suite and pip-audit CVE gate as ci.yml BEFORE
@@ -47,17 +48,15 @@ name: Release build (CI-built, attested)
 #     "windows-2025-vs2026", version 20260628.158.1 — since June 2026 the
 #     `windows-2025` label serves that same Windows Server 2025 + VS2026
 #     image, while `windows-latest` is free to move to whatever comes next).
-#   - Inno Setup is pinned (chocolatey package 6.7.1) and asserted
-#     post-install, matching the maintainer's local 6.7.1 so CI builds and
-#     local builds are the same toolchain.
+#   - Inno Setup 6.7.1: tools/inno_setup.lock.json pins the immutable official
+#     installer SHA-256 and the compiler's executable/input closure. The
+#     installer also requires a valid expected-publisher Authenticode signature.
+#     See docs/inno-setup-toolchain.md for provenance and refresh procedure.
 #   - Python: requirements-release.lock is a transitive-complete exact-version
 #     SHA-256 lock for the runtime, PyInstaller, and pinned pip-audit closure.
 #     The workflow downloads the reviewed lock exactly once into a temporary
 #     wheelhouse, then creates the build/audit/PyInstaller venv offline with
 #     --no-index. See docs/release-dependency-lock.md for refresh procedure.
-#   - Residual (not changed here): Inno Setup is obtained through Chocolatey.
-#     Its package-version assertion is retained, but that separate installer
-#     supply chain is not authenticated by the Python wheel lock.
 #   - CPython: pinned exactly to 3.13.14, the 2026-07-03 CVE sweep's primary
 #     recommendation. Staying on 3.12 was preferred (all local suite evidence
 #     is 3.12) but is not securable in CI: 3.12 is in security-only phase and
@@ -191,6 +190,8 @@ jobs:
 
       - name: Run test suite before building (constraint gates included)
         shell: pwsh
+        env:
+          ZD_RENDER_MATRIX: full
         run: |
           # Mirrors ci.yml exactly: an attested "trustworthy" release that
           # skipped the honesty/constraint gates would be self-contradictory.
@@ -214,45 +215,25 @@ jobs:
           # PyInstaller, not a separately live-resolved audit environment.
           .\.venv-zd\Scripts\python.exe -m pip_audit
 
-      - name: Install Inno Setup 6 (pinned 6.7.1)
+      - name: Prepare the hash-verified Inno Setup compiler
         shell: pwsh
         run: |
-          # build_release.ps1 discovers ISCC.exe at the standard
-          # "C:\Program Files (x86)\Inno Setup 6\" install path — which is
-          # where chocolatey's innosetup package installs it.
-          # Pinned to the package version that installs Inno Setup 6.7.1 —
-          # the maintainer's local version — so the shipped+attested bytes
-          # don't float with chocolatey's latest.
-          choco install innosetup --version 6.7.1 --no-progress -y
+          & tools\setup_inno_setup_ci.ps1
 
-      - name: Assert Inno Setup version is exactly 6.7.1
+      - name: Verify installer destination policy with the real compiler
         shell: pwsh
         run: |
-          # Assert via the uninstall registry DisplayVersion (with the ISCC
-          # banner line as fallback). Deliberately NOT the ISCC.exe file
-          # resource: ISCC.exe ships no version resource, so its FileVersion
-          # reads 0.0.0.0.
-          $expected = '6.7.1'
-          $keys = @(
-            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1',
-            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1'
-          )
-          $display = $null
-          foreach ($k in $keys) {
-            if (Test-Path -LiteralPath $k) {
-              $display = (Get-ItemProperty -LiteralPath $k).DisplayVersion
-              break
-            }
-          }
-          if (-not $display) {
-            # Fallback: parse the compiler banner (first line, e.g.
-            # "Inno Setup 6 Command-Line Compiler ... 6.7.1 ...").
-            $banner = & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" 2>&1 | Select-Object -First 2 | Out-String
-            if ($banner -match '(\d+\.\d+\.\d+)') { $display = $Matches[1] }
-          }
-          if (-not $display) { throw "Could not determine the installed Inno Setup version (registry key missing and banner unparseable)." }
-          if ($display -ne $expected) { throw "Inno Setup version drift: installed '$display', pinned '$expected' — refusing to build." }
-          Write-Host "Inno Setup $display confirmed (pinned $expected)."
+          # This payload-free fixture always aborts in InitializeSetup. It
+          # exercises the production Pascal policy without installing the app.
+          & tools\test_installer_destination.ps1 -EvidenceDirectory .installer-policy-evidence -RunNativePolicy
+
+      - name: Preserve native installer policy evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: installer-policy-${{ github.run_number }}
+          path: .installer-policy-evidence/**/summary.json
+          retention-days: 14
 
       - name: Build release artifacts (PyInstaller + Inno Setup)
         shell: pwsh

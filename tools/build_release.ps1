@@ -40,6 +40,10 @@ function Invoke-NativeCommand {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
+. (Join-Path $PSScriptRoot 'inno_setup.ps1')
+# Fail before packaging if an installed compiler is present but unapproved.
+# This never executes a banner or trusts an installed-version registry value.
+$inno = Find-VerifiedInnoSetupCompiler -RepoRoot $repoRoot
 
 $python = Join-Path $repoRoot ".venv-zd\Scripts\python.exe"
 if (-not (Test-Path $python)) {
@@ -114,15 +118,14 @@ try {
     # --- Build Inno Setup installer ---
     $installerPath = $null
     $installerHash = $null
-    $inno = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-    if (-not (Test-Path $inno)) {
-        $inno = "C:\Program Files\Inno Setup 6\ISCC.exe"
-    }
-    if (-not (Test-Path $inno)) {
-        Write-Warning "Inno Setup compiler (ISCC.exe) not found. Skipping installer build. Install Inno Setup 6.7.1+ from https://jrsoftware.org/isdl.php to enable installer output."
+    if (-not $inno) {
+        Write-Warning "Inno Setup compiler (ISCC.exe) not found. Skipping installer build. See docs/inno-setup-toolchain.md for the exact approved compiler."
     } else {
         $env:ZDUL_VERSION = $version
         $issPath = Join-Path $repoRoot "tools\installer\inno_setup_zd_wrapper.iss"
+        # Recheck the same selected closure at the execution boundary after
+        # the longer Python packaging phase; do not rediscover/fall back.
+        $inno = Assert-InnoSetupCompiler -Directory (Split-Path -Parent $inno) -Pin (Read-InnoSetupPin)
         Write-Host "Building Inno Setup installer..." -ForegroundColor Cyan
         Invoke-NativeCommand -Label "Inno Setup compile" -ScriptBlock { & $inno $issPath }
         $installerPath = Join-Path $repoRoot "dist\ZDUltimateLegend-v$version-Setup.exe"

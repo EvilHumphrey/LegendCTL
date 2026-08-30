@@ -152,8 +152,10 @@ class BuildReleaseScriptTests(unittest.TestCase):
         cls.body = ps1_path.read_text(encoding="utf-8")
 
     def test_iscc_path_probes_both_program_files_locations(self) -> None:
-        self.assertIn(r"C:\Program Files (x86)\Inno Setup 6\ISCC.exe", self.body)
-        self.assertIn(r"C:\Program Files\Inno Setup 6\ISCC.exe", self.body)
+        helper = (Path(__file__).resolve().parent.parent / "tools" / "inno_setup.ps1").read_text(encoding="utf-8")
+        self.assertIn("${env:ProgramFiles(x86)}", helper)
+        self.assertIn("$env:ProgramFiles", helper)
+        self.assertIn("Find-VerifiedInnoSetupCompiler -RepoRoot $repoRoot", self.body)
 
     def test_soft_fail_when_iscc_absent(self) -> None:
         """Missing Inno must Write-Warning, not Write-Error — ZIP build must still succeed."""
