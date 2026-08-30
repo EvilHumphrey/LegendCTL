@@ -76,6 +76,19 @@ class IsolatedFontScaleProxyScreenTest(unittest.TestCase):
                 )
                 resized = MatrixCell(cell.group, cell.font_scale, cell.locale, width, cell.height)
                 assert_live_verify_surface(self, case=resized, require_wide=False)
+            for initial, resized_width in ((1650, 1400), (1400, 1650)):
+                dpg.set_viewport_width(initial)
+                render_frames(45)
+                switch_and_settle(shell, "home")
+                prepare_live_verify(shell)
+                model = dpg.get_alias_id("live_verify_workspace_model_card")
+                dpg.set_viewport_width(resized_width)
+                render_frames(60)
+                self.assertEqual(dpg.get_alias_id("live_verify_workspace_model_card"), model)
+                resized = MatrixCell(cell.group, cell.font_scale, cell.locale, resized_width, cell.height)
+                assert_live_verify_surface(self, case=resized, require_wide=False)
+            dpg.set_viewport_width(cell.width)
+            render_frames(45)
 
     def _assert_controller(self, cell: MatrixCell, shell) -> None:
         from zd_app.ui.screens import controller

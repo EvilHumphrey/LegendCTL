@@ -767,7 +767,7 @@ def _build_controller_workspace(shell) -> None:
     required = _workspace_required_width(shell)
     horizontal = available <= 0 or available >= required
     with dpg.group(horizontal=horizontal, tag="live_verify_controller_workspace"):
-        with _fit_card(width=_workspace_model_card_width(shell)):
+        with _fit_card(width=_workspace_model_card_width(shell), tag="live_verify_workspace_model_card"):
             section_title(t("diagnostics.live_verify.workspace.title"))
             _build_workspace_controls(shell)
             dpg.add_spacer(height=4)
@@ -782,13 +782,21 @@ def _build_controller_workspace(shell) -> None:
             width=_WORKSPACE_GAP if horizontal else 0,
             height=0 if horizontal else _WORKSPACE_GAP,
         )
-        with _fit_card(width=_workspace_inspector_width(shell)):
+        with _fit_card(width=_workspace_inspector_width(shell), tag="live_verify_workspace_inspector_card"):
             _build_inspector(shell)
 
 
 def _workspace_required_width(shell) -> int:
     # The spacer also receives ItemSpacing on both sides (8px each).
-    return _workspace_model_card_width(shell) + _workspace_inspector_width(shell) + _WORKSPACE_GAP + 16
+    # A windowed resize can cross 1600px without rebuilding either card. Use
+    # their built widths rather than the sizes a new screen would choose now.
+    widths = []
+    for tag, fallback in (
+        ("live_verify_workspace_model_card", _workspace_model_card_width),
+        ("live_verify_workspace_inspector_card", _workspace_inspector_width),
+    ):
+        widths.append(dpg.get_item_configuration(tag)["width"] if dpg.does_item_exist(tag) else fallback(shell))
+    return sum(widths) + _WORKSPACE_GAP + 16
 
 
 def _resize_controller_workspace(shell) -> None:

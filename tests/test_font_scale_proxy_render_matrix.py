@@ -75,78 +75,11 @@ _TERMINAL_UNITTEST_SUMMARY = re.compile(
 )
 
 
-def _home_finding(
-    *,
-    locale: str,
-    scale: int,
-    viewport: str,
-    primary_tag: str = "home_orientation_card",
-) -> KnownRenderFinding:
-    return KnownRenderFinding(
-        reason=(
-            f"{primary_tag} and sibling Home fixed cards overflow at "
-            f"font_scale_proxy_{scale}/{locale}/{viewport} - pending Home card autosize fix lane."
-        ),
-        required_fragments=(
-            f"surface=Home locale={locale} font_scale_proxy=font_scale_proxy_{scale} viewport={viewport}",
-            "hidden child-card overflow detected",
-            f"tag={primary_tag}",
-        ),
-    )
-
-
-def _wide_finding(*, locale: str) -> KnownRenderFinding:
-    return KnownRenderFinding(
-        reason=(
-            "Diagnostics Event Log fixed child path[0, 0, 3, 2, 10] overflows at "
-            f"font_scale_proxy_200/{locale}/1920x1040 - pending Diagnostics event-log autosize fix lane."
-        ),
-        required_fragments=(
-            f"surface=Diagnostics locale={locale} font_scale_proxy=font_scale_proxy_200 viewport=1920x1040",
-            "hidden child-card overflow detected",
-            "tag=path[0, 0, 3, 2, 10]",
-        ),
-    )
-
-
 # A registered cell is quarantined only when its child output proves this exact
 # layout defect. Timeouts, native codes outside the documented DPG teardown
 # class, malformed unittest summaries, and unrelated assertion failures remain
 # hard failures.
-_STABLE_FINDINGS = {
-    "test_screens_font_scale_proxy_125_en_1180x760": _home_finding(
-        locale="en", scale=125, viewport="1180x760"
-    ),
-    "test_screens_font_scale_proxy_125_en_1480x1040": _home_finding(
-        locale="en", scale=125, viewport="1480x1040"
-    ),
-    "test_screens_font_scale_proxy_125_zh_CN_1180x760": _home_finding(
-        locale="zh-CN",
-        scale=125,
-        viewport="1180x760",
-        primary_tag="home_device_profile_status_card",
-    ),
-    "test_screens_font_scale_proxy_125_zh_CN_1480x1040": _home_finding(
-        locale="zh-CN",
-        scale=125,
-        viewport="1480x1040",
-        primary_tag="home_device_profile_status_card",
-    ),
-    "test_screens_font_scale_proxy_200_en_1180x760": _home_finding(
-        locale="en", scale=200, viewport="1180x760"
-    ),
-    "test_screens_font_scale_proxy_200_en_1480x1040": _home_finding(
-        locale="en", scale=200, viewport="1480x1040"
-    ),
-    "test_screens_font_scale_proxy_200_zh_CN_1180x760": _home_finding(
-        locale="zh-CN", scale=200, viewport="1180x760"
-    ),
-    "test_screens_font_scale_proxy_200_zh_CN_1480x1040": _home_finding(
-        locale="zh-CN", scale=200, viewport="1480x1040"
-    ),
-    "test_wide_font_scale_proxy_200_en_1920x1040": _wide_finding(locale="en"),
-    "test_wide_font_scale_proxy_200_zh_CN_1920x1040": _wide_finding(locale="zh-CN"),
-}
+_STABLE_FINDINGS: dict[str, KnownRenderFinding] = {}
 
 # Cells whose finding is BORDERLINE and environment-variant: the same child fits
 # on some rendering stacks and overflows on others (observed: overflows on the

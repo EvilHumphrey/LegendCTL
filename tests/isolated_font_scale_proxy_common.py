@@ -379,6 +379,33 @@ def assert_item_reachable(testcase, tag: str, fallback_surface, *, case: MatrixC
             pass
 
 
+def assert_button_label_fits(testcase, tag: str, *, case: MatrixCell, surface: str) -> None:
+    """Check standard buttons against a native caption with the same font."""
+    label = dpg.get_item_configuration(tag)["label"]
+    # Scaling get_text_size's unscaled metrics is inaccurate for rounded glyph
+    # advances (notably Korean). Render an unwrapped sibling with the same
+    # inherited/explicit font; remove this test-only reference immediately.
+    reference = dpg.add_text(label, parent=dpg.get_item_parent(tag))
+    try:
+        font = dpg.get_item_font(tag)
+        if font:
+            dpg.bind_item_font(reference, font)
+        render_frames(2)
+        text_width = dpg.get_item_rect_size(reference)[0]
+        testcase.assertGreater(text_width, 0, f"{tag}: caption reference did not render")
+    finally:
+        dpg.delete_item(reference)
+        render_frames(2)
+    # The shell's standard FramePadding is 10px per side.
+    required_width = text_width + 20.0
+    actual_width = dpg.get_item_rect_size(tag)[0]
+    testcase.assertGreaterEqual(
+        actual_width + _RECT_SLACK,
+        required_width,
+        f"{case.describe(surface)}: button caption is clipped: {tag} ({label})",
+    )
+
+
 def assert_no_hidden_card_overflow(testcase, root: str, *, case: MatrixCell, surface: str) -> None:
     prefix = case.describe(surface)
     testcase.assertTrue(dpg.does_item_exist(root), f"{prefix}: screen root missing: {root}")
@@ -491,6 +518,21 @@ def assert_restore_points_scroll_discipline(testcase, *, case: MatrixCell) -> No
         dpg.does_item_exist(restore_points.TAG_LIST_FOOTER_CAVEAT),
         f"{case.describe(surface)}: footer caveat did not render",
     )
+    for tag in (restore_points.TAG_LIST_REFRESH_BUTTON, restore_points.TAG_LIST_MANUAL_SAVE_BUTTON):
+        assert_item_reachable(testcase, tag, root, case=case, surface=surface)
+        assert_button_label_fits(testcase, tag, case=case, surface=surface)
+    row_actions: dict[str, set[str]] = {}
+    for item in dpg.get_all_items():
+        tag = dpg.get_item_alias(item)
+        if not tag.startswith("restore_points_row_action_"):
+            continue
+        row, action = tag.rsplit("_", 1)
+        row_actions.setdefault(row, set()).add(action)
+        assert_item_reachable(testcase, tag, root, case=case, surface=surface)
+        assert_button_label_fits(testcase, tag, case=case, surface=surface)
+    testcase.assertTrue(row_actions, f"{case.describe(surface)}: no saved-row actions rendered")
+    for row, actions in row_actions.items():
+        testcase.assertEqual(actions, {"view", "restore", "export", "delete"}, f"{row}: missing action")
     cards = _walk_cards(dpg, root)
     intentional_scrolls = [
         card

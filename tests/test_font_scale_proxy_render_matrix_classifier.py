@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from tests.isolated_font_scale_proxy_common import ALL_CELLS
 from tests import test_font_scale_proxy_render_matrix as render_matrix
@@ -24,6 +25,21 @@ def _success_output() -> str:
 
 
 class RenderChildClassifierTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Exercise quarantine handling without keeping a repaired UI defect in
+        # the live registry just to supply a classifier fixture.
+        finding = render_matrix.KnownRenderFinding(
+            reason="Synthetic stable Home finding for classifier tests.",
+            required_fragments=(
+                _CELL_BY_METHOD[_STABLE_METHOD].describe("Home"),
+                "hidden child-card overflow detected",
+                "tag=home_orientation_card",
+            ),
+        )
+        registry = patch.object(render_matrix, "_STABLE_FINDINGS", {_STABLE_METHOD: finding})
+        registry.start()
+        self.addCleanup(registry.stop)
+
     def test_timeout_is_hard_failure_even_with_known_signature(self) -> None:
         classification = render_matrix._classify_child_result(
             _CELL_BY_METHOD[_STABLE_METHOD],
@@ -107,23 +123,6 @@ class RenderChildClassifierTests(unittest.TestCase):
         self.assertIs(classification.verdict, render_matrix.RenderCellVerdict.HARD_FAILURE)
         self.assertIn("exact known layout signature", classification.message)
 
-    def test_zh_125_home_cells_require_the_documented_device_profile_sibling(self) -> None:
-        for method in (
-            "test_screens_font_scale_proxy_125_zh_CN_1180x760",
-            "test_screens_font_scale_proxy_125_zh_CN_1480x1040",
-        ):
-            with self.subTest(method=method):
-                finding = render_matrix._STABLE_FINDINGS[method]
-                classification = render_matrix._classify_child_result(
-                    _CELL_BY_METHOD[method],
-                    returncode=1,
-                    output=_failure_output(method),
-                )
-
-                self.assertIn("tag=home_device_profile_status_card", finding.required_fragments)
-                self.assertIn("home_device_profile_status_card", finding.reason)
-                self.assertIs(classification.verdict, render_matrix.RenderCellVerdict.KNOWN_FINDING)
-
     def test_unrelated_assertion_in_registered_cell_is_hard_failure(self) -> None:
         classification = render_matrix._classify_child_result(
             _CELL_BY_METHOD[_STABLE_METHOD],
@@ -174,6 +173,10 @@ class RenderChildClassifierTests(unittest.TestCase):
 
 
 class RenderFindingRegistryIntegrityTests(unittest.TestCase):
+    def test_repaired_screen_and_wide_cells_have_no_exemptions(self) -> None:
+        registered = set(render_matrix._STABLE_FINDINGS) | set(render_matrix._ENVIRONMENT_VARIANT_FINDINGS)
+        self.assertFalse({cell.wrapper_method for cell in ALL_CELLS if cell.group != "modals"} & registered)
+
     def test_every_registered_key_is_a_real_matrix_cell(self) -> None:
         registered = set(render_matrix._STABLE_FINDINGS) | set(render_matrix._ENVIRONMENT_VARIANT_FINDINGS)
 

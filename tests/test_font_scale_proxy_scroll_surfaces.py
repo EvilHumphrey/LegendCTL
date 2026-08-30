@@ -42,6 +42,20 @@ class ScrollSurfaceTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "extends beyond.*horizontally"):
                 render_common.assert_item_reachable(self, "button", "page", case=case, surface="control")
 
+    def test_button_caption_check_rejects_old_fixed_width_but_accepts_rendered_fit(self) -> None:
+        with patch.object(render_common, "dpg") as dpg, patch.object(render_common, "render_frames"):
+            dpg.get_item_configuration.return_value = {"label": "Save Restore Point"}
+            dpg.add_text.return_value = "caption_reference"
+            # Rendered caption width from the native 200% control.
+            sizes = {"caption_reference": (226, 30), "save": (180, 42)}
+            dpg.get_item_rect_size.side_effect = sizes.get
+            case = render_common.MatrixCell("screens", 2.0, "en", 1180, 760)
+            with self.assertRaisesRegex(AssertionError, "button caption is clipped"):
+                render_common.assert_button_label_fits(self, "save", case=case, surface="control")
+            dpg.delete_item.assert_called_with("caption_reference")
+            sizes["save"] = (246, 42)
+            render_common.assert_button_label_fits(self, "save", case=case, surface="control")
+
 
 if __name__ == "__main__":
     unittest.main()

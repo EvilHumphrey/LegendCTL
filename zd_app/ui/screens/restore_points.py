@@ -251,13 +251,13 @@ def _build_list(shell, service, state: RestorePointsScreenState) -> None:
         dpg.add_button(
             label=t("restore_points.list.refresh"),
             tag=TAG_LIST_REFRESH_BUTTON,
-            width=120,
+            width=0,
             callback=lambda: _on_refresh(shell),
         )
         dpg.add_button(
             label=t("restore_points.manual.button"),
             tag=TAG_LIST_MANUAL_SAVE_BUTTON,
-            width=180,
+            width=0,
             callback=lambda: _on_manual_save(shell),
         )
     dpg.add_text(
@@ -417,7 +417,7 @@ def _build_list_table(
         # container under-sized, so button reachability is pinned, not
         # stretched. 370 fits the en labels (the wide locale: ~291px of
         # auto-width buttons + 3×8 ItemSpacing + 2×10 cell padding ≈ 335)
-        # with headroom; zh-CN labels are narrower.
+        # with headroom at shipped fonts. Enlarged labels use two action rows.
         with table(
             [
                 Column(t("restore_points.list.col.name"), weight=0.34),
@@ -441,7 +441,7 @@ def _build_list_row(shell, rp: RestorePoint) -> None:
     the View / Restore / Export / Delete action group in the final cell.
     """
 
-    with dpg.table_row():
+    with dpg.table_row() as row_tag:
         # Name cell: title in primary text + a muted trigger/identity sub-line.
         # Title is text.primary (not accent) — Phase 0/2 reserves accent for
         # actionable/active elements, so size + weight carry the hierarchy.
@@ -475,29 +475,39 @@ def _build_list_row(shell, rp: RestorePoint) -> None:
         # (VAR_POSITIONAL) makes it pass zero positionals and the closure-
         # captured rp_id survives. Do NOT switch to the ``user_data`` idiom here
         # (see ListRowButtonDpgSignatureTests). Buttons are auto-width so en +
-        # zh-CN labels both fit inside the fixed Actions column.
-        with dpg.group(horizontal=True):
-            rp_id = rp.id
-            rp_title = rp.title
-            dpg.add_button(
-                label=t("restore_points.list.row.view"),
-                callback=lambda *args, rp_id=rp_id: _on_view(shell, rp_id),
-            )
-            dpg.add_button(
-                label=t("restore_points.list.row.restore"),
-                callback=lambda *args, rp_id=rp_id: _on_open_confirm(shell, rp_id),
-            )
-            dpg.add_button(
-                label=t("restore_points.list.row.export"),
-                callback=lambda *args, rp_id=rp_id: _on_export_rp(shell, rp_id),
-            )
-            action_button(
-                t("restore_points.list.row.delete"),
-                destructive=True,
-                callback=lambda *args, rp_id=rp_id, rp_title=rp_title: (
-                    _on_open_delete_confirm(shell, rp_id, rp_title)
-                ),
-            )
+        # zh-CN labels both fit inside the fixed Actions column. Larger fonts
+        # use two rows so the last action remains reachable within that column.
+        rp_id = rp.id
+        rp_title = rp.title
+        # Copied files may legitimately expose two rows with the same stored
+        # id. UI aliases must follow the unique rendered row, not that id.
+        action_prefix = f"restore_points_row_action_{row_tag}"
+        with dpg.group(horizontal=dpg.get_global_font_scale() <= 1.0):
+            with dpg.group(horizontal=True):
+                dpg.add_button(
+                    label=t("restore_points.list.row.view"),
+                    tag=f"{action_prefix}_view",
+                    callback=lambda *args, rp_id=rp_id: _on_view(shell, rp_id),
+                )
+                dpg.add_button(
+                    label=t("restore_points.list.row.restore"),
+                    tag=f"{action_prefix}_restore",
+                    callback=lambda *args, rp_id=rp_id: _on_open_confirm(shell, rp_id),
+                )
+            with dpg.group(horizontal=True):
+                dpg.add_button(
+                    label=t("restore_points.list.row.export"),
+                    tag=f"{action_prefix}_export",
+                    callback=lambda *args, rp_id=rp_id: _on_export_rp(shell, rp_id),
+                )
+                action_button(
+                    t("restore_points.list.row.delete"),
+                    tag=f"{action_prefix}_delete",
+                    destructive=True,
+                    callback=lambda *args, rp_id=rp_id, rp_title=rp_title: (
+                        _on_open_delete_confirm(shell, rp_id, rp_title)
+                    ),
+                )
 
 
 def _build_skipped_card(shell, state: RestorePointsScreenState, skipped) -> None:
