@@ -24,7 +24,7 @@ from tools.diag_dpg_card_clip import (
     _seed_services,
     _walk_cards,
 )
-from zd_app.i18n import set_locale
+from zd_app.i18n import SUPPORTED_LOCALES, set_locale
 from zd_app.services.settings_service import ControllerButtonTarget
 from zd_app.services.xinput_poll_service import XInputSnapshot
 from zd_app.ui.fonts import bind_default_font, register_fonts
@@ -89,7 +89,7 @@ class MatrixCell:
 
 
 _SCALES = (1.25, 1.50, 1.75, 2.00)
-_LOCALES = ("en", "zh-CN")
+_LOCALES = SUPPORTED_LOCALES
 _SCREEN_VIEWPORTS = ((1180, 760), (1366, 768), (1480, 1040))
 _WIDE_VIEWPORT = (1920, 1040)
 _MODAL_VIEWPORT = (1180, 760)
@@ -435,6 +435,8 @@ def assert_diagnostics_anchor(testcase, shell, *, case: MatrixCell) -> None:
     # container top; a 2 px landing preserves it. Researcher-gated 2026-07-12.
     testcase.assertAlmostEqual(scroll, expected, delta=2.0, msg=f"{prefix}: anchor landed at {scroll}, expected {expected}")
     assert_no_hidden_card_overflow(testcase, "diagnostics_root", case=case, surface=surface)
+    for tag in ("diag_event_log", "diagnostics_event_log_copy"):
+        assert_item_reachable(testcase, tag, "diagnostics_root", case=case, surface=surface)
 
 
 def prepare_live_verify(shell) -> None:

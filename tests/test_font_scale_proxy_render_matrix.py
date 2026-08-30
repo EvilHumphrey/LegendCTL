@@ -1,10 +1,10 @@
 """Discovered serial wrapper for isolated font-pressure proxy render cells.
 
-There are 40 discovered methods: 24 screen-matrix cells, 8 wide sentinels,
-and 8 modal cells.  The always-on tier runs scales 1.25/2.00 at the 1180x760
-and 1480x1040 screen viewports, plus every wide/modal cell (8 + 4 + 4 = 16
-children).  ``ZD_RENDER_MATRIX=full`` additionally runs the 1.50/1.75 cells
-and the 1366x768 screen cells (the other 24 children).
+There are 60 discovered methods across all three supported locales: 36 screen
+cells, 12 wide sentinels, and 12 modal cells. The always-on tier runs scales
+1.25/2.00 at the 1180x760 and 1480x1040 screen viewports, plus those scales'
+wide/modal cells (12 + 6 + 6 = 24 children). ``ZD_RENDER_MATRIX=full`` also
+runs the 1.50/1.75 cells and the 1366x768 screen cells (36 more children).
 """
 
 from __future__ import annotations

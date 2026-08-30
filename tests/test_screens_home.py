@@ -1017,7 +1017,7 @@ class HomeFormatHelperTests(unittest.TestCase):
         import inspect
 
         src = inspect.getsource(home._actions_card)
-        self.assertIn("card(fit=True)", src)
+        self.assertRegex(src, r"card\(fit=True\b")
         self.assertNotRegex(src, r"card\(height=")
         # The old CTA-card height constant is retired.
         self.assertFalse(hasattr(home, "_CTA_CARD_HEIGHT"))
@@ -1037,10 +1037,7 @@ class HomeFormatHelperTests(unittest.TestCase):
 
 
 class HomeTrustFrontDoorRowFitTests(unittest.TestCase):
-    """Rail/wide Home halves the trust card's width, so the four front-door
-    buttons no longer fit one row (the 4th clipped mid-label — visual review
-    2026-07-06, 02_home_maximized.png). Wide state must wrap to 2x2; windowed
-    keeps the single row so the pinned Home height budget is untouched."""
+    """Both windowed and wide cards wrap their four actions without omissions."""
 
     _LINKS_TAG = "home_trust_front_door_links"
 
@@ -1108,15 +1105,20 @@ class HomeTrustFrontDoorRowFitTests(unittest.TestCase):
         finally:
             dpg.destroy_context()
 
-    def test_windowed_state_keeps_the_single_row(self) -> None:
+    def test_windowed_state_wraps_all_four_links_in_two_rows(self) -> None:
         shell = self._shell(wide=False)
         dpg.create_context()
         try:
             self._build(shell)
             self.assertTrue(dpg.does_item_exist(self._LINKS_TAG))
-            self.assertTrue(dpg.get_item_configuration(self._LINKS_TAG)["horizontal"])
-            self.assertFalse(dpg.does_item_exist(f"{self._LINKS_TAG}_row_0"))
-            children = dpg.get_item_children(self._LINKS_TAG, 1) or []
+            self.assertFalse(dpg.get_item_configuration(self._LINKS_TAG)["horizontal"])
+            rows = dpg.get_item_children(self._LINKS_TAG, 1) or []
+            self.assertEqual(len(rows), 2)
+            children = []
+            for row in rows:
+                row_children = dpg.get_item_children(row, 1) or []
+                self.assertEqual(len(row_children), 2)
+                children.extend(row_children)
             self.assertEqual(
                 [dpg.get_item_alias(child) for child in children],
                 self._button_tags(),

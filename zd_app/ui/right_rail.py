@@ -25,7 +25,8 @@ WORK_COLUMN_WIDTH = 1040
 LIVE_VERIFY_WORK_WIDTH = 1220
 RAIL_SCREEN_IDS = frozenset({"home", "controller", "diagnostics", "live_verify"})
 _SHELL_HORIZONTAL_RESERVE = 250
-_RAIL_WRAP = RAIL_WIDTH - 32
+# Wrap at the actual child content edge, including its padding and scrollbar.
+_RAIL_WRAP = 0
 
 RAIL_TAG = "right_rail"
 DEVICE_VALUE_TAG = "right_rail_device_model"

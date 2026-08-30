@@ -16,6 +16,7 @@ from tests.isolated_font_scale_proxy_common import (
     assert_restore_points_scroll_discipline,
     boot_cell,
     prepare_live_verify,
+    render_frames,
     switch_and_settle,
 )
 
@@ -37,6 +38,13 @@ class IsolatedFontScaleProxyScreenTest(unittest.TestCase):
         switch_and_settle(shell, "home")
         root = "home_root"
         assert_no_hidden_card_overflow(self, root, case=cell, surface=surface)
+        for tag in (
+            "home_status_firmware", "home_status_battery", "home_profile_active",
+            "home_profile_pending", "home_profile_draft",
+            "home_trust_front_door_self_check", "home_trust_front_door_compat_report",
+            "home_trust_front_door_evidence_card", "home_trust_front_door_trust_matrix",
+        ):
+            assert_item_reachable(self, tag, root, case=cell, surface=surface)
         assert_item_reachable(
             self,
             "home_orientation_live_verify",
@@ -56,6 +64,18 @@ class IsolatedFontScaleProxyScreenTest(unittest.TestCase):
         cell.announce("Live Verify")
         prepare_live_verify(shell)
         assert_live_verify_surface(self, case=cell, require_wide=False)
+        if cell.locale == "en" and cell.font_scale == 1.25 and cell.width == 1480:
+            # Resize the existing workspace without navigating or rebuilding:
+            # both the narrow stack and the normal two-pane layout must work.
+            for width, horizontal in ((1180, False), (1480, True)):
+                dpg.set_viewport_width(width)
+                render_frames(60)
+                self.assertEqual(
+                    dpg.get_item_configuration("live_verify_controller_workspace")["horizontal"],
+                    horizontal,
+                )
+                resized = MatrixCell(cell.group, cell.font_scale, cell.locale, width, cell.height)
+                assert_live_verify_surface(self, case=resized, require_wide=False)
 
     def _assert_controller(self, cell: MatrixCell, shell) -> None:
         from zd_app.ui.screens import controller

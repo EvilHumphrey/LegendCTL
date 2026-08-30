@@ -316,7 +316,13 @@ def _build_list(shell, service, state: RestorePointsScreenState) -> None:
     # card is content-fit instead and the whole page scrolls as a single bar —
     # still one scrollbar, just the page's, with the disclosure + caveat below.
     if visible and not skipped:
-        _build_list_table(shell, visible, height=-FOOTER_RESERVE_PX)
+        if dpg.get_global_font_scale() > 1.0:
+            # Enlarged text can outgrow the shipped-font footer allowance.
+            # Use the existing page-scroll layout so the table and caveat stay
+            # on one reachable surface rather than two nested scrollbars.
+            _build_list_table(shell, visible, fit=True)
+        else:
+            _build_list_table(shell, visible, height=-FOOTER_RESERVE_PX)
         _build_footer_caveat(shell)
         return
 
@@ -378,7 +384,7 @@ def _build_footer_caveat(shell) -> None:
         t("restore_points.list.footer_caveat"),
         tag=TAG_LIST_FOOTER_CAVEAT,
         color=shell.COLORS["muted"],
-        wrap=900,
+        wrap=0,
     )
 
 

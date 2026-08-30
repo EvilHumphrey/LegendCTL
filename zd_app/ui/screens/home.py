@@ -32,15 +32,11 @@ logger = logging.getLogger(__name__)
 STALE_WARNING_HEADLINE = "Controller state may have changed outside the app."
 STALE_WARNING_HELPER = "Read the controller again before trusting current editors or summary fields."
 
-# Shared height for the two top cards so the stretch-table row stays even
-# regardless of which side has more content. Width is intentionally flexible
-# (the table column stretches); only the height is pinned. The taller side is
-# Device & profile is deliberately compacted into paired metric rows so all
-# status values fit the shared top-row height. fit=True is unsuitable here: it
-# would size each card to its own content and break the even orientation/status
-# pair that anchors Home.
+# Legacy standalone card height; the visible top row now fits its content.
 _TOP_CARD_HEIGHT = 257
 _HOME_STACK_GAP = 4
+# Clear the 411px minimum card interior with room for fractional CJK glyphs.
+_ORIENTATION_WRAP = 400
 
 
 def _format_last_read(raw):
@@ -73,7 +69,7 @@ def build(shell, parent: str) -> None:
         # the `about.zd_disclaimer` i18n key) — render it, do not paraphrase.
         dpg.add_text(
             t("about.zd_disclaimer"),
-            wrap=1100,
+            wrap=0,
             tag="home_zd_disclaimer",
         )
         _home_gap()
@@ -115,30 +111,30 @@ def _two_column_row(left, right, *, tag: str) -> None:
 
 def _orientation_card(shell) -> None:
     connected = shell.device_service.state.connection_state == "connected"
-    with card(height=_TOP_CARD_HEIGHT, tag="home_orientation_card"):
+    with card(fit=True, always_auto_resize=True, tag="home_orientation_card"):
         with section(t("home.orientation.title")):
-            dpg.add_text(t("home.orientation.what"), wrap=470)
-            dpg.add_text(t("home.orientation.stance"), color=shell.COLORS["muted"], wrap=470)
+            dpg.add_text(t("home.orientation.what"), wrap=_ORIENTATION_WRAP)
+            dpg.add_text(t("home.orientation.stance"), color=shell.COLORS["muted"], wrap=_ORIENTATION_WRAP)
             dpg.add_spacer(height=8)
             if connected:
                 dpg.add_text(
                     t("home.orientation.connected_cta"),
                     color=shell.COLORS["muted"],
-                    wrap=470,
+                    wrap=_ORIENTATION_WRAP,
                 )
-                with dpg.group(horizontal=True):
+                with dpg.group(horizontal=_compact_rows()):
                     dpg.add_button(
                         label=t("home.orientation.read_settings"),
                         tag="home_orientation_read",
-                        width=190,
-                        height=36,
+                        width=0,
+                        height=_action_height(),
                         callback=lambda: shell.refresh_from_controller(),
                     )
                     dpg.add_button(
                         label=t("home.orientation.open_live_verify"),
                         tag="home_orientation_live_verify",
-                        width=170,
-                        height=36,
+                        width=0,
+                        height=_action_height(),
                         callback=lambda: shell.switch_screen("live_verify"),
                     )
             else:
@@ -146,25 +142,25 @@ def _orientation_card(shell) -> None:
                     t("home.orientation.no_controller_cta"),
                     tag="home_orientation_no_controller",
                     color=shell.COLORS["muted"],
-                    wrap=470,
+                    wrap=_ORIENTATION_WRAP,
                 )
 
 
 def _device_profile_status_card(shell) -> None:
     state = shell.device_service.state
-    with card(height=_TOP_CARD_HEIGHT, tag="home_device_profile_status_card"):
+    with card(fit=True, always_auto_resize=True, tag="home_device_profile_status_card"):
         with section(t("home.status.title"), gap=4):
-            with dpg.group(horizontal=True):
+            with dpg.group(horizontal=_compact_rows()):
                 dpg.add_text(
                     f"{_connection_state_label(state.connection_state)} - {state.connection_mode}",
                     color=shell.COLORS["good"] if state.connection_state == "connected" else shell.COLORS["warn"],
                     tag="home_status_connection",
-                    wrap=300,
+                    wrap=0,
                 )
                 safe_import_badges.render_badges(
                     [BadgeKind.NO_AUTOMATION], tag_prefix="home_status"
                 )
-            dpg.add_text(state.product_name, tag="home_status_device_model", wrap=470)
+            dpg.add_text(state.product_name, tag="home_status_device_model", wrap=0)
             _paired_metrics(
                 (
                     t("home.connection.firmware"),
@@ -200,22 +196,32 @@ def _device_profile_status_card(shell) -> None:
                 _localized_draft_label(shell.profile_service.current_draft),
                 value_color=shell.COLORS["muted"],
                 value_tag="home_profile_draft",
+                wrap=0,
             )
 
 
 def _paired_metrics(left: tuple[str, object, str, object], right: tuple[str, object, str, object]) -> None:
-    with dpg.group(horizontal=True):
+    with dpg.group(horizontal=_compact_rows()):
         _inline_metric(*left)
         dpg.add_spacer(width=24)
         _inline_metric(*right)
 
 
 def _inline_metric(label: str, value, value_tag: str, value_color) -> None:
-    dpg.add_text(label, color=COLORS["text.secondary"])
-    kwargs = {"color": value_color or COLORS["text.primary"]}
+    dpg.add_text(label, color=COLORS["text.secondary"], wrap=0)
+    kwargs = {"color": value_color or COLORS["text.primary"], "wrap": 0}
     if value_tag:
         kwargs["tag"] = value_tag
     dpg.add_text(str(value), **kwargs)
+
+
+def _compact_rows() -> bool:
+    """Keep the shipped-font dashboard compact; larger text gets its own rows."""
+    return dpg.get_global_font_scale() <= 1.0
+
+
+def _action_height() -> int:
+    return max(36, int(24 * dpg.get_global_font_scale()) + 12)
 
 
 def _connection_card(shell) -> None:
@@ -312,27 +318,21 @@ def _state_explainer(shell) -> None:
             ("home.state_explainer.profile_not_verified", {}),
             ("home.state_explainer.pending_changes", {"count": count}),
         ):
-            dpg.add_text(t(key, **fmt), color=shell.COLORS["muted"], wrap=1100)
+            dpg.add_text(t(key, **fmt), color=shell.COLORS["muted"], wrap=0)
 
 
 def _trust_front_door_card(shell) -> None:
-    # In the rail/wide layout the two-column card is narrower than windowed
-    # (the fixed work column splits ~50/50), so four buttons no longer fit one
-    # row — the 4th clipped mid-label (visual review 2026-07-06). Wrap to 2x2
-    # there; windowed keeps the single row (its height budget is pinned by the
-    # isolated Home reference-height test). Senses the wide state through the
-    # same right_rail predicate the layout itself uses — no new signal.
-    with card(fit=True, tag="home_trust_front_door_card"):
-        dpg.add_text(t("home.trust_front_door.title"), color=shell.COLORS["muted"], wrap=470)
+    # Two links fit the narrow card at shipped fonts; larger labels stack.
+    # The page owns scrolling, so no action needs to be clipped to a height.
+    with card(fit=True, always_auto_resize=True, tag="home_trust_front_door_card"):
+        dpg.add_text(t("home.trust_front_door.title"), color=shell.COLORS["muted"], wrap=0)
         dpg.add_spacer(height=4)
         with dpg.group(horizontal=True):
             trust_front_door.add_trust_link_buttons(
                 shell,
                 tag_prefix="home_trust_front_door",
-                button_width=135,
-                max_per_row=(
-                    2 if right_rail.screen_wide_state(shell, "home") else None
-                ),
+                button_width=0,
+                max_per_row=2 if _compact_rows() else 1,
             )
 
 
@@ -341,13 +341,13 @@ def _recent_activity(shell) -> None:
     # to 5) — fit to content so a full list never clips. Capped at 5 (was 10) as
     # a content-height trim: this is a dashboard glance; Diagnostics owns the
     # full history. The screen still scrolls if the page overflows.
-    with card(fit=True):
+    with card(fit=True, always_auto_resize=True):
         with section(t("home.recent.title")):
             events = shell.device_service.recent_events(5)
             dpg.add_text(
                 tag="home_recent_events",
                 default_value="\n".join(events) if events else t("home.recent.empty"),
-                wrap=1100,
+                wrap=0,
             )
 
 
@@ -355,7 +355,7 @@ def _actions_card(shell) -> None:
     """State-branching next-step card with read/verify before write emphasis."""
 
     connected = shell.device_service.state.connection_state == "connected"
-    with card(fit=True):
+    with card(fit=True, always_auto_resize=True):
         with section(t("home.cta.title")):
             dpg.add_text(
                 t(
@@ -364,39 +364,39 @@ def _actions_card(shell) -> None:
                     else "home.cta.no_controller_helper"
                 ),
                 color=shell.COLORS["muted"],
-                wrap=470,
+                wrap=0,
             )
             dpg.add_spacer(height=6)
             if connected:
-                with dpg.group(horizontal=True):
+                with dpg.group(horizontal=_compact_rows()):
                     dpg.add_button(
                         label=t("home.orientation.read_settings"),
-                        width=190,
-                        height=36,
+                        width=0,
+                        height=_action_height(),
                         callback=lambda: shell.refresh_from_controller(),
                     )
                     dpg.add_button(
                         label=t("home.orientation.open_live_verify"),
-                        width=170,
-                        height=36,
+                        width=0,
+                        height=_action_height(),
                         callback=lambda: shell.switch_screen("live_verify"),
                     )
             else:
                 dpg.add_button(
                     label=t("home.quick.diagnostics"),
-                    width=170,
-                    height=36,
+                    width=0,
+                    height=_action_height(),
                     callback=lambda: shell.switch_screen("diagnostics"),
                 )
-            with dpg.group(horizontal=True):
+            with dpg.group(horizontal=_compact_rows()):
                 dpg.add_button(
                     label=t("nav.health_report"),
-                    width=170,
+                    width=0,
                     callback=lambda: shell.switch_screen("health_report"),
                 )
                 dpg.add_button(
                     label=t("home.quick.controller"),
-                    width=190,
+                    width=0,
                     callback=lambda: shell.switch_screen("controller"),
                 )
 

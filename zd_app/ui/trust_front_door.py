@@ -52,11 +52,10 @@ def add_trust_link_buttons(
     """Render the front-door link buttons for a call site.
 
     ``max_per_row`` opts a call site into wrapping: links render in successive
-    horizontal rows of at most that many buttons. Home passes 2 in its
-    rail/wide state, where the two-column card is too narrow for four
-    ``button_width`` buttons and the 4th clipped mid-label (visual review
-    2026-07-06). The default ``None`` keeps the original single-row structure
-    unchanged: windowed Home fits one row, and the Diagnostics status strip
+    horizontal rows of at most that many buttons. Home uses two per row at
+    shipped text size and stacks enlarged labels so every link remains
+    visible. The default ``None`` keeps the single-row structure unchanged:
+    the Diagnostics status strip
     is height-budgeted at 66px so it must NEVER grow a second row.
     """
 

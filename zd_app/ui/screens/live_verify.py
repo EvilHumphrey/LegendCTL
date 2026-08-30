@@ -541,7 +541,10 @@ def _fit_card(*, width: int = -1, tag=0):
     screens keep their current card flow unchanged.
     """
 
-    return card(width=width, tag=tag, auto_resize_y=True, autosize_y=False)
+    return card(
+        width=width, tag=tag, auto_resize_y=True, autosize_y=False,
+        always_auto_resize=True,
+    )
 
 
 def build(shell, parent: str) -> None:
@@ -598,6 +601,12 @@ def build(shell, parent: str) -> None:
         else:
             _build_live_verify_content(shell, state)
 
+    resize_handlers = "live_verify_workspace_resize_handlers"
+    if dpg.does_item_exist(resize_handlers):
+        dpg.delete_item(resize_handlers)
+    with dpg.item_handler_registry(tag=resize_handlers):
+        dpg.add_item_resize_handler(callback=lambda: _resize_controller_workspace(shell))
+    dpg.bind_item_handler_registry(LIVE_VERIFY_ROOT_TAG, resize_handlers)
     _schedule_live_verify_refresh(shell, state)
 
 
@@ -754,7 +763,10 @@ def _call_selection(service, name: str, *args) -> None:
 def _build_controller_workspace(shell) -> None:
     """Two-pane controller workspace: enlarged front model + inspector."""
 
-    with dpg.group(horizontal=True):
+    available = right_rail._content_width(shell)
+    required = _workspace_required_width(shell)
+    horizontal = available <= 0 or available >= required
+    with dpg.group(horizontal=horizontal, tag="live_verify_controller_workspace"):
         with _fit_card(width=_workspace_model_card_width(shell)):
             section_title(t("diagnostics.live_verify.workspace.title"))
             _build_workspace_controls(shell)
@@ -765,9 +777,38 @@ def _build_controller_workspace(shell) -> None:
             refresh_binding_overlays(shell)
             dpg.add_spacer(height=6)
             _build_control_selectors(shell)
-        dpg.add_spacer(width=_WORKSPACE_GAP)
+        dpg.add_spacer(
+            tag="live_verify_workspace_gap",
+            width=_WORKSPACE_GAP if horizontal else 0,
+            height=0 if horizontal else _WORKSPACE_GAP,
+        )
         with _fit_card(width=_workspace_inspector_width(shell)):
             _build_inspector(shell)
+
+
+def _workspace_required_width(shell) -> int:
+    # The spacer also receives ItemSpacing on both sides (8px each).
+    return _workspace_model_card_width(shell) + _workspace_inspector_width(shell) + _WORKSPACE_GAP + 16
+
+
+def _resize_controller_workspace(shell) -> None:
+    """Reflow existing widgets when a windowed resize crosses the fit boundary."""
+    workspace = "live_verify_controller_workspace"
+    if not dpg.does_item_exist(workspace):
+        return
+    parent = "live_verify_work_column" if dpg.does_item_exist("live_verify_work_column") else LIVE_VERIFY_ROOT_TAG
+    available = dpg.get_item_state(parent).get("content_region_avail", (0, 0))[0]
+    if available <= 0:
+        return
+    horizontal = available >= _workspace_required_width(shell)
+    if dpg.get_item_configuration(workspace)["horizontal"] == horizontal:
+        return
+    dpg.configure_item(workspace, horizontal=horizontal)
+    dpg.configure_item(
+        "live_verify_workspace_gap",
+        width=_WORKSPACE_GAP if horizontal else 0,
+        height=0 if horizontal else _WORKSPACE_GAP,
+    )
 
 
 def _workspace_model_card_width(shell) -> int:

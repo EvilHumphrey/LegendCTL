@@ -77,23 +77,11 @@ class SharedHeightFloorTests(unittest.TestCase):
             "Modules compare column height fell below the 578px content floor.",
         )
 
-    def test_home_top_card_clears_profile_content_floor(self) -> None:
-        # Probe: the Home row-one status card clipped by 101px when its values
-        # were stacked as individual rows inside the 257px shared card. The card
-        # now keeps that shared orientation/status height and compacts related
-        # values into paired metric rows; shrinking the height would re-risk the
-        # row-one clip at the shipped fonts.
-        self.assertGreaterEqual(
-            home_screen._TOP_CARD_HEIGHT, 257,
-            "Home top-card shared height fell below the compact row-one floor.",
-        )
-
     def test_home_device_profile_status_card_keeps_compact_row_shape(self) -> None:
         # The compact Device & profile card must keep the row count that the
         # 1480x1040 real-viewport probe verified: connection+badge, model,
-        # firmware+battery, active+pending, and draft. Re-expanding those paired
-        # rows resurrects the inner scrollbar without changing the height
-        # constant, so guard the source shape as well as the floor above.
+        # firmware+battery, active+pending, and draft. Larger text can stack
+        # those rows inside content-fit cards; shipped fonts keep the budget.
         src = inspect.getsource(home_screen._device_profile_status_card)
         self.assertIn('with section(t("home.status.title"), gap=4)', src)
         self.assertEqual(
@@ -253,6 +241,8 @@ class FitContractTests(unittest.TestCase):
         # step") — are content-fit so they never grow an inner scrollbar. They
         # build via the card(fit=True) helper, not a fixed card(height=...).
         for label, func in (
+            ("orientation", home_screen._orientation_card),
+            ("device and profile", home_screen._device_profile_status_card),
             ("trust front door", home_screen._trust_front_door_card),
             ("recent activity", home_screen._recent_activity),
             ("actions card", home_screen._actions_card),

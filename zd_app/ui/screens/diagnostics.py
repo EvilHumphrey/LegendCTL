@@ -414,11 +414,15 @@ def _build_guidance_tab(shell) -> None:
     dpg.add_spacer(height=10)
     _build_share_card_card(shell)
     dpg.add_spacer(height=10)
-    with dpg.child_window(height=320, border=True):
+    with dpg.child_window(
+        border=True, auto_resize_y=True, autosize_y=False,
+        always_auto_resize=True, tag="diagnostics_event_log_card",
+    ):
         dpg.add_text(t("ui.event_log_878e531b"), color=shell.COLORS["muted"])
         dpg.add_button(
             label=t("diagnostics.event_log.copy"),
-            width=160,
+            tag="diagnostics_event_log_copy",
+            width=0,
             callback=lambda: dpg.set_clipboard_text("\n".join(shell.device_service.recent_events(100))),
         )
         dpg.add_text(
@@ -967,6 +971,7 @@ def _build_compatibility_report_card(shell) -> None:
         tag=COMPAT_REPORT_CARD_TAG,
         auto_resize_y=True,
         autosize_y=False,
+        always_auto_resize=True,
     ):
         dpg.add_text(t("compat_report.title"), color=shell.COLORS["muted"])
         dpg.add_text(
