@@ -233,6 +233,8 @@ jobs:
         with:
           name: installer-policy-${{ github.run_number }}
           path: .installer-policy-evidence/**/summary.json
+          include-hidden-files: true
+          if-no-files-found: error
           retention-days: 14
 
       - name: Build release artifacts (PyInstaller + Inno Setup)
