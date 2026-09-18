@@ -1068,6 +1068,7 @@
   "safe_import.error.too_large": "the file is too large",
   "safe_import.error.invalid_json": "the file is not valid JSON",
   "safe_import.error.too_deep": "the file is nested too deeply",
+  "safe_import.error.resource_limited": "the file is too complex to import safely",
   "safe_import.error.not_object": "the file is not a profile object",
   "safe_import.error.schema": "the profile uses an unsupported version",
   "safe_import.error.invalid": "the profile contains invalid settings",

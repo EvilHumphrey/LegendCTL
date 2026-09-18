@@ -1068,6 +1068,7 @@
   "safe_import.error.too_large": "파일이 너무 큽니다",
   "safe_import.error.invalid_json": "파일이 유효한 JSON이 아닙니다",
   "safe_import.error.too_deep": "파일의 중첩이 너무 깊습니다",
+  "safe_import.error.resource_limited": "파일이 너무 복잡하여 안전하게 가져올 수 없습니다",
   "safe_import.error.not_object": "파일이 프로필 객체가 아닙니다",
   "safe_import.error.schema": "프로필이 지원되지 않는 버전을 사용합니다",
   "safe_import.error.invalid": "프로필에 유효하지 않은 설정이 포함되어 있습니다",
