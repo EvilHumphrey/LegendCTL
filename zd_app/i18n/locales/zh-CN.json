@@ -1068,6 +1068,7 @@
   "safe_import.error.too_large": "该文件过大",
   "safe_import.error.invalid_json": "该文件不是有效的 JSON",
   "safe_import.error.too_deep": "该文件嵌套层级过深",
+  "safe_import.error.resource_limited": "该文件过于复杂，无法安全导入",
   "safe_import.error.not_object": "该文件不是配置对象",
   "safe_import.error.schema": "该配置使用了不受支持的版本",
   "safe_import.error.invalid": "该配置包含无效设置",

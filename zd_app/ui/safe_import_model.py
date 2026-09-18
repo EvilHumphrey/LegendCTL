@@ -244,6 +244,10 @@ def classify_import(raw_payload: dict, *, existing_names: set[str]) -> ImportRes
         return ImportResult(ok=False, error_key="safe_import.error.not_object")
 
     risk = import_classifier.classify_import(raw_payload, existing_names=existing_names)
+    # A partial risk scan must never become a stripped-but-importable profile.
+    # Check this before copying diagnostics or reparsing through the UI codec.
+    if risk.resource_limited:
+        return _failed("safe_import.error.resource_limited")
     blocked = [_display_field_name(name) for name in risk.blocked_fields]
     blocked_set = set(blocked)
     # The classifier also lists blocked keys under unknown_fields; the UI's "needs review"

@@ -23,6 +23,7 @@ from enum import Enum
 from typing import Any, Iterator
 
 from zd_app.models import WrapperProfile
+from zd_app.storage._import_guards import MAX_IMPORT_JSON_DEPTH
 from zd_app.storage.snapshot_codec import snapshot_to_dict
 from zd_app.storage.wrapper_profile_store import slugify, unique_display_name
 
@@ -149,6 +150,14 @@ class ImportPolicy:
 
 DEFAULT_IMPORT_POLICY = ImportPolicy()
 
+# File size/depth alone do not bound expanded ancestry paths or preview work.
+# Real exports have a few hundred nodes and short schema keys. These ceilings
+# also apply to direct classifier calls, before codec or regex processing.
+MAX_IMPORT_NODES = 4096  # Root plus every container/scalar, including list items.
+MAX_IMPORT_KEY_CHARS = 256
+MAX_IMPORT_PATH_CHARS = 1024
+MAX_IMPORT_TOTAL_PATH_CHARS = 64 * 1024
+
 
 @dataclass(frozen=True)
 class FieldChange:
@@ -181,6 +190,7 @@ class ImportResult:
     unknown_fields: list[str] = field(default_factory=list)
     generated_name: str = ""
     ok: bool = False
+    resource_limited: bool = False
 
     @property
     def blocked_automation_count(self) -> int:
@@ -290,15 +300,19 @@ def _iter_preview_fields(snapshot: dict[str, Any]) -> Iterator[tuple[str, Any]]:
             yield key, value
 
 
-def _record_blocked(result: ImportResult, qualified: str, category: RiskCategory, reason: str) -> None:
+def _record_blocked(
+    result: ImportResult, qualified: str, category: RiskCategory, reason: str,
+    *, seen: set[str],
+) -> None:
     """Block + discard a dangerous key: record the name only (never the
     payload) and force ``ok=False``. The codec already discards the value (it
     preserves only known fields), so the key is reported but never written back.
     Idempotent on ``qualified`` so a key is recorded once.
     """
 
-    if qualified in result.blocked_fields:
+    if qualified in seen:
         return
+    seen.add(qualified)
     result.blocked_fields.append(qualified)
     result.categories[category].append(
         FieldChange(category, qualified, _label_key(qualified), None)
@@ -340,10 +354,61 @@ def _compact_matches(key: str, substrings: tuple[str, ...]) -> bool:
     )
 
 
-def _scan_dangerous_keys(root: Any, *, result: ImportResult) -> None:
+class _ImportResourceLimit(ValueError):
+    """The complete payload cannot be classified within the preview budget."""
+
+
+def _bounded_key_inventory(root: dict) -> list[tuple[str, str]]:
+    """Inventory keys before any codec, normalization, or diagnostic expansion.
+
+    Keep one iterator per ancestor, never a queue of all siblings with copied
+    paths. Count paths for *all* nodes, including scalar array items. The total
+    character budget bounds retained key paths and their later diagnostic/UI
+    copies (Unicode storage is at most four bytes per character). Limits reject
+    the entire import; a partial risk inventory must never authorize a preview.
+    """
+    keys: list[tuple[str, str]] = []
+    stack = [("", iter(root.items()), True)]
+    nodes = 1
+    total_path_chars = 0
+    while stack:
+        path, children, is_object = stack[-1]
+        try:
+            raw_key, child = next(children)
+        except StopIteration:
+            stack.pop()
+            continue
+        nodes += 1
+        if nodes > MAX_IMPORT_NODES:
+            raise _ImportResourceLimit
+        if is_object:
+            key = str(raw_key)
+            if len(key) > MAX_IMPORT_KEY_CHARS:
+                raise _ImportResourceLimit
+            qualified = f"{path}.{key}" if path else key
+        else:
+            qualified = f"{path}[{raw_key}]"
+        total_path_chars += len(qualified)
+        if (len(qualified) > MAX_IMPORT_PATH_CHARS
+                or total_path_chars > MAX_IMPORT_TOTAL_PATH_CHARS):
+            raise _ImportResourceLimit
+        if is_object:
+            keys.append((key, qualified))
+        if isinstance(child, (dict, list)):
+            # The root contributes one container level, just like the file's
+            # lexical JSON-depth guard. Cycles in direct calls also terminate.
+            if len(stack) >= MAX_IMPORT_JSON_DEPTH:
+                raise _ImportResourceLimit
+            child_is_object = isinstance(child, dict)
+            iterator = iter(child.items()) if child_is_object else enumerate(child)
+            stack.append((qualified, iterator, child_is_object))
+    return keys
+
+
+def _scan_dangerous_keys(keys: list[tuple[str, str]], *, result: ImportResult) -> None:
     """Flag automation / safety-sensitive key NAMES at any depth.
 
-    An iterative walk (no recursion-limit risk) over the parsed payload. Safety
+    A bounded inventory (no recursion-limit risk) of the parsed payload. Safety
     patterns take precedence over automation. Known wrapper-profile keys never
     match these patterns, so only foreign keys flag — this also catches a
     dangerous key nested inside a known field (e.g. a ``turbo_enabled`` smuggled
@@ -355,33 +420,28 @@ def _scan_dangerous_keys(root: Any, *, result: ImportResult) -> None:
     fragment scan for danger words glued into a single separator-less token.
     """
 
-    stack: list[tuple[str, Any]] = [("", root)]
-    while stack:
-        path, value = stack.pop()
-        if isinstance(value, dict):
-            for raw_key, child in value.items():
-                key = str(raw_key)
-                qualified = f"{path}.{key}" if path else key
-                if _has_non_ascii_letter(key):
-                    _record_blocked(
-                        result, qualified, RiskCategory.BLOCKED,
-                        "Blocked non-ASCII key in safety scan",
-                    )
-                elif _matches(key, _BLOCKED_KEY_PATTERNS) or _compact_matches(
-                    key, _COMPACT_BLOCKED_SUBSTRINGS
-                ):
-                    _record_blocked(result, qualified, RiskCategory.BLOCKED, "Blocked safety-sensitive key")
-                elif _matches(key, _AUTOMATION_KEY_PATTERNS) or _compact_matches(
-                    key, _COMPACT_AUTOMATION_SUBSTRINGS
-                ):
-                    _record_blocked(result, qualified, RiskCategory.AUTOMATION, "Blocked automation key")
-                stack.append((qualified, child))
-        elif isinstance(value, list):
-            for index, item in enumerate(value):
-                stack.append((f"{path}[{index}]", item))
+    seen: set[str] = set()
+    for key, qualified in keys:
+        if _has_non_ascii_letter(key):
+            _record_blocked(
+                result, qualified, RiskCategory.BLOCKED,
+                "Blocked non-ASCII key in safety scan", seen=seen,
+            )
+        elif _matches(key, _BLOCKED_KEY_PATTERNS) or _compact_matches(
+            key, _COMPACT_BLOCKED_SUBSTRINGS
+        ):
+            _record_blocked(result, qualified, RiskCategory.BLOCKED,
+                            "Blocked safety-sensitive key", seen=seen)
+        elif _matches(key, _AUTOMATION_KEY_PATTERNS) or _compact_matches(
+            key, _COMPACT_AUTOMATION_SUBSTRINGS
+        ):
+            _record_blocked(result, qualified, RiskCategory.AUTOMATION,
+                            "Blocked automation key", seen=seen)
 
 
-def _inventory_unknown(result: ImportResult, qualified: str, policy: ImportPolicy) -> None:
+def _inventory_unknown(
+    result: ImportResult, qualified: str, policy: ImportPolicy, *, blocked: set[str],
+) -> None:
     """Record a structural unknown (top-level / snapshot) key.
 
     Dangerous keys were already blocked by the danger scan; benign unknowns are
@@ -389,10 +449,11 @@ def _inventory_unknown(result: ImportResult, qualified: str, policy: ImportPolic
     """
 
     result.unknown_fields.append(qualified)
-    if qualified in result.blocked_fields:
+    if qualified in blocked:
         return
     result.warnings.append(f"Ignoring unknown key: {qualified}")
     if policy.fail_on_unknown:
+        blocked.add(qualified)
         result.blocked_fields.append(qualified)
 
 
@@ -409,14 +470,20 @@ def classify_import(
     valid and hostile inputs.
     """
 
-    existing_slugs = {slugify(name) for name in existing_names}
     result = ImportResult()
 
     if not isinstance(raw_payload, dict):
         result.warnings.append("Import payload is not a JSON object.")
-        result.generated_name = unique_display_name(None, existing_slugs)
+        result.generated_name = unique_display_name(None, {slugify(name) for name in existing_names})
         return result
 
+    try:
+        keys = _bounded_key_inventory(raw_payload)
+    except _ImportResourceLimit:
+        # No profile or partial diagnostics may survive an incomplete scan.
+        return ImportResult(resource_limited=True)
+
+    existing_slugs = {slugify(name) for name in existing_names}
     result.generated_name = unique_display_name(raw_payload.get("name"), existing_slugs)
 
     # Validate via the codec (schema_version + per-field ranges). A failure
@@ -427,19 +494,20 @@ def classify_import(
         result.warnings.append(f"Profile failed validation: {exc}")
 
     # Pass 1: block + discard automation / safety-sensitive keys at any depth.
-    _scan_dangerous_keys(raw_payload, result=result)
+    _scan_dangerous_keys(keys, result=result)
 
     # Pass 2: inventory structural unknowns (top-level + snapshot). Benign
     # unknowns are ignored-with-warning by default; dangerous ones were already
     # blocked in Pass 1.
+    blocked = set(result.blocked_fields)
     for key in raw_payload:
         if key not in KNOWN_TOP_LEVEL_KEYS:
-            _inventory_unknown(result, str(key), policy)
+            _inventory_unknown(result, str(key), policy, blocked=blocked)
     snapshot = raw_payload.get("snapshot")
     if isinstance(snapshot, dict):
         for key in snapshot:
             if key not in KNOWN_SNAPSHOT_KEYS:
-                _inventory_unknown(result, f"snapshot.{key}", policy)
+                _inventory_unknown(result, f"snapshot.{key}", policy, blocked=blocked)
 
     # Pass 3: categorize recognized, set fields from the codec-normalized
     # snapshot — foreign nested keys are already dropped, so no payload leaks
