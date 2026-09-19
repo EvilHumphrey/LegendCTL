@@ -209,6 +209,11 @@ def _render_scan_summary(shell, result: ImportResult) -> None:
                 t("safe_import.summary.automation_blocked", count=result.blocked_automation_count),
                 color=shell.COLORS["muted"],
             )
+        if result.blocked_fields:
+            dpg.add_text(
+                t("safe_import.summary.blocked_fields", count=len(result.blocked_fields)),
+                color=shell.COLORS["muted"],
+            )
         device_changes = len(result.categories.get(RiskCategory.DEVICE, []))
         if device_changes:
             dpg.add_text(
@@ -287,7 +292,7 @@ def _render_diff(shell, result: ImportResult) -> None:
                         color=shell.COLORS["muted"],
                         wrap=700,
                     )
-        if result.has_automation:
+        if result.blocked_fields:
             dpg.add_text(
                 f"  {t('safe_import.diff.blocked_label')}: "
                 + ", ".join(result.blocked_fields),

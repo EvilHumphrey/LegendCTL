@@ -14,8 +14,14 @@ having no network access). See also
 [docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md), "Constraint architecture." These are
 not aspirational promises:
 
-- **Local-only.** All data (settings, wrapper profiles, restore points, wear
-  ledger, logs) lives under `%APPDATA%\ZDUltimateLegend\` as plain JSON/JSONL.
+- **Local-only.** Packaged builds default to `%APPDATA%\ZDUltimateLegend\`.
+  Source runs use `zd_data/` under the current working directory; packaged
+  builds also use that fallback when `APPDATA` is unavailable. `ZDUL_DATA_DIR`
+  overrides either default. Settings, wrapper profiles, restore points, and
+  wear-ledger records use JSON/JSONL; logs and reports also use text formats.
+  The Last Applied feature stores a local 32-byte binary key,
+  `controller_identity_key_v1.bin`, in the data root to derive
+  installation-scoped controller-identity digests.
 - **No network calls.** The app never connects to the internet — no accounts,
   no remote config, no analytics endpoints. You can confirm this yourself with
   TCPView — see [docs/verifying-no-network.md](../docs/verifying-no-network.md). The

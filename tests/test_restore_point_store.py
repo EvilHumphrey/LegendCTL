@@ -23,6 +23,7 @@ from zd_app.storage.restore_point_models import (
     IdentityConfidence,
     RestorePoint,
     RestorePointCoverage,
+    RestorePointParseError,
     RestorePointSchemaError,
     RestorePointTrigger,
     restore_point_to_dict,
@@ -220,6 +221,80 @@ class ListTests(unittest.TestCase):
             self.assertNotIn(str(bad_path), skipped[0].error)
             self.assertNotIn(str(Path(tmp)), skipped[0].error)
             self.assertIn(bad_path.name, skipped[0].error)
+
+
+class MalformedFileIsolationTests(unittest.TestCase):
+    def test_list_discloses_malformed_objects_and_keeps_valid_records(self) -> None:
+        for field_name, values in (
+            ("schema_version", ([], {}, None, True, False)),
+            ("device_identity", (None, [], False, "text")),
+            ("coverage", (None, [], False, "text")),
+        ):
+            for value in values:
+                with self.subTest(field=field_name, value=value):
+                    with tempfile.TemporaryDirectory() as tmp:
+                        store = RestorePointStore(tmp)
+                        malformed = restore_point_to_dict(_make_rp())
+                        malformed[field_name] = value
+                        bad_path = Path(tmp) / "malformed.json"
+                        bad_path.write_text(json.dumps(malformed), encoding="utf-8")
+                        keeper = _make_rp(id="rp_20260524_200000_abcdef")
+                        store.save(keeper)
+
+                        valid, skipped = store.list()
+
+                        self.assertEqual(valid, [keeper])
+                        self.assertEqual([entry.path for entry in skipped], [str(bad_path)])
+                        self.assertTrue(skipped[0].error)
+                        self.assertEqual(store.load(keeper.id), keeper)
+
+    def test_nonobject_roots_do_not_interrupt_store_operations(self) -> None:
+        for operation in ("list", "load", "delete", "prune"):
+            with self.subTest(operation=operation):
+                with tempfile.TemporaryDirectory() as tmp:
+                    store = RestorePointStore(tmp)
+                    bad_paths = []
+                    for index, value in enumerate((None, [], [1], True, False, 0, "text")):
+                        bad_path = Path(tmp) / f"malformed-{index}.json"
+                        bad_path.write_text(json.dumps(value), encoding="utf-8")
+                        bad_paths.append(bad_path)
+                    keeper = _make_rp()
+                    keeper_path = store.save(keeper)
+                    # Force malformed inputs before the match; filesystem order
+                    # must not let load/delete return before exercising the guard.
+                    with patch.object(Path, "glob", return_value=bad_paths + [keeper_path]):
+                        if operation == "list":
+                            valid, skipped = store.list()
+                            self.assertEqual(valid, [keeper])
+                            self.assertEqual(len(skipped), len(bad_paths))
+                        elif operation == "load":
+                            self.assertEqual(store.load(keeper.id), keeper)
+                            with self.assertRaises(FileNotFoundError):
+                                store.load("missing")
+                        elif operation == "delete":
+                            self.assertFalse(store.delete("missing"))
+                            self.assertTrue(store.delete(keeper.id))
+                            self.assertFalse(keeper_path.exists())
+                        else:
+                            self.assertEqual(store.prune(max_count=0), [keeper.id])
+                            self.assertFalse(keeper_path.exists())
+                    self.assertTrue(all(path.exists() for path in bad_paths))
+
+    def test_load_matching_malformed_object_retains_domain_error(self) -> None:
+        for field_name, value, error_type in (
+            ("schema_version", 999, RestorePointSchemaError),
+            ("schema_version", [], RestorePointSchemaError),
+            ("device_identity", None, RestorePointParseError),
+        ):
+            with self.subTest(field=field_name, value=value):
+                with tempfile.TemporaryDirectory() as tmp:
+                    store = RestorePointStore(tmp)
+                    rp = _make_rp()
+                    payload = restore_point_to_dict(rp)
+                    payload[field_name] = value
+                    (Path(tmp) / "malformed.json").write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaises(error_type):
+                        store.load(rp.id)
 
 
 class ListVanishedFileTests(unittest.TestCase):

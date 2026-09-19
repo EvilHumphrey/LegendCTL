@@ -77,6 +77,10 @@ Before a submission, the workflow:
   pass `gh attestation verify` against this repository. Without this the
   submitted `InstallerSha256` would only be self-consistent with whatever the
   URL happened to serve;
+- requires the generated manifest's single x64 installer URL and SHA-256 to
+  match that verified download, both after generation and immediately before
+  submission, so a changed second download is rejected. The guard accepts the
+  pinned generator's block-style YAML and fails closed on unsupported forms;
 - installs the exact .NET 9.0.316 SDK through a full-SHA-pinned official
   `actions/setup-dotnet` step;
 - downloads Microsoft's WingetCreate v1.12.13.0 from its immutable release URL

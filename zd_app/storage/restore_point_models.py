@@ -206,6 +206,8 @@ class RestoreResult:
     completed_at: str   # ISO-8601 UTC
     sensitivity_downgrades: tuple[str, ...] = ()
     unverified_writes: tuple[str, ...] = ()
+    # Reuse the restore readback for the caller's cache; not persisted.
+    readback_snapshot: ControllerSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -390,7 +392,7 @@ def restore_point_from_dict(payload: dict[str, Any]) -> RestorePoint:
         raise RestorePointParseError(f"unexpected kind: {raw_kind!r}")
 
     raw_schema = payload.get("schema_version")
-    if raw_schema not in SUPPORTED_SCHEMA_VERSIONS:
+    if type(raw_schema) is not int or raw_schema not in SUPPORTED_SCHEMA_VERSIONS:
         raise RestorePointSchemaError(f"unsupported schema_version: {raw_schema!r}")
 
     # The id is used verbatim as the export filename stem (``<id>.json``), so it
@@ -414,10 +416,11 @@ def restore_point_from_dict(payload: dict[str, Any]) -> RestorePoint:
         claim_short = CLAIM_BOUNDARY_SHORT_UI
 
     try:
-        trigger_payload = payload["trigger"]
-        identity_payload = payload["device_identity"]
-        coverage_payload = payload["coverage"]
-        snapshot_payload = payload["snapshot"]
+        trigger_payload = _require_object(payload["trigger"], "trigger")
+        identity_payload = _require_object(payload["device_identity"], "device_identity")
+        coverage_payload = _require_object(payload["coverage"], "coverage")
+        snapshot_payload = _require_object(payload["snapshot"], "snapshot")
+        coverage_fields = _require_object(coverage_payload.get("fields", {}), "coverage.fields")
         return RestorePoint(
             schema_version=int(raw_schema),
             kind=KIND,
@@ -447,7 +450,7 @@ def restore_point_from_dict(payload: dict[str, Any]) -> RestorePoint:
                 capture_source=CaptureSource(coverage_payload["capture_source"]),
                 fields={
                     str(name): _field_coverage_from_dict(value)
-                    for name, value in (coverage_payload.get("fields") or {}).items()
+                    for name, value in coverage_fields.items()
                 },
             ),
             last_restore_attempt=(
@@ -460,8 +463,16 @@ def restore_point_from_dict(payload: dict[str, Any]) -> RestorePoint:
         )
     except RestorePointSchemaError:
         raise
-    except (KeyError, ValueError, TypeError) as exc:
+    except (KeyError, ValueError, TypeError, OverflowError) as exc:
         raise RestorePointParseError(f"invalid restore point payload: {exc}") from exc
+
+
+def _require_object(value: Any, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise RestorePointParseError(
+            f"{name} must be an object, got {type(value).__name__}"
+        )
+    return value
 
 
 def _field_coverage_to_dict(coverage: FieldCoverage) -> dict[str, Any]:
@@ -477,6 +488,7 @@ def _field_coverage_to_dict(coverage: FieldCoverage) -> dict[str, Any]:
 
 
 def _field_coverage_from_dict(payload: Mapping[str, Any]) -> FieldCoverage:
+    payload = _require_object(payload, "coverage field")
     readable = payload["readable"]
     if not isinstance(readable, (bool, str)):
         raise ValueError(f"readable must be bool or str, got {readable!r}")
@@ -503,6 +515,7 @@ def _restore_attempt_to_dict(record: RestoreAttemptRecord) -> dict[str, Any]:
 
 
 def _restore_attempt_from_dict(payload: Mapping[str, Any]) -> RestoreAttemptRecord:
+    payload = _require_object(payload, "last_restore_attempt")
     return RestoreAttemptRecord(
         attempted_at=str(payload["attempted_at"]),
         label=RestoreResultLabel(payload["label"]),

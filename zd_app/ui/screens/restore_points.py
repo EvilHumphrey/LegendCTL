@@ -1190,6 +1190,17 @@ def _execute_restore(shell) -> None:
             # result rather than presenting A's verification as B's.
             finish_presence_changed(writes_may_have_occurred=True)
             return
+        publish_readback = getattr(shell, "_publish_restore_readback", None)
+        if (
+            callable(publish_readback)
+            and presence_key is not None
+            and presence_generation is not None
+        ):
+            publish_readback(
+                getattr(outcome, "readback_snapshot", None),
+                presence_key,
+                presence_generation,
+            )
         state.view = VIEW_RESULT
         state.result = outcome
         state.status_text = ""
@@ -1204,7 +1215,11 @@ def _execute_restore(shell) -> None:
             result = exc
         on_done(result)
         return
-    if not runner(job, on_done):
+    prepare_snapshot = getattr(shell, "_prepare_controller_snapshot_for_restore", None)
+    runner_options = (
+        {"before_start": prepare_snapshot} if callable(prepare_snapshot) else {}
+    )
+    if not runner(job, on_done, **runner_options):
         # Refused — another flow is in flight. Leave IN_PROGRESS (it would
         # spin forever) and return to CONFIRM so the user can retry.
         state.view = VIEW_CONFIRM

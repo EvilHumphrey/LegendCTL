@@ -30,7 +30,6 @@ import copy
 import dataclasses
 import json
 import logging
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -40,7 +39,12 @@ from zd_app.models import WrapperProfile
 from zd_app.services import import_classifier
 from zd_app.services.import_classifier import DEVICE_SETTING_KEYS, RiskCategory
 from zd_app.storage.snapshot_codec import snapshot_to_dict
-from zd_app.storage.wrapper_profile_store import slugify, unique_display_name
+from zd_app.storage.wrapper_profile_store import (
+    MAX_PROFILE_NAME_LEN as MAX_DISPLAY_NAME_LEN,
+    sanitize_display_name,
+    slugify,
+    unique_display_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,9 +115,6 @@ _DICT_SNAPSHOT_FIELDS = ("button_bindings", "lighting_zones", "back_paddle_bindi
 FIELD_LABEL_KEYS: dict[str, str] = {
     key: f"safe_import.field.{key}" for key in SNAPSHOT_FIELD_CATEGORY
 }
-
-_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
-MAX_DISPLAY_NAME_LEN = 64
 
 _POLLING_HZ = {
     1: "250Hz",
@@ -200,11 +201,7 @@ class ImportResult:
 
 
 def _clean_display_name(raw_name: Any) -> str:
-    text = raw_name if isinstance(raw_name, str) else ""
-    text = _CONTROL_CHARS_RE.sub("", text).strip()
-    if len(text) > MAX_DISPLAY_NAME_LEN:
-        text = text[:MAX_DISPLAY_NAME_LEN].strip()
-    return text
+    return sanitize_display_name(raw_name).strip()
 
 
 def _unique_slug(preferred: str, existing_slugs: set[str]) -> str:

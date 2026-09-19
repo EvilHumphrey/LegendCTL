@@ -103,6 +103,14 @@ class PublicWorkflowExitGateTests(unittest.TestCase):
         self.assertIn("@('filevers', 'prodvers')", release)
         self.assertIn("@('FileVersion', 'ProductVersion')", release)
 
+    def test_release_write_permissions_require_a_tag_push(self) -> None:
+        release = WORKFLOWS[1].read_text(encoding="utf-8")
+        release_job = release.split("\n  release:\n", 1)[1]
+        self.assertIn(
+            "    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')\n",
+            release_job,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

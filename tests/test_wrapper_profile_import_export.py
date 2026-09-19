@@ -315,6 +315,25 @@ class NameHelperTests(unittest.TestCase):
         self.assertEqual(sanitize_display_name(None), "")
         self.assertEqual(sanitize_display_name({"a": 1}), "")
 
+    def test_surrogate_names_use_the_unusable_name_fallback(self) -> None:
+        for name in ("\ud800配置", "프로필\udfff", "Apex\ud800", "\ud800"):
+            with self.subTest(name=repr(name)):
+                self.assertEqual(sanitize_display_name(name), "")
+                self.assertEqual(unique_display_name(name, set()), "Imported Profile")
+
+    def test_invalid_unicode_cannot_enter_the_hashed_filename_fallback(self) -> None:
+        for name in ("\ud800配置", "프로필\udfff"):
+            with self.subTest(name=repr(name)):
+                self.assertEqual(slugify(name), "")
+
+    def test_valid_non_bmp_name_keeps_its_unicode_identity(self) -> None:
+        name = "配置\U00020000"
+        self.assertEqual(sanitize_display_name(name), name)
+        decoded = json.loads(json.dumps(name, ensure_ascii=True))
+        self.assertEqual(decoded, name)
+        self.assertEqual(slugify(decoded), slugify(name))
+        self.assertRegex(slugify(name), r"^profile-[0-9a-f]{24}$")
+
     def test_unique_default_when_unusable(self) -> None:
         self.assertEqual(unique_display_name("!!!", set()), "Imported Profile")
         self.assertEqual(unique_display_name("", set()), "Imported Profile")
