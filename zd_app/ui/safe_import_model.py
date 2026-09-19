@@ -222,7 +222,12 @@ def _display_field_name(qualified: str) -> str:
     the redundant ``snapshot.`` prefix is dropped for display + audit.
     """
 
-    return qualified.removeprefix("snapshot.")
+    # JSON permits escaped lone surrogates. Native UI text requires valid
+    # UTF-8, so expose those scalar values as visible backslash escapes while
+    # preserving valid Unicode in both preview and audit field names.
+    return qualified.removeprefix("snapshot.").encode(
+        "utf-8", errors="backslashreplace",
+    ).decode("utf-8")
 
 
 def classify_import(raw_payload: dict, *, existing_names: set[str]) -> ImportResult:
