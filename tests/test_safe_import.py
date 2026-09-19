@@ -169,6 +169,58 @@ class ClassifierTests(unittest.TestCase):
         self.assertIn("author", result.unknown_fields)
         self.assertIn("notes", result.unknown_fields)
 
+    def test_surrogate_foreign_field_names_are_utf8_safe_before_rendering(self) -> None:
+        # Model-only contract: malformed scalar values must never reach native
+        # UI text. Exercise parsed JSON without opening a viewport or rendering.
+        for surrogate in ("\ud800", "\udfff"):
+            for stem, blocked, automation_count in (
+                ("shell", True, 0), ("macro", True, 1), ("notes", False, 0),
+            ):
+                for in_snapshot in (False, True):
+                    with self.subTest(surrogate=repr(surrogate), stem=stem, snapshot=in_snapshot):
+                        raw = _export_dict()
+                        target = raw["snapshot"] if in_snapshot else raw
+                        target[stem + surrogate] = "foreign value must be discarded"
+                        result = model.classify_import(
+                            json.loads(json.dumps(raw)), existing_names=set(),
+                        )
+                        self.assertTrue(result.ok)
+                        for name in (
+                            result.blocked_fields + result.unknown_fields
+                            + result.audit.blocked_field_names
+                        ):
+                            name.encode("utf-8")
+                        display = stem + f"\\u{ord(surrogate):04x}"
+                        self.assertEqual(result.blocked_fields, [display] if blocked else [])
+                        self.assertEqual(result.unknown_fields, [] if blocked else [display])
+                        self.assertEqual(result.audit.blocked_field_names, result.blocked_fields)
+                        self.assertEqual(result.blocked_automation_count, automation_count)
+                        self.assertNotIn("foreign value", json.dumps(result.profile.to_dict()))
+
+    def test_nested_surrogate_field_paths_are_safe_in_preview_and_audit(self) -> None:
+        raw = _export_dict()
+        raw["notes\ud800"] = [{"shell\udfff": "foreign value must be discarded"}]
+        result = model.classify_import(raw, existing_names=set())
+        for name in result.blocked_fields + result.unknown_fields + result.audit.blocked_field_names:
+            name.encode("utf-8")
+        self.assertEqual(result.blocked_fields, [r"notes\ud800[0].shell\udfff"])
+        self.assertEqual(result.audit.blocked_field_names, result.blocked_fields)
+        self.assertEqual(result.unknown_fields, [r"notes\ud800"])
+        self.assertNotIn("foreign value", json.dumps(result.profile.to_dict()))
+
+    def test_valid_unicode_foreign_field_names_are_preserved(self) -> None:
+        raw = _export_dict()
+        for key in ("shell配置", "shell프로필", "shell\U00020000", "notes😀"):
+            raw["snapshot"][key] = "foreign value must be discarded"
+        result = model.classify_import(json.loads(json.dumps(raw)), existing_names=set())
+        self.assertTrue(result.ok)
+        self.assertEqual(result.blocked_fields, ["shell配置", "shell프로필", "shell\U00020000"])
+        self.assertEqual(result.audit.blocked_field_names, result.blocked_fields)
+        self.assertEqual(result.unknown_fields, ["notes😀"])
+        for name in result.blocked_fields + result.unknown_fields:
+            name.encode("utf-8")
+        self.assertNotIn("foreign value", json.dumps(result.profile.to_dict()))
+
     def test_hard_fail_non_object_root(self) -> None:
         result = model.classify_import([1, 2, 3], existing_names=set())
         self.assertFalse(result.ok)
