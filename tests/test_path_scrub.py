@@ -390,6 +390,51 @@ class MultiPathLineTests(unittest.TestCase):
         self.assertNotIn("USERPROFILE", out)
 
 
+class WhitespaceRunTests(unittest.TestCase):
+    """Checking each gap once must preserve both path content and boundaries."""
+
+    def test_long_whitespace_inside_username_is_dropped_whole(self) -> None:
+        for gap in (" " * 4096, " \u00a0\u2003" * 1024):
+            with self.subTest(gap_length=len(gap)):
+                path = "C:/Users/Jane" + gap + "Doe/Documents/report.txt"
+                self.assertEqual(scrub_paths(path), "report.txt")
+
+    def test_long_whitespace_in_basename_is_preserved(self) -> None:
+        gap = " " * 4096
+        basename = "first" + gap + "last.txt"
+        self.assertEqual(
+            scrub_paths("C:/Users/Jane Doe/Documents/" + basename), basename
+        )
+
+    def test_long_gap_before_each_anchor_keeps_paths_separate(self) -> None:
+        first = r"C:\Users\Jane Doe\AppData\Roaming\ZDUltimateLegend\a.txt"
+        second_paths = (
+            (r"D:\Users\Bob Doe\Documents\b.txt", "b.txt"),
+            (r"\\server\share\Users\Bob Doe\b.txt", "b.txt"),
+            ("//server/share/Users/Bob Doe/b.txt", "b.txt"),
+            (r"\Users\Bob Doe\b.txt", "b.txt"),
+            ("/home/Bob Doe/b.txt", "b.txt"),
+            ("~/Documents/b.txt", HOME_PLACEHOLDER),
+            (r"%USERPROFILE%\Documents\b.txt", HOME_PLACEHOLDER),
+            (r"$env:USERPROFILE\Documents\b.txt", HOME_PLACEHOLDER),
+        )
+        for gap in (" " * 4096, " \u00a0\u2003" * 1024):
+            for second, reduced in second_paths:
+                with self.subTest(second=second, gap_length=len(gap)):
+                    self.assertEqual(
+                        scrub_paths(first + gap + second),
+                        APP_DATA_PLACEHOLDER + "/a.txt" + gap + reduced,
+                    )
+
+    def test_control_delimiters_still_end_a_long_gap(self) -> None:
+        first = r"C:\Users\Jane Doe\Documents\a.txt"
+        second = r"D:\Users\Bob Doe\Documents\b.txt"
+        for delimiter in ("\t", "\r", "\n", "\r\n"):
+            gap = " " * 4096 + delimiter + " " * 16
+            with self.subTest(delimiter=repr(delimiter)):
+                self.assertEqual(scrub_paths(first + gap + second), "a.txt" + gap + "b.txt")
+
+
 class SinglePathNoFragmentTests(unittest.TestCase):
     """A single path that *contains* an interior anchor-shaped run must stay
     one token and reduce as a whole — multi-path tempering must NOT split it.

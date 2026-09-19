@@ -2210,6 +2210,8 @@ class AppShell:
         self,
         job: Callable[[], Any],
         on_done: Callable[[Any], None],
+        *,
+        before_start: Callable[[], None] | None = None,
     ) -> bool:
         """Run a long HID flow as a DPG-free ``job`` plus a DPG ``on_done``.
 
@@ -2227,19 +2229,30 @@ class AppShell:
         disabled. A jobbed flow started from INSIDE a running job (the
         profile apply's post-apply read) runs its job inline on the worker
         and queues its on_done — composition without re-entrancy.
+
+        ``before_start`` runs on the calling render thread only after the busy
+        gate accepts a top-level job, before any worker is dispatched. Restore
+        uses it to retire its old read cache without clearing it on a refused
+        job. Nested worker jobs must not supply render-side preparation.
         """
 
         if getattr(self._hid_job_context, "in_job", False):
+            if before_start is not None:
+                raise ValueError("render-side preparation requires a top-level HID job")
             # Nested call from a worker-side job: stay on the worker for the
             # job, defer the DPG work to the render thread.
             self._hid_job_completions.put((on_done, self._call_hid_job(job), False))
             return True
         if self._hid_executor is None:
+            if before_start is not None:
+                before_start()
             on_done(self._call_hid_job(job))
             return True
         if self._hid_job_in_flight:
             self._refuse_hid_job()
             return False
+        if before_start is not None:
+            before_start()
         self._hid_job_in_flight = True
         self._hid_job_started_monotonic = time.monotonic()
         self._hid_job_stall_warned = False
@@ -2855,6 +2868,65 @@ class AppShell:
         if self.last_controller_snapshot is not None:
             self._hydrate_controller_snapshot(self.last_controller_snapshot, [])
         self._render_settings_snapshot_status()
+
+    def _prepare_controller_snapshot_for_restore(self) -> None:
+        """Retire the pre-restore read on the render thread before writes start.
+
+        Save Current remains available during HID jobs, so waiting until the
+        completion would let it save old settings while Restore is writing.
+        Preserve same-controller write-only paddle evidence: the coordinator
+        updates those bindings as individual writes succeed. A presence change
+        still clears them through the separate controller-boundary path.
+        """
+
+        self._set_last_controller_snapshot(None)
+        self.last_snapshot_ts = None
+        self.last_snapshot_status = ""
+        self._step_size_hydrated = False
+        self._polling_rate_hydrated = False
+        self._diag_deadzone_hydrated = False
+        self._active_wrapper_profile_name = None
+        self._pending_step_size_save = None
+        self._last_apply_result = None
+        self._last_apply_result_presence_key = None
+        self._last_apply_result_presence_generation = None
+        self._apply_status_text = None
+        self._apply_status_clear_after = None
+        self._sync_profile_apply_readback_details_action()
+        if self._dpg_context_ready:
+            self._render_settings_snapshot_status()
+            self.refresh_shell()
+
+    def _publish_restore_readback(
+        self,
+        snapshot: ControllerSnapshot | None,
+        presence_key: tuple[str, str, str],
+        presence_generation: int,
+    ) -> None:
+        """Publish Restore's existing readback, never its requested target.
+
+        Reuse normal read hydration and its render-side identity check without
+        issuing another HID read. Missing or failed reads leave Save Current
+        blocked instead of reviving the invalidated pre-restore snapshot.
+        """
+
+        if not self._controller_presence_token_is_current(
+            presence_key, presence_generation
+        ):
+            self._discard_stale_controller_operation_after_write(
+                presence_key, presence_generation
+            )
+            return
+        if snapshot is None:
+            self.last_snapshot_status = t("device_vs_profile.read_failed")
+            if self._dpg_context_ready:
+                self._render_settings_snapshot_status()
+                self.refresh_shell()
+            return
+        self._refresh_read_on_done(
+            _RefreshReadResult(snapshot, None, 0, presence_key, presence_generation),
+            include_device=True,
+        )
 
     def _hydrate_controller_snapshot(
         self,

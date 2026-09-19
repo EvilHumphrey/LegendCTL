@@ -47,6 +47,11 @@ jobs:
       RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.tag }}
 
     steps:
+      - name: Checkout workflow verification helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
       - name: Guard published stable release and exact installer asset
         shell: pwsh
         env:
@@ -128,6 +133,7 @@ jobs:
 
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "INSTALLER_URL=$installerUrl" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "INSTALLER_SHA256=$localHash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           $releaseDate = ([datetimeoffset] $release.published_at).ToString('yyyy-MM-dd')
           "RELEASE_DATE=$releaseDate" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "$tag installer bound to SHA256SUMS.txt and to its build-provenance attestation."
@@ -222,6 +228,9 @@ jobs:
             Get-Content -LiteralPath $file.FullName
             Write-Host "::endgroup::"
           }
+          & .\.github\scripts\verify-winget-installer.ps1 `
+            -ManifestDirectory $manifestDirs[0] `
+            -InstallerUrl $env:INSTALLER_URL -InstallerSha256 $env:INSTALLER_SHA256
           "MANIFEST_DIR=$($manifestDirs[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Report a dry run and stop before submitting
@@ -249,5 +258,8 @@ jobs:
           if ($actual -ne $expected) {
             throw "WingetCreate changed after generation: expected $expected, got $actual."
           }
+          & .\.github\scripts\verify-winget-installer.ps1 `
+            -ManifestDirectory $env:MANIFEST_DIR `
+            -InstallerUrl $env:INSTALLER_URL -InstallerSha256 $env:INSTALLER_SHA256
           & .\wingetcreate.exe submit $env:MANIFEST_DIR
           if ($LASTEXITCODE -ne 0) { throw "WingetCreate submission failed." }

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -687,16 +688,16 @@ class _PruneRecordingStore(RestorePointStore):
 
 
 class _LowCapStore(RestorePointStore):
-    """Real store whose no-arg prune() enforces a tiny max_count, so the
-    capture path's default-caps ``store.prune()`` call is testable without
-    50 fixture files."""
+    """Real store with smaller retention caps for boundary tests."""
 
-    def __init__(self, base_dir, *, max_count: int) -> None:
+    def __init__(self, base_dir, *, max_count: int, max_disk_mb: int = 25) -> None:
         super().__init__(base_dir)
         self._test_max_count = max_count
+        self._test_max_disk_mb = max_disk_mb
 
     def prune(self, **kwargs):
         kwargs.setdefault("max_count", self._test_max_count)
+        kwargs.setdefault("max_disk_mb", self._test_max_disk_mb)
         return super().prune(**kwargs)
 
 
@@ -752,6 +753,78 @@ def _make_prune_service(
 
 class CapturePruneRetentionTests(unittest.TestCase):
     """capture() prunes the vault after save + ledger."""
+
+    def test_capture_survives_count_limit_saturated_by_manual_points(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = RestorePointStore(tmp)
+            service = _make_prune_service(store)
+            manual = RestorePointTrigger("manual", "Manual", "User checkpoint")
+            manual_ids = set()
+            for _ in range(50):
+                saved = service.capture(manual)
+                assert saved is not None
+                manual_ids.add(saved.id)
+
+            checkpoint = service.capture(_basic_trigger())
+
+            assert checkpoint is not None
+            self.assertEqual(store.load(checkpoint.id), checkpoint)
+            valid, skipped = store.list()
+            self.assertEqual(skipped, [])
+            self.assertEqual({rp.id for rp in valid}, manual_ids | {checkpoint.id})
+
+    def test_capture_survives_disk_limit_saturated_by_protected_baselines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _LowCapStore(tmp, max_count=50, max_disk_mb=1)
+            service = _make_prune_service(store, prune_on_capture=False)
+            baseline_ids = set()
+            for product in ("Controller A", "Controller B"):
+                baseline = service.capture(
+                    RestorePointTrigger("first_readable_connect", "Connect", "Baseline"),
+                    device_identity=replace(_identity(), product_string=product),
+                )
+                assert baseline is not None
+                # Each record remains below the parser's one-MiB limit, but
+                # together the protected baselines exhaust this vault's cap.
+                store.save(replace(baseline, title="baseline " + "x" * 600_000))
+                baseline_ids.add(baseline.id)
+            service._prune_on_capture = True
+
+            checkpoint = service.capture(_basic_trigger())
+
+            assert checkpoint is not None
+            self.assertEqual(store.load(checkpoint.id), checkpoint)
+            valid, skipped = store.list()
+            self.assertEqual(skipped, [])
+            self.assertEqual({rp.id for rp in valid}, baseline_ids | {checkpoint.id})
+
+    def test_restore_checkpoint_survives_from_first_write_through_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = _LowCapStore(tmp, max_count=2)
+            service = _make_prune_service(store)
+            manual = RestorePointTrigger("manual", "Manual", "User checkpoint")
+            target = service.capture(manual)
+            other = service.capture(manual)
+            assert target is not None and other is not None
+            apply_snapshot = service._apply_coordinator.apply_snapshot
+            checkpoint_ids = []
+
+            def apply_with_checkpoint(snapshot):
+                valid, _ = store.list()
+                before = [rp for rp in valid if rp.trigger.type == "before_restore"]
+                self.assertEqual(len(before), 1)
+                checkpoint_ids.append(before[0].id)
+                return apply_snapshot(snapshot)
+
+            service._apply_coordinator.apply_snapshot = apply_with_checkpoint
+
+            result = service.restore(target.id)
+
+            self.assertEqual(checkpoint_ids, [result.before_restore_point_id])
+            assert result.before_restore_point_id is not None
+            before = store.load(result.before_restore_point_id)
+            self.assertEqual(before.trigger.type, "before_restore")
+            self.assertEqual(store.load(target.id).id, target.id)
 
     def test_capture_past_cap_prunes_oldest_auto_and_keeps_new_capture(self) -> None:
         # T6
@@ -948,6 +1021,30 @@ class RestoreFlowTests(unittest.TestCase):
             )
             self.assertEqual(before_rp.trigger.type, "before_restore")
 
+    def test_before_restore_does_not_copy_historical_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service, stub, store = _make_service(
+                tmpdir=tmp, settings_stub=_full_populated_stub()
+            )
+            target = service.capture(_basic_trigger(), device_identity=_identity())
+            assert target is not None
+            stub.polling_rate = PollingRate.HZ_4000
+
+            result = service.restore(target.id)
+
+            assert result.before_restore_point_id is not None
+            before = store.load(result.before_restore_point_id)
+            self.assertEqual(before.snapshot.polling_rate, PollingRate.HZ_4000)
+            self.assertEqual(
+                before.device_identity,
+                DeviceIdentity(None, None, None, None, IdentityConfidence.UNKNOWN),
+            )
+            self.assertEqual(store.load(target.id).device_identity, _identity())
+            # Publish the observed state, even when it differs from the target;
+            # the UI must never hydrate the requested values as read evidence.
+            assert result.readback_snapshot is not None
+            self.assertEqual(result.readback_snapshot.polling_rate, PollingRate.HZ_4000)
+
     def test_restore_verified_when_all_writes_match_readback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             stub = _full_populated_stub()
@@ -959,6 +1056,57 @@ class RestoreFlowTests(unittest.TestCase):
             self.assertEqual(result.write_failed, 0)
             self.assertEqual(result.mismatched, 0)
             self.assertGreater(result.attempted, 0)
+            assert result.readback_snapshot is not None
+            self.assertEqual(result.readback_snapshot.polling_rate, stub.polling_rate)
+            self.assertEqual(result.readback_snapshot.button_bindings, stub.button_bindings)
+
+    def _restore_with_failed_verify_getters(self, tmpdir, readable_getter=None):
+        stub = _full_populated_stub()
+        service, _stub, _store = _make_service(tmpdir=tmpdir, settings_stub=stub)
+        target = service.capture(_basic_trigger())
+        assert target is not None
+        apply_snapshot = service._apply_coordinator.apply_snapshot
+
+        def failed_read(*_args):
+            raise TimeoutError("verification getter failed")
+
+        def apply_then_fail_reads(snapshot):
+            applied = apply_snapshot(snapshot)
+            # Exercise the real fresh_read error/provenance path after a
+            # successful before-capture and write burst, without mocking it.
+            for name in dir(stub):
+                if name.startswith("get_") and name != readable_getter:
+                    setattr(stub, name, failed_read)
+            return applied
+
+        service._apply_coordinator.apply_snapshot = apply_then_fail_reads
+        with self.assertLogs("zd_app.services.restore_point_service", level="WARNING"):
+            return service.restore(target.id)
+
+    def test_restore_does_not_publish_totally_failed_readback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._restore_with_failed_verify_getters(tmp)
+
+            self.assertIsNone(result.readback_snapshot)
+            self.assertEqual(result.label, RestoreResultLabel.RESTORED_WITH_WARNINGS)
+            self.assertGreater(result.wrote_succeeded, 0)
+            self.assertEqual(result.could_not_verify, result.wrote_succeeded)
+            self.assertTrue(all(field.verify_matched is None for field in result.fields))
+
+    def test_restore_publishes_partial_scalar_or_collection_readback(self) -> None:
+        for getter in ("get_polling_rate", "get_button_binding"):
+            with self.subTest(getter=getter), tempfile.TemporaryDirectory() as tmp:
+                result = self._restore_with_failed_verify_getters(tmp, getter)
+
+                assert result.readback_snapshot is not None
+                self.assertIsNone(result.readback_snapshot.vibration)
+                self.assertGreater(result.could_not_verify, 0)
+                if getter == "get_polling_rate":
+                    self.assertEqual(result.readback_snapshot.polling_rate, PollingRate.HZ_1000)
+                    self.assertEqual(result.readback_snapshot.button_bindings, {})
+                else:
+                    self.assertIsNone(result.readback_snapshot.polling_rate)
+                    self.assertEqual(set(result.readback_snapshot.button_bindings), {ButtonSlot.A})
 
     def test_restore_final_match_supersedes_inconclusive_step_size_disclosure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

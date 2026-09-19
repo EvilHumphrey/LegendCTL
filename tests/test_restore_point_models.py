@@ -241,6 +241,63 @@ class SchemaErrorTests(unittest.TestCase):
         self.assertEqual(restore_point_from_dict(payload).id, "rp_20260524_190355_9b42de")
 
 
+class MalformedRestorePointShapeTests(unittest.TestCase):
+    def test_schema_container_null_and_bool_values_raise_schema_error(self) -> None:
+        for value in ([], [2], {}, {"version": 2}, None, True, False, 2.0, "2"):
+            with self.subTest(value=value):
+                payload = restore_point_to_dict(_full_restore_point())
+                payload["schema_version"] = value
+                with self.assertRaises(RestorePointSchemaError):
+                    restore_point_from_dict(payload)
+
+    def test_required_nested_objects_reject_nonobjects(self) -> None:
+        for field_name in ("trigger", "device_identity", "coverage", "snapshot"):
+            for value in (None, [], [1], False, True, "text", 0):
+                with self.subTest(field=field_name, value=value):
+                    payload = restore_point_to_dict(_full_restore_point())
+                    payload[field_name] = value
+                    with self.assertRaises(RestorePointParseError):
+                        restore_point_from_dict(payload)
+
+    def test_coverage_field_map_rejects_nonobjects(self) -> None:
+        for value in (None, [], [1], False, True, "text", 0):
+            with self.subTest(value=value):
+                payload = restore_point_to_dict(_full_restore_point())
+                payload["coverage"]["fields"] = value
+                with self.assertRaises(RestorePointParseError):
+                    restore_point_from_dict(payload)
+
+    def test_coverage_entries_reject_nonobjects(self) -> None:
+        for value in (None, [], [1], False, True, "text", 0):
+            with self.subTest(value=value):
+                payload = restore_point_to_dict(_full_restore_point())
+                payload["coverage"]["fields"]["polling_rate"] = value
+                with self.assertRaises(RestorePointParseError):
+                    restore_point_from_dict(payload)
+
+    def test_restore_attempt_rejects_nonobjects(self) -> None:
+        for value in ([], [1], False, True, "text", 0):
+            with self.subTest(value=value):
+                payload = restore_point_to_dict(_full_restore_point())
+                payload["last_restore_attempt"] = value
+                with self.assertRaises(RestorePointParseError):
+                    restore_point_from_dict(payload)
+
+    def test_nonfinite_coverage_counts_raise_parse_error(self) -> None:
+        for field_name in ("captured_supported_count", "total_supported_count"):
+            for value in (float("inf"), float("-inf"), float("nan")):
+                with self.subTest(field=field_name, value=value):
+                    payload = restore_point_to_dict(_full_restore_point())
+                    payload["coverage"][field_name] = value
+                    with self.assertRaises(RestorePointParseError):
+                        restore_point_from_dict(payload)
+
+    def test_absent_coverage_field_map_retains_empty_default(self) -> None:
+        payload = restore_point_to_dict(_full_restore_point())
+        del payload["coverage"]["fields"]
+        self.assertEqual(restore_point_from_dict(payload).coverage.fields, {})
+
+
 class RestoreResultDataclassTests(unittest.TestCase):
     """The RestoreResult dataclass isn't part of the codec but the service
     relies on its shape; lock the field set here so the restore-point UI

@@ -182,7 +182,7 @@ class RestorePointStore:
             except (OSError, ValueError, RecursionError, json.JSONDecodeError) as exc:
                 logger.debug("skipping unreadable file %s while searching: %s", path, exc)
                 continue
-            if payload.get("id") != rp_id:
+            if not isinstance(payload, dict) or payload.get("id") != rp_id:
                 continue
             return restore_point_from_dict(payload)
         raise FileNotFoundError(f"restore point not found: {rp_id!r}")
@@ -197,7 +197,7 @@ class RestorePointStore:
                 payload = read_guarded_json(path)
             except (OSError, ValueError, RecursionError, json.JSONDecodeError):
                 continue
-            if payload.get("id") == rp_id:
+            if isinstance(payload, dict) and payload.get("id") == rp_id:
                 path.unlink()
                 return True
         return False
@@ -229,6 +229,8 @@ class RestorePointStore:
             try:
                 payload = read_guarded_json(path)
             except (OSError, ValueError, RecursionError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
                 continue
             payload_id = payload.get("id")
             if isinstance(payload_id, str):

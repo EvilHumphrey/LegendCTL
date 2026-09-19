@@ -18,6 +18,7 @@ from zd_app.storage.settings_store import initialize_user_data_dir
 
 _LEGACY_SLUG_RE = re.compile(r"[^a-z0-9]+")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 MAX_PROFILE_NAME_LEN = 64
 DEFAULT_IMPORTED_NAME = "Imported Profile"
 TEMP_SUFFIX = ".tmp"
@@ -35,7 +36,6 @@ def slugify(name: str) -> str:
     """
 
     legacy = _LEGACY_SLUG_RE.sub("-", name.strip().lower()).strip("-")
-    normalized = unicodedata.normalize("NFKC", name).strip().casefold()
     # Every nonempty legacy result is a persisted identity, including numeric
     # suffixes from names such as "配置 (2)" -> "2". Preserve it exactly so an
     # upgrade never orphans a profile. New-name collision handling enumerates
@@ -43,6 +43,12 @@ def slugify(name: str) -> str:
     # defaults that propose the same numeric suffix are retried safely.
     if legacy:
         return legacy
+    # JSON can decode an escaped lone surrogate, which is not a Unicode
+    # scalar value and cannot enter the UTF-8 hash below. Existing nonempty
+    # legacy identities above still resolve to their original filenames.
+    if _SURROGATE_RE.search(name):
+        return ""
+    normalized = unicodedata.normalize("NFKC", name).strip().casefold()
     if not any(character.isalnum() for character in normalized):
         return ""
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
@@ -58,7 +64,10 @@ def sanitize_display_name(name: object) -> str:
     ``""`` when the input is unusable; callers pick a fallback.
     """
 
-    if not isinstance(name, str):
+    # Malformed Unicode is unusable just like a non-string name: callers
+    # propose their existing fallback rather than retaining a display name
+    # that cannot be encoded. Valid non-BMP characters are unaffected.
+    if not isinstance(name, str) or _SURROGATE_RE.search(name):
         return ""
     cleaned = _CONTROL_CHARS_RE.sub("", name).strip()
     return cleaned[:MAX_PROFILE_NAME_LEN]

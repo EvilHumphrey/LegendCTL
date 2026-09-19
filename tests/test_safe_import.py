@@ -359,6 +359,26 @@ class PrepareImportGuardTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.audit.source_filename, "apex.json")
 
+    def test_escaped_surrogate_name_previews_and_saves_the_localized_fallback(self) -> None:
+        self.addCleanup(i18n.set_locale, "en")
+        for locale in ("en", "zh-CN", "ko"):
+            i18n.set_locale(locale)
+            fallback = i18n.t("safe_import.default_name")
+            for name in ("\ud800配置", "프로필\udfff", "Apex\ud800", "\ud800"):
+                with self.subTest(locale=locale, name=repr(name)):
+                    path = self._write("incoming.json", json.dumps(_export_dict(name=name)))
+                    result = model.prepare_import(path, existing_names={fallback})
+                    self.assertTrue(result.ok)
+                    self.assertEqual(result.generated_name, f"{fallback} (2)")
+                    self.assertEqual(result.audit.generated_profile_id, slugify(result.generated_name))
+                    with tempfile.TemporaryDirectory() as directory:
+                        store = WrapperProfileStore(directory)
+                        profile = WrapperProfile(result.generated_name, result.profile.snapshot)
+                        saved = store.save_new(profile)
+                        self.assertEqual(saved.stem, result.audit.generated_profile_id)
+                        self.assertEqual(store.load(result.generated_name).name, result.generated_name)
+                        saved.read_text(encoding="utf-8").encode("utf-8")
+
 
 class BadgeLogicTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -474,6 +494,30 @@ class PreviewRenderTests(_DpgTestCase):
         self.assertTrue(dpg.does_item_exist("safe_import_raw_json"))
         self.assertTrue(dpg.does_item_exist("safe_import_save_new_button"))
         self._assert_no_placeholders(safe_import.PREVIEW_MODAL)
+
+    def test_safety_only_fields_are_disclosed_before_save_in_each_locale(self) -> None:
+        self.addCleanup(i18n.set_locale, "en")
+        for locale in ("en", "zh-CN", "ko"):
+            with self.subTest(locale=locale):
+                shell = make_shell(settings_service=MagicMock())
+                i18n.set_locale(locale)
+                raw = _export_dict()
+                raw["shell"] = "foreign payload must never be shown"
+                raw["snapshot"]["hid_raw"] = "foreign payload must never be shown"
+                self._scan(shell, raw)
+                result = shell._safe_import_result
+                self.assertTrue(result.ok)
+                self.assertFalse(result.has_automation)
+                self.assertEqual(result.unknown_fields, [])
+                summary = self._labels("safe_import_summary_card")
+                self.assertIn(i18n.t("safe_import.summary.blocked_fields", count=2), summary)
+                diff = "\n".join(self._labels("safe_import_diff_region"))
+                self.assertIn("shell", diff)
+                self.assertIn("hid_raw", diff)
+                self.assertNotIn("foreign payload", diff)
+                self.assertNotIn("foreign payload", json.dumps(result.profile.to_dict()))
+                self._assert_no_placeholders(safe_import.PREVIEW_MODAL)
+                safe_import.close_modals()
 
     def test_preview_renders_8point_row_without_placeholders(self) -> None:
         # End-to-end: an imported 8-point curve renders a labeled diff row

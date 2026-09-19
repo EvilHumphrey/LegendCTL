@@ -302,7 +302,11 @@ _PATH_ANCHOR = (
 # still reduce to its basename, not leak ``Bob``). Requiring a real whitespace
 # gap before the next anchor keeps those single paths intact while still
 # splitting genuinely separate paths.
-_PATH_BODY = r"(?:(?![^\S\r\n\t]+" + _PATH_ANCHOR + r")[^\"<>|\r\n\t])*"
+# Check the gap only at the START of a whitespace run. Without the fixed-width
+# look-behind, a run with no following anchor is rescanned at every character,
+# making a long pasted note quadratic. Later positions in the same run cannot
+# find a different following anchor, so skipping them preserves token boundaries.
+_PATH_BODY = r"(?:(?!(?<![^\S\r\n\t])[^\S\r\n\t]+" + _PATH_ANCHOR + r")[^\"<>|\r\n\t])*"
 _PATH_TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9_])" + _PATH_ANCHOR + _PATH_BODY,
     re.IGNORECASE,

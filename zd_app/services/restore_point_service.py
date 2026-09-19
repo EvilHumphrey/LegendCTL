@@ -388,13 +388,13 @@ class RestorePointService:
         if self._prune_on_capture:
             # Retention runs at capture level (not store.save) so every hook
             # path + restore's internal before_restore capture share one
-            # enforcement point. No ``protect`` arg: the fresh capture is the
-            # newest file (phase-1 pruning is auto-RPs oldest-first above
-            # max_count) and prune() itself protects the newest
-            # first_readable_connect per device. A prune failure must never
-            # fail or roll back the capture that just succeeded.
+            # enforcement point. Explicitly keep the returned checkpoint: if
+            # manual points fill the count cap, or protected baselines fill
+            # the disk cap, even the newest auto point is a prune candidate.
+            # Callers use this object to admit their dependent write operation.
+            # A prune failure must never fail or roll back this saved capture.
             try:
-                pruned = self._store.prune()
+                pruned = self._store.prune(protect={rp.id})
             except Exception:  # noqa: BLE001
                 logger.warning(
                     "restore-point retention prune failed after capture %s",
@@ -461,7 +461,10 @@ class RestorePointService:
         before_rp = self.capture(
             before_trigger,
             title=f"Before restoring {target_rp.title}",
-            device_identity=target_rp.device_identity,
+            # This service reads settings, not current device metadata. The
+            # target's historical identity cannot describe this fresh capture
+            # after a firmware change or an intentional cross-device restore.
+            device_identity=_unknown_device_identity(),
             presence_guard=presence_guard,
         )
         before_id = before_rp.id if before_rp is not None else None
@@ -514,7 +517,7 @@ class RestorePointService:
             presence_guard,
             writes_may_have_occurred=True,
         )
-        readback, _, read_errors = self._do_fresh_read()
+        readback, read_success, read_errors = self._do_fresh_read()
         _require_restore_presence(
             presence_guard,
             writes_may_have_occurred=True,
@@ -574,6 +577,7 @@ class RestorePointService:
             completed_at=completed_at,
             sensitivity_downgrades=apply_result.sensitivity_downgrades,
             unverified_writes=unverified_writes,
+            readback_snapshot=(readback if _any_read_succeeded(read_success) else None),
         )
 
         # 6. Persist RestoreAttemptRecord onto the restore point.
