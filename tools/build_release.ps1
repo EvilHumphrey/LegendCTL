@@ -76,7 +76,22 @@ if (-not (Test-Path -LiteralPath $releaseLock) -or -not (Test-Path -LiteralPath 
 }
 $expectedLockHash = (Get-FileHash -LiteralPath $releaseLock -Algorithm SHA256).Hash.ToLowerInvariant()
 $recordedLockHash = (Get-Content -LiteralPath $lockMarker -Raw).Trim()
-if ($recordedLockHash -ne $expectedLockHash) {
+# Existing setup markers hash checkout bytes. A text checkout may have CRLF
+# while this raw Git export has LF. Accept only exact raw/LF/CRLF encodings of
+# this same lock; every pin, wheel hash and other character stays unchanged.
+$lockEncoding = New-Object System.Text.UTF8Encoding($false, $true)
+$lockText = $lockEncoding.GetString([IO.File]::ReadAllBytes($releaseLock))
+$lfLockText = $lockText.Replace("`r`n", "`n")
+$acceptedLockHashes = @($expectedLockHash)
+$lockHasher = [Security.Cryptography.SHA256]::Create()
+try {
+    foreach ($variant in @($lfLockText, $lfLockText.Replace("`n", "`r`n"))) {
+        $acceptedLockHashes += [BitConverter]::ToString($lockHasher.ComputeHash($lockEncoding.GetBytes($variant))).Replace("-", "").ToLowerInvariant()
+    }
+} finally {
+    $lockHasher.Dispose()
+}
+if ($recordedLockHash -notin $acceptedLockHashes) {
     Write-Error "The release venv does not match requirements-release.lock; run ``tools\setup_dev_env.ps1 -Recreate``."
 }
 
@@ -92,7 +107,6 @@ if ($version -notmatch '^\d+\.\d+\.\d+(?:[a-zA-Z0-9.+-]*)$') {
 
 $buildCommit = $ExpectedCommit
 $buildDate = Get-Date -Format "yyyy-MM-dd"
-$originalVersionPy = $versionPy
 $patchedVersionPy = $versionPy -replace '__build_commit__\s*=\s*"[^"]*"', "__build_commit__ = `"$buildCommit`""
 if ($patchedVersionPy -eq $versionPy -and $versionPy -notmatch '__build_commit__') {
     $patchedVersionPy = $patchedVersionPy.TrimEnd() + "`r`n__build_commit__ = `"$buildCommit`"`r`n"
@@ -101,7 +115,10 @@ $patchedVersionPy = $patchedVersionPy -replace '__build_date__\s*=\s*"[^"]*"', "
 if ($patchedVersionPy -notmatch '__build_date__') {
     $patchedVersionPy = $patchedVersionPy.TrimEnd() + "`r`n__build_date__ = `"$buildDate`"`r`n"
 }
-Set-Content "zd_app\version.py" -Value $patchedVersionPy -Encoding UTF8 -NoNewline
+# PS5.1's Set-Content -Encoding UTF8 emits a BOM, which ast.parse(str) rejects.
+# WriteAllText preserves the supplied newline text and is BOM-free on PS5/PS7.
+$versionEncoding = New-Object System.Text.UTF8Encoding($false)
+[IO.File]::WriteAllText((Join-Path $repoRoot "zd_app\version.py"), $patchedVersionPy, $versionEncoding)
 
 Write-Host "Building ZDUltimateLegend v$version" -ForegroundColor Cyan
 

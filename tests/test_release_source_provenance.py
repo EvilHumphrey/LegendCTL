@@ -333,6 +333,17 @@ class BuilderAdmissionTests(RepositoryFixture):
 
 
 class PowerShellParserTests(unittest.TestCase):
+    def test_release_workflow_keeps_test_log_outside_source_with_same_evaluator_path(self):
+        workflow = (ROOT / ".github/workflows/release-build.yml").read_text(encoding="utf-8")
+        step = workflow.split("- name: Run test suite before building", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn('$testLog = Join-Path $env:RUNNER_TEMP "legendctl-release-tests.txt"', step)
+        self.assertIn("Tee-Object -FilePath $testLog", step)
+        self.assertIn("-LogPath $testLog", step)
+        self.assertIn("-ProcessExitCode $code", step)
+        self.assertIn("-MinimumTestCount 3000", step)
+        self.assertIn("exit $LASTEXITCODE", step)
+        self.assertNotIn("test_output.txt", step)
+
     def test_builder_never_recursively_replaces_checkout_output_roots(self):
         # Source contract with a concrete failing baseline operation: its
         # Remove-Item -Recurse build/dist traverses caller-owned output paths.
@@ -356,6 +367,64 @@ class PowerShellParserTests(unittest.TestCase):
                         "$tokens=$null; $parseErrors=$null; [void][System.Management.Automation.Language.Parser]::ParseFile($env:PROVENANCE_PARSE_FILE,[ref]$tokens,[ref]$parseErrors); if ($parseErrors.Count) { $parseErrors | Out-String | Write-Error; exit 1 }"],
                         env={**os.environ, "PROVENANCE_PARSE_FILE": str(ROOT / "tools" / name)}, capture_output=True)
                     self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+
+
+@unittest.skipUnless(os.name == "nt", "real Windows PowerShell worker prefix")
+class WorkerMetadataTests(unittest.TestCase):
+    """Execute the real worker only through lock admission and metadata stamp.
+
+    The extracted prefix ends before the first pip/compiler invocation. A
+    placeholder executable is sufficient: these tests never launch it.
+    """
+    LOCK = b"fixture-package==1.2.3 \\\n    --hash=sha256:" + b"a" * 64 + b"\n"
+    COMMIT = "1234567" + "a" * 33
+
+    def worker_prefix(self, root: Path, marker_lock: bytes):
+        source = root / "source"
+        (source / "tools").mkdir(parents=True)
+        (source / "zd_app").mkdir()
+        version = source / "zd_app/version.py"
+        version.write_bytes(b'__version__ = "1.2.3"\n__build_commit__ = ""\n__build_date__ = ""\n')
+        (source / "requirements-release.lock").write_bytes(self.LOCK)
+        python = root / "venv/Scripts/python.exe"
+        python.parent.mkdir(parents=True)
+        python.write_bytes(b"not executed by this prefix fixture")
+        (root / "venv/.legendctl-release-lock.sha256").write_text(hashlib.sha256(marker_lock).hexdigest())
+        body = (ROOT / "tools/build_release.ps1").read_text(encoding="utf-8")
+        prefix = body.split('Write-Host "Building ZDUltimateLegend', 1)[0]
+        self.assertNotEqual(prefix, body, "worker extraction boundary changed")
+        worker = source / "tools/build_release.ps1"
+        worker.write_text(prefix, encoding="utf-8")
+        result = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                                 str(worker), "-FromVerifiedSnapshot", "-BuildPython", str(python),
+                                 "-ExpectedCommit", self.COMMIT], capture_output=True,
+                                env={key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"})
+        return result, version
+
+    def test_ps51_stamp_is_accepted_by_real_trust_metadata_reader(self):
+        with tempfile.TemporaryDirectory(prefix="legendctl-worker-prefix-") as temporary:
+            result, version = self.worker_prefix(Path(temporary), self.LOCK)
+            self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+            tool_spec = importlib.util.spec_from_file_location("prefix_trust_tool", ROOT / "tools/generate_trust_manifest.py")
+            module = importlib.util.module_from_spec(tool_spec)
+            tool_spec.loader.exec_module(module)
+            self.assertEqual(module._version_metadata(version), ("1.2.3", self.COMMIT))
+            self.assertFalse(version.read_bytes().startswith(b"\xef\xbb\xbf"))
+
+    def test_legacy_crlf_checkout_marker_accepts_identical_raw_lf_dependencies(self):
+        with tempfile.TemporaryDirectory(prefix="legendctl-worker-prefix-") as temporary:
+            result, _ = self.worker_prefix(Path(temporary), self.LOCK.replace(b"\n", b"\r\n"))
+            self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+
+    def test_pin_hash_and_non_newline_edits_never_match_environment_marker(self):
+        for changed in (self.LOCK.replace(b"1.2.3", b"1.2.4"),
+                        self.LOCK.replace(b"a" * 64, b"b" * 64),
+                        self.LOCK.replace(b"package", b"pack\rage")):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory(prefix="legendctl-worker-prefix-") as temporary:
+                result, version = self.worker_prefix(Path(temporary), changed)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("does not match requirements-release.lock", result.stderr.decode(errors="replace"))
+                self.assertIn(b'__build_commit__ = ""', version.read_bytes())
 
 
 if __name__ == "__main__":

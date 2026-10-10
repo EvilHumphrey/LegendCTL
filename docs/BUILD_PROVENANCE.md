@@ -5,6 +5,10 @@ committed checkout. The setup script still uses the public release lock, a
 hash-verified wheelhouse and an offline install into `.venv-zd`. The builder
 checks that environment's lock marker against the **exported** release lock,
 runs `pip check` and `pip-audit`, and never resolves or installs packages.
+Existing setup markers may hash an LF or CRLF checkout of that lock. The
+builder accepts SHA-256 only for its exact raw bytes or LF/CRLF-only variants;
+it does not normalize any other character, pin, or wheel hash. This preserves
+existing environments without weakening the locked dependency identity.
 
 The default artifact destination is `dist`. It must not exist. To preserve an
 older build, choose a new location with `-ArtifactDestination <new-directory>`;
@@ -72,7 +76,11 @@ do not assume the installer helper consumes it. A compiler reporting success
 without its expected installer is now a build failure. If Inno Setup is absent,
 the existing ZIP-only warning/behavior remains.
 
-The hosted release workflow has its own checkout and attestation path. This
-local builder does not push, publish, tag, dispatch workflows, or prove hardware
+The hosted release workflow calls this same builder from its checked-out ref;
+its test log lives under `RUNNER_TEMP` so it cannot dirty admitted source.
+Its later checksum regeneration and attestation/publication steps are separate.
+The local completion receipt describes files at builder completion; the hosted
+workflow does not publish that receipt and subsequently rewrites its checksum
+file. This builder does not push, publish, tag, dispatch workflows, or prove hardware
 behavior. Qualification still requires the project's release gates and an
 actual compiler/packager rehearsal on the reviewed candidate.
