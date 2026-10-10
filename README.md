@@ -168,7 +168,8 @@ how releases are (will be) signed.
    [SmartScreen prompt](#first-run-smartscreen-and-verifying-your-download) — verify
    your download and trust the source first, then choose **More info → Run anyway**.
 3. The app auto-reads current controller state on connect.
-4. Adjust settings via the sidebar tabs; click Apply per-tab or in the footer to write.
+4. Adjust settings via the sidebar tabs. Controls labeled as live write immediately;
+   for other settings, use the tab's Apply button or apply a saved profile from the footer.
 
 ## Features
 
