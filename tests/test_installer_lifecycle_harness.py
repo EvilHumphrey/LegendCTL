@@ -44,6 +44,12 @@ foreach($statement in $ast.EndBlock.Statements) {
         . ([scriptblock]::Create($statement.Extent.Text))
     }
 }
+function New-SyntheticUninstallLog([string]$Original) {
+    $messages=@('Log opened. (Time zone: UTC+00:00)', 'Setup version: Inno Setup version 6.7.1',
+        ('Original Uninstall EXE: '+$Original), 'Starting the uninstallation process.',
+        'Uninstallation process succeeded.', 'Removed all? Yes', 'Need to restart Windows? No', 'Log closed.')
+    return (($messages | ForEach-Object {'2026-01-01 00:00:00.000   '+$_}) -join "`r`n")+"`r`n"
+}
 """
         test_script = self.root / "case.ps1"
         test_script.write_text(prefix + body, encoding="utf-8")
@@ -193,7 +199,7 @@ function Start-Process {
     }
     [IO.File]::WriteAllText((Join-Path $testRoot 'mock.setup.log'),'synthetic log')
     $p=[pscustomobject]@{Id=123; ExitCode=3010}
-    $p | Add-Member ScriptMethod WaitForExit {param($ms) if($ms -ne 30000) {throw 'unbounded wait'}; return $true}
+    $p | Add-Member ScriptMethod WaitForExit {param($ms) if($ms -le 0 -or $ms -gt 30000) {throw 'unbounded wait'}; return $true}
     $p | Add-Member ScriptMethod Refresh {}
     return $p
 }
@@ -219,6 +225,132 @@ try { Invoke-LifecycleProcess 'timeout' $exe (Get-LifecycleHash $exe) } catch { 
 if(-not $rejected) { throw 'timeout incorrectly passed' }
 $r=Get-Content (Join-Path $testRoot 'timeout.process.json') -Raw | ConvertFrom-Json
 if(-not $r.timed_out -or $r.completed -or $null -ne $r.exit_code) { throw 'bad timeout receipt' }
+""")
+        self.assert_success(result)
+
+    def test_uninstall_launcher_exit_waits_for_writer_close_before_hashing_or_completion(self):
+        result = self.run_ps("""
+$script:Evidence=$testRoot; $TimeoutSeconds=30
+$exe=Join-Path $testRoot 'synthetic-uninstaller.txt'
+[IO.File]::WriteAllText($exe,'not executable')
+$script:polls=0; $script:writer=$null
+function Start-Process {
+    $log=Join-Path $testRoot 'uninstall.setup.log'
+    $script:writer=[IO.File]::Open($log,'Create','Write','Read')
+    $bytes=[Text.Encoding]::UTF8.GetBytes((New-SyntheticUninstallLog $exe))
+    $script:writer.Write($bytes,0,$bytes.Length); $script:writer.Flush()
+    $p=[pscustomobject]@{Id=123; ExitCode=0}
+    $p | Add-Member ScriptMethod WaitForExit {param($ms) return $true}
+    $p | Add-Member ScriptMethod Refresh {}
+    return $p
+}
+function Start-Sleep {
+    param($Milliseconds)
+    $script:polls++
+    if($Milliseconds -le 0 -or $Milliseconds -gt 50) {throw 'invalid polling interval'}
+    if($Receipt.completed -or $Receipt.launcher_exit_code -ne 0 -or $null -ne $Receipt.worker_exit_code) {
+        throw 'launcher exit incorrectly promoted to worker completion'
+    }
+    $script:writer.Dispose(); $script:writer=$null
+}
+try {$r=Invoke-LifecycleProcess 'uninstall' $exe (Get-LifecycleHash $exe) -Uninstall}
+finally {if($script:writer){$script:writer.Dispose()}}
+if($script:polls -ne 1 -or $r.handoff_polls -ne 2 -or -not $r.completed -or $r.timed_out) {throw 'handoff not observed'}
+if($r.worker_completion -cne 'inno-6.7.1-closed-log-success-no-restart' -or $null -ne $r.worker_exit_code) {throw 'invented child exit'}
+if($r.log_sha256 -cne (Get-LifecycleHash (Join-Path $testRoot 'uninstall.setup.log'))) {throw 'completion hash differs'}
+""")
+        self.assert_success(result)
+
+    def test_closed_log_accepts_pinned_success_and_rejects_other_outcomes_or_identity(self):
+        result = self.run_ps(r"""
+$exe=Join-Path $testRoot 'synthetic-uninstaller.txt'
+$path=Join-Path $testRoot 'synthetic.log'
+$valid=New-SyntheticUninstallLog $exe
+[IO.File]::WriteAllText($path,$valid)
+$r=Read-ClosedUninstallLog $path $exe
+if(-not $r -or $r.log_sha256 -cne (Get-LifecycleHash $path)) {throw 'valid log rejected'}
+foreach($case in @('wrong-version','wrong-owner','failed','restart','partial-removal','late-exception','untimestamped')) {
+    $text=$valid
+    if($case -eq 'wrong-version') {$text=$text.Replace('version 6.7.1','version 6.7.2')}
+    if($case -eq 'wrong-owner') {$text=$text.Replace($exe,($exe+'-other'))}
+    if($case -eq 'failed') {$text=$text.Replace('process succeeded.','process failed.')}
+    if($case -eq 'restart') {$text=$text.Replace('restart Windows? No','restart Windows? Yes')}
+    if($case -eq 'partial-removal') {$text=$text.Replace('Removed all? Yes','Removed all? No')}
+    if($case -eq 'late-exception') {$text=$text.Replace('Log closed.',"Exception message:`r`n2026-01-01 00:00:00.000   Log closed.")}
+    if($case -eq 'untimestamped') {$text=$text.Replace('2026-01-01 00:00:00.000   Removed all? Yes','Removed all? Yes')}
+    [IO.File]::WriteAllText($path,$text)
+    $rejected=$false
+    try {$null=Read-ClosedUninstallLog $path $exe} catch {$rejected=$true}
+    if(-not $rejected) {throw "bad completion evidence accepted: $case"}
+}
+[IO.File]::WriteAllText($path,($valid -replace '[^\r\n]*Log closed\.\r\n',''))
+if($null -ne (Read-ClosedUninstallLog $path $exe)) {throw 'partial log accepted as complete'}
+if($null -ne (Read-ClosedUninstallLog (Join-Path $testRoot 'absent.log') $exe)) {throw 'absent log accepted'}
+""")
+        self.assert_success(result)
+
+    def test_uninstall_handoff_uses_remaining_overall_budget_and_preserves_unknown_worker_exit(self):
+        result = self.run_ps("""
+$script:Evidence=$testRoot; $TimeoutSeconds=1
+$exe=Join-Path $testRoot 'synthetic-uninstaller.txt'
+[IO.File]::WriteAllText($exe,'not executable')
+function Start-Process {
+    [IO.File]::WriteAllText((Join-Path $testRoot 'budget.setup.log'),'unfinished worker log')
+    Start-Sleep -Milliseconds 900
+    $p=[pscustomobject]@{Id=123; ExitCode=0}
+    $p | Add-Member ScriptMethod WaitForExit {param($ms) if($ms -lt 0 -or $ms -gt 100) {throw 'launcher received a fresh budget'}; return $true}
+    $p | Add-Member ScriptMethod Refresh {}
+    return $p
+}
+$rejected=$false
+try {$null=Invoke-LifecycleProcess 'budget' $exe (Get-LifecycleHash $exe) -Uninstall} catch {$rejected=$true}
+if(-not $rejected){throw 'unfinished worker passed'}
+$r=Get-Content (Join-Path $testRoot 'budget.process.json') -Raw | ConvertFrom-Json
+if($r.completed -or -not $r.timed_out -or $r.launcher_exit_code -ne 0 -or $r.exit_code -ne 0 -or $null -ne $r.worker_exit_code) {
+    throw 'handoff timeout receipt confuses launcher and worker'
+}
+if($r.worker_completion -cne 'timeout-waiting-for-closed-log' -or $r.handoff_polls -gt 2) {throw 'handoff restarted timeout budget'}
+""")
+        self.assert_success(result)
+
+    def test_closed_failed_uninstall_never_sets_completed_even_with_launcher_exit_zero(self):
+        result = self.run_ps("""
+$script:Evidence=$testRoot; $TimeoutSeconds=30
+$exe=Join-Path $testRoot 'synthetic-uninstaller.txt'
+[IO.File]::WriteAllText($exe,'not executable')
+function Start-Process {
+    $text=(New-SyntheticUninstallLog $exe).Replace('process succeeded.','process failed.')
+    [IO.File]::WriteAllText((Join-Path $testRoot 'failed.setup.log'),$text)
+    $p=[pscustomobject]@{Id=123; ExitCode=0}
+    $p | Add-Member ScriptMethod WaitForExit {param($ms) return $true}
+    $p | Add-Member ScriptMethod Refresh {}
+    return $p
+}
+$rejected=$false
+try {$null=Invoke-LifecycleProcess 'failed' $exe (Get-LifecycleHash $exe) -Uninstall} catch {$rejected=$true}
+if(-not $rejected) {throw 'worker failure passed'}
+$r=Get-Content (Join-Path $testRoot 'failed.process.json') -Raw | ConvertFrom-Json
+if($r.completed -or $r.launcher_exit_code -ne 0 -or $r.worker_completion -cne 'rejected-completion-evidence') {throw 'wrong failure receipt'}
+""")
+        self.assert_success(result)
+
+    def test_locked_log_hash_failure_preserves_primary_error_and_partial_manifest(self):
+        result = self.run_ps("""
+$script:Evidence=$testRoot
+$path=Join-Path $testRoot 'active.setup.log'
+$writer=[IO.File]::Open($path,'Create','Write','None')
+$summary=[ordered]@{status='FAIL';error='primary worker timeout'}
+try {
+    try {try {throw 'primary worker timeout'} finally {Complete-LifecycleEvidence $summary}}
+    catch {if($_.Exception.Message -cne 'primary worker timeout') {throw 'primary failure masked'}}
+    $r=Get-Content (Join-Path $testRoot 'summary.json') -Raw | ConvertFrom-Json
+    if($r.evidence_hashes_complete -or $r.error -cne 'primary worker timeout') {throw 'incomplete evidence mislabeled'}
+    $manifest=Get-Content (Join-Path $testRoot 'evidence-sha256.json') -Raw | ConvertFrom-Json
+    if(-not $manifest.'summary.json' -or -not $r.evidence_hash_errors.'active.setup.log') {throw 'partial manifest missing'}
+    $rejected=$false
+    try {Complete-LifecycleEvidence ([ordered]@{status='PASS'})} catch {$rejected=$true}
+    if(-not $rejected) {throw 'success with incomplete hashing accepted'}
+} finally {$writer.Dispose()}
 """)
         self.assert_success(result)
 

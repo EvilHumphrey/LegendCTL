@@ -57,6 +57,35 @@ replacement. Uninstall is resolved only to the created canonical installation,
 hash-recorded, and verified immediately before process creation. Its file lock
 is released after process launch so the uninstaller can delete itself.
 
+Inno's original uninstaller can return before its worker finishes cleanup.
+`exit_code` and `launcher_exit_code` therefore describe only that original
+process. For uninstall, `completed` stays false until the worker's log can be
+opened for read while excluding writers/deletion, contains exactly the pinned
+6.7.1 success/removed-all/no-restart/final-close markers, and identifies the
+owned original uninstaller. The log is hashed through that same held handle.
+The existing full payload/registry/shortcut/data assertions then run unchanged.
+`worker_exit_code` remains null: the harness does not observe that process's
+exit status. `worker_completion` records the narrower closed-log evidence.
+
+The launcher wait and worker handoff share one monotonic timeout budget.
+Polling sleeps are scheduling intervals, not completion evidence. Receipts
+include launcher exit time, handoff polls/wait time, and timeout state. Missing,
+incomplete, writer-held, wrong-version/identity or failed logs cannot pass.
+An active log on failure may also be unavailable for evidence hashing: the
+summary marks those hashes incomplete and records each omitted file, preserving
+the original failure and remaining hashes. Incomplete hashing cannot produce
+a PASS verdict.
+
+This is a deliberately **Inno 6.7.1-specific** completion check, not a general
+log-format API. Official [uninstaller exit-code documentation](https://jrsoftware.org/ishelp/topic_uninstexitcodes.htm)
+describes the asynchronous cleanup; [log documentation](https://jrsoftware.org/ishelp/topic_uninstcmdline.htm)
+warns that its format can change. The pinned [uninstall implementation](https://github.com/jrsoftware/issrc/blob/is-6_7_1/Projects/Src/Setup.Uninstall.pas)
+signals the original process before final cleanup, while [logging finalization](https://github.com/jrsoftware/issrc/blob/is-6_7_1/Projects/Src/Setup.LoggingFunc.pas)
+writes the terminal close marker and closes its writer. Re-review this source
+boundary and refresh the strict recognizer/fixtures when changing the compiler
+pin. Unknown formats fail closed; ordinary earlier directory-deletion retries
+are allowed, but final success and unchanged footprint checks remain mandatory.
+
 1. Rejection controls: writable `/DIR`, hostile `/LOADINF`, synthetic HKLM64
    previous custom registration, and app-root junction. Each requires the
    production policy's exact expected log reason, Preparing-to-Install exit 7,

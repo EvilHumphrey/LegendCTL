@@ -75,6 +75,30 @@ function Write-LifecycleJson([string]$Path, $Value) {
     [IO.File]::WriteAllText($Path, $json, [Text.UTF8Encoding]::new($false))
 }
 
+function Complete-LifecycleEvidence([Collections.IDictionary]$Summary) {
+    $hashes = [ordered]@{}
+    $unavailable = [ordered]@{}
+    $wasPassing = $Summary.status -ceq 'PASS'
+    foreach ($file in @(Get-ChildItem -LiteralPath $script:Evidence -File | Sort-Object Name)) {
+        if ($file.Name -in @('summary.json','evidence-sha256.json')) { continue }
+        try { $hashes[$file.Name] = Get-LifecycleHash $file.FullName }
+        catch { $unavailable[$file.Name] = $_.Exception.Message }
+    }
+    # An active worker can still own its log on timeout. Retain partial hashes
+    # and the primary failure rather than throwing a second sharing violation.
+    $Summary.evidence_hashes_complete = $unavailable.Count -eq 0
+    $Summary.evidence_hash_errors = $unavailable
+    if ($wasPassing -and $unavailable.Count) {
+        $Summary.status = 'FAIL'
+        $Summary.error = 'Evidence hashing incomplete; lifecycle cannot pass.'
+    }
+    $summaryPath = Join-Path $script:Evidence 'summary.json'
+    Write-LifecycleJson $summaryPath $Summary
+    $hashes['summary.json'] = Get-LifecycleHash $summaryPath
+    Write-LifecycleJson (Join-Path $script:Evidence 'evidence-sha256.json') $hashes
+    if ($wasPassing -and $unavailable.Count) { throw $Summary.error }
+}
+
 function Get-LifecycleTree([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return @() }
     $root = [IO.Path]::GetFullPath($Path).TrimEnd('\')
@@ -136,6 +160,81 @@ function Assert-SameSnapshot($Before, $After) {
         (ConvertTo-Json -InputObject $After -Depth 30 -Compress)) 'Rejected setup mutated watched state.'
 }
 
+function Read-ClosedUninstallLog([string]$Path, [string]$OriginalExecutable) {
+    $stream = $null
+    try {
+        # Inno 6.7.1 holds a write handle until finalization. FileShare.Read
+        # excludes both an active writer and replacement throughout read/hash.
+        try { $stream = [IO.File]::Open($Path, 'Open', 'Read', 'Read') }
+        catch [IO.IOException] {
+            $code = $_.Exception.HResult -band 0xFFFF
+            if ($code -in @(2,3,32,33)) { return $null }
+            throw
+        }
+        Require-Lifecycle ($stream.Length -le 16MB) 'Uninstall log exceeds the qualified size limit.'
+        $reader = [IO.StreamReader]::new($stream, [Text.UTF8Encoding]::new($false,$true), $true, 4096, $true)
+        try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+        $lines = @($text -split '\r\n' | Where-Object { $_.Length -gt 0 })
+        $prefix = '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}   '
+        # An unlocked partial log is not a completion signal either.
+        if (-not $lines.Count -or $lines[-1] -cnotmatch ($prefix + 'Log closed\.$')) { return $null }
+        Require-Lifecycle (@($lines | Where-Object {$_ -cnotmatch $prefix}).Count -eq 0) `
+            'Closed uninstall log does not match the pinned timestamped-line format.'
+        $messages = @($lines | ForEach-Object { $_ -creplace $prefix, '' })
+        Require-Lifecycle ($messages.Count -ge 8 -and
+            ($messages[-4..-1] -join "`n") -ceq
+            "Uninstallation process succeeded.`nRemoved all? Yes`nNeed to restart Windows? No`nLog closed.") `
+            'Closed uninstall log lacks the pinned successful no-restart completion suffix.'
+        foreach ($message in @('Setup version: Inno Setup version 6.7.1',
+                              'Starting the uninstallation process.', 'Log closed.',
+                              'Uninstallation process succeeded.', 'Removed all? Yes', 'Need to restart Windows? No')) {
+            Require-Lifecycle (@($messages | Where-Object {$_ -ceq $message}).Count -eq 1) `
+                'Uninstall completion log has missing or repeated pinned markers.'
+        }
+        $original = @($messages | Where-Object {$_ -clike 'Original Uninstall EXE: *'})
+        Require-Lifecycle ($original.Count -eq 1 -and
+            $original[0] -ieq ('Original Uninstall EXE: ' + $OriginalExecutable)) `
+            'Completion log does not identify the owned uninstaller.'
+        Require-Lifecycle (@($messages | Where-Object {
+            $_ -cmatch '^(Exception message:|Removed all\? No|Need to restart Windows\? Yes)' -or
+            $_ -cmatch 'raised an exception'
+        }).Count -eq 0) 'Uninstall completion log contains a failure or restart requirement.'
+        $stream.Position = 0
+        $hasher = [Security.Cryptography.SHA256]::Create()
+        try { $hash = [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-','').ToLowerInvariant() }
+        finally { $hasher.Dispose() }
+        return @{method='inno-6.7.1-closed-log-success-no-restart'; log_sha256=$hash}
+    } finally { if ($stream) { $stream.Dispose() } }
+}
+
+function Wait-UninstallCompletion([string]$Log, [string]$OriginalExecutable,
+    [Diagnostics.Stopwatch]$Timer, [long]$BudgetMilliseconds, [Collections.IDictionary]$Receipt) {
+    $handoffStart = $Timer.ElapsedMilliseconds
+    $Receipt.handoff_wait_started_utc = [DateTime]::UtcNow.ToString('o')
+    $Receipt.handoff_polls = 0
+    $Receipt.worker_completion = 'pending-closed-log'
+    $Receipt.worker_exit_code = $null # No handle to the worker: never invent its exit status.
+    try {
+        while ($Timer.ElapsedMilliseconds -lt $BudgetMilliseconds) {
+            $Receipt.handoff_polls++
+            $completion = Read-ClosedUninstallLog $Log $OriginalExecutable
+            if ($completion -and $Timer.ElapsedMilliseconds -lt $BudgetMilliseconds) {
+                $Receipt.worker_completion = $completion.method
+                $Receipt.log_sha256 = $completion.log_sha256
+                return
+            }
+            $remaining = $BudgetMilliseconds - $Timer.ElapsedMilliseconds
+            if ($remaining -gt 0) { Start-Sleep -Milliseconds ([int][Math]::Min(50, $remaining)) }
+        }
+        $Receipt.timed_out = $true
+        $Receipt.worker_completion = 'timeout-waiting-for-closed-log'
+        throw 'Uninstaller handoff did not complete within the original process timeout budget.'
+    } catch {
+        if (-not $Receipt.timed_out) { $Receipt.worker_completion = 'rejected-completion-evidence' }
+        throw
+    } finally { $Receipt.handoff_wait_ms = $Timer.ElapsedMilliseconds - $handoffStart }
+}
+
 function Invoke-LifecycleProcess([string]$Id, [string]$Executable, [string]$Hash,
     [string[]]$Extra = @(), [switch]$Uninstall) {
     $null = Assert-OrdinaryLocalPath $Executable
@@ -145,7 +244,11 @@ function Invoke-LifecycleProcess([string]$Id, [string]$Executable, [string]$Hash
     $log = Join-Path $script:Evidence ($Id + '.setup.log')
     $receipt = [ordered]@{id=$Id; executable=[IO.Path]::GetFileName($Executable); sha256=$Hash;
         started_utc=[DateTime]::UtcNow.ToString('o'); exit_code=$null; timed_out=$false; completed=$false}
+    if ($Uninstall) { $receipt.worker_exit_code=$null; $receipt.worker_completion='not-observed' }
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $budgetMilliseconds = [long]$TimeoutSeconds * 1000
     try {
+        Require-Lifecycle (-not (Test-Path -LiteralPath $log)) 'Refusing a pre-existing case log.'
         Require-Lifecycle ((Get-LifecycleHash $Executable) -ceq $Hash.ToLowerInvariant()) 'Executable hash changed before execution.'
         $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/LOG="' + $log + '"'))
         if (-not $Uninstall) {
@@ -159,7 +262,8 @@ function Invoke-LifecycleProcess([string]$Id, [string]$Executable, [string]$Hash
         # now owns the verified executable; retaining a deny-delete handle
         # would itself break the lifecycle test.
         if ($Uninstall) { $lock.Dispose(); $lock = $null }
-        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+        $remaining = [Math]::Max(0, $budgetMilliseconds - $timer.ElapsedMilliseconds)
+        if (-not $process.WaitForExit([int]$remaining)) {
             $receipt.timed_out = $true
             # Do not kill an unknown child tree. Preserve evidence; the owning
             # disposable job is failed and its platform handles job teardown.
@@ -167,11 +271,20 @@ function Invoke-LifecycleProcess([string]$Id, [string]$Executable, [string]$Hash
         }
         $process.Refresh()
         $receipt.exit_code = $process.ExitCode
+        $receipt.launcher_exit_code = $process.ExitCode
+        $receipt.launcher_exited_utc = [DateTime]::UtcNow.ToString('o')
+        if ($Uninstall) {
+            Require-Lifecycle ($process.ExitCode -eq 0) 'Uninstaller launcher failed; worker completion is unproven.'
+            Wait-UninstallCompletion $log $Executable $timer $budgetMilliseconds $receipt
+        } else {
+            Require-Lifecycle (Test-Path -LiteralPath $log -PathType Leaf) 'Installer produced no required log.'
+            $receipt.log_sha256 = Get-LifecycleHash $log
+        }
         $receipt.completed = $true
-        Require-Lifecycle (Test-Path -LiteralPath $log -PathType Leaf) 'Installer produced no required log.'
-        $receipt.log_sha256 = Get-LifecycleHash $log
         return $receipt
     } finally {
+        $timer.Stop()
+        $receipt.elapsed_ms = $timer.ElapsedMilliseconds
         if ($lock) { $lock.Dispose() }
         $receipt.finished_utc = [DateTime]::UtcNow.ToString('o')
         Write-LifecycleJson (Join-Path $script:Evidence ($Id + '.process.json')) $receipt
@@ -521,15 +634,12 @@ function Invoke-InstallerLifecycle {
     } finally {
         $summary.cases=@($script:Results.ToArray())
         $summary.finished_utc=[DateTime]::UtcNow.ToString('o')
-        Write-LifecycleJson (Join-Path $script:Evidence 'summary.json') $summary
-        $hashes = [ordered]@{}
-        foreach ($file in @(Get-ChildItem -LiteralPath $script:Evidence -File | Sort-Object Name)) {
-            $hashes[$file.Name] = Get-LifecycleHash $file.FullName
-        }
-        Write-LifecycleJson (Join-Path $script:Evidence 'evidence-sha256.json') $hashes
-        if ($registered) {
-            Unregister-Event -SourceIdentifier $script:ProcessEventId -ErrorAction SilentlyContinue
-            Get-Event -SourceIdentifier $script:ProcessEventId -ErrorAction SilentlyContinue | Remove-Event -ErrorAction SilentlyContinue
+        try { Complete-LifecycleEvidence $summary }
+        finally {
+            if ($registered) {
+                Unregister-Event -SourceIdentifier $script:ProcessEventId -ErrorAction SilentlyContinue
+                Get-Event -SourceIdentifier $script:ProcessEventId -ErrorAction SilentlyContinue | Remove-Event -ErrorAction SilentlyContinue
+            }
         }
     }
 }
