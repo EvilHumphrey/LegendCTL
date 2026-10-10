@@ -433,7 +433,7 @@ function Invoke-InstallerLifecycle {
     $null = New-Item -ItemType Directory -Path $script:Work
     $script:Results = [Collections.Generic.List[object]]::new()
     $script:ProcessEventId = 'LegendInstaller-' + [Guid]::NewGuid().ToString('N')
-    $subscription = $null
+    $registered = $false
     $summary = [ordered]@{schema=1; status='RUNNING'; scope='Real installer lifecycle on disposable GitHub Windows runner';
         source_commit=$ExpectedBuildCommit; candidate_version=$ExpectedVersion; previous_version='2.6.2';
         candidate_sha256=$CandidateSha256; previous_sha256=$PreviousSha256; os=[Environment]::OSVersion.VersionString;
@@ -446,8 +446,9 @@ function Invoke-InstallerLifecycle {
         Write-LifecycleJson (Join-Path $script:Evidence 'initial-state.json') (Get-LifecycleSnapshot)
         Write-LifecycleJson (Join-Path $script:Evidence 'payload-reference.json') $script:Payload
         Initialize-AclProbe
-        $subscription = Register-CimIndicationEvent -Query "SELECT * FROM Win32_ProcessStartTrace WHERE ProcessName = 'ZD Ultimate Legend.exe'" `
+        $null = Register-CimIndicationEvent -Query "SELECT * FROM Win32_ProcessStartTrace WHERE ProcessName = 'ZD Ultimate Legend.exe'" `
             -SourceIdentifier $script:ProcessEventId
+        $registered = $true
         # All sentinels are newly created after the clean-machine check. No
         # recursive cleanup is used: evidence and failed state are retained.
         $null = New-Item -ItemType Directory -Path (Join-Path $script:DataRoot 'wrapper_profiles') -Force
@@ -526,7 +527,7 @@ function Invoke-InstallerLifecycle {
             $hashes[$file.Name] = Get-LifecycleHash $file.FullName
         }
         Write-LifecycleJson (Join-Path $script:Evidence 'evidence-sha256.json') $hashes
-        if ($subscription) {
+        if ($registered) {
             Unregister-Event -SourceIdentifier $script:ProcessEventId -ErrorAction SilentlyContinue
             Get-Event -SourceIdentifier $script:ProcessEventId -ErrorAction SilentlyContinue | Remove-Event -ErrorAction SilentlyContinue
         }
