@@ -105,6 +105,9 @@ class ApplyFailure:
 class ApplyResult:
     total_attempted: int = 0
     succeeded: int = 0
+    # Labels are evidence of dispatched setters, not requested-field counters.
+    attempted_labels: tuple[str, ...] = ()
+    succeeded_labels: tuple[str, ...] = ()
     retry_recoveries: int = 0
     failed: list[ApplyFailure] = field(default_factory=list)
     sensitivity_downgrades: tuple[str, ...] = ()
@@ -582,11 +585,15 @@ class SettingsApplyCoordinator:
                     )
                 )
                 continue
+            def attempt_retry():
+                retry_result.attempted_labels += (failure.setting_label,)
+                return failure.retry_fn()
+
             try:
                 result = (
-                    run_operation(failure.retry_fn)
+                    run_operation(attempt_retry)
                     if run_operation is not None
-                    else failure.retry_fn()
+                    else attempt_retry()
                 )
             except Exception as exc:
                 retry_result.failed.append(
@@ -626,6 +633,7 @@ class SettingsApplyCoordinator:
                     failure.sensitivity_downgrades_on_success,
                 )
                 retry_result.succeeded += 1
+                retry_result.succeeded_labels += (failure.setting_label,)
                 if outcome_used_retry(outcome):
                     retry_result.retry_recoveries += 1
                 _safe_invoke(failure.on_success, _name="failure.on_success")
@@ -697,11 +705,16 @@ class SettingsApplyCoordinator:
                 )
                 return False
             result.total_attempted += 1
+
+            def attempt_write():
+                result.attempted_labels += (label,)
+                return write_fn()
+
             try:
                 outcome_result = (
-                    write_state.run_operation(write_fn)
+                    write_state.run_operation(attempt_write)
                     if write_state.run_operation is not None
-                    else write_fn()
+                    else attempt_write()
                 )
             except Exception as exc:
                 result.failed.append(
@@ -730,6 +743,7 @@ class SettingsApplyCoordinator:
                         (label,),
                     )
                 result.succeeded += 1
+                result.succeeded_labels += (label,)
                 if outcome_used_retry(outcome):
                     result.retry_recoveries += 1
                 _safe_invoke(on_success, _name="on_success")

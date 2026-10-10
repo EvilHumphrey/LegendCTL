@@ -3689,6 +3689,8 @@ class ProfileApplyReadbackVerificationTests(unittest.TestCase):
         stub_result = ApplyResult(
             total_attempted=2,
             succeeded=1,
+            attempted_labels=("vibration", "deadzones"),
+            succeeded_labels=("vibration",),
             failed=[ApplyFailure("deadzones", "HID write rejected", True)],
         )
 

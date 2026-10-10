@@ -9,17 +9,21 @@ mocks.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
+from unittest.mock import patch
 
 from zd_app.services.restore_point_service import (
     ControllerPresenceChangedError,
     FRESH_READ_MAX_AGE_S,
     RestorePointService,
+    _COLLECTION_FIELDS,
+    _SCALAR_FIELDS,
     _build_field_outcomes,
     verify_applied_snapshot,
 )
@@ -27,6 +31,7 @@ from zd_app.services.settings_apply_coordinator import (
     ApplyResult,
     SettingsApplyCoordinator,
 )
+from zd_app.services.write_verification import apply_labels_for
 from zd_app.services.settings_service import (
     AxisInversion,
     BackPaddleBinding,
@@ -480,6 +485,23 @@ def _make_service(
     return service, stub, store
 
 
+def _prepare_and_restore(
+    service: RestorePointService,
+    rp_id: str,
+    *,
+    excluded_fields: Optional[set[str]] = None,
+    presence_guard=None,
+) -> RestoreResult:
+    """Drive the supported prepare/confirm/restore service contract."""
+
+    prepared = service.prepare_restore(rp_id, excluded_fields=excluded_fields)
+    return service.restore(
+        prepared,
+        acknowledge_write_only_paddles=bool(prepared.write_only_paddle_slots),
+        presence_guard=presence_guard,
+    )
+
+
 def _full_populated_stub() -> _StubSettingsService:
     stub = _StubSettingsService()
     stub.polling_rate = PollingRate.HZ_1000
@@ -818,7 +840,7 @@ class CapturePruneRetentionTests(unittest.TestCase):
 
             service._apply_coordinator.apply_snapshot = apply_with_checkpoint
 
-            result = service.restore(target.id)
+            result = _prepare_and_restore(service, target.id)
 
             self.assertEqual(checkpoint_ids, [result.before_restore_point_id])
             assert result.before_restore_point_id is not None
@@ -944,6 +966,95 @@ class CoverageMapInferenceTests(unittest.TestCase):
 
 
 class RestoreFlowTests(unittest.TestCase):
+    def test_restore_rejects_unprepared_id_before_any_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = _full_populated_stub()
+            service, _stub, _store = _make_service(tmpdir=tmp, settings_stub=stub)
+            captured = service.capture(_basic_trigger(), device_identity=_identity())
+            assert captured is not None
+            stub.write_calls.clear()
+
+            with self.assertRaisesRegex(TypeError, "PreparedRestore"):
+                service.restore(captured.id)  # type: ignore[arg-type]
+
+            self.assertEqual(stub.write_calls, [])
+
+    def test_prepared_restore_ignores_same_id_source_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = _full_populated_stub()
+            service, _stub, store = _make_service(tmpdir=tmp, settings_stub=stub)
+            captured = service.capture(_basic_trigger(), device_identity=_identity())
+            assert captured is not None
+            prepared = service.prepare_restore(captured.id)
+
+            mutated = replace(
+                captured,
+                snapshot=replace(
+                    captured.snapshot,
+                    polling_rate=PollingRate.HZ_8000,
+                ),
+            )
+            store.save(mutated)
+            stub.write_calls.clear()
+
+            result = service.restore(prepared)
+
+            # The stub's readback remains at the originally prepared 1000 Hz.
+            # Applying the substituted 8000-Hz file would produce a mismatch.
+            self.assertEqual(result.label, RestoreResultLabel.VERIFIED)
+            self.assertIn("polling", stub.write_calls)
+            # Post-write attempt metadata must not overwrite the intervening
+            # source edit with the older prepared payload.
+            self.assertEqual(store.load(captured.id).snapshot.polling_rate, PollingRate.HZ_8000)
+
+    def test_write_only_paddles_require_ack_before_capture_or_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = _full_populated_stub()
+            stub.back_paddles = {
+                MacroSlot.M1: BackPaddleBinding(ControllerButtonTarget.A),
+            }
+            service, _stub, store = _make_service(tmpdir=tmp, settings_stub=stub)
+            captured = service.capture(_basic_trigger(), device_identity=_identity())
+            assert captured is not None
+            prepared = service.prepare_restore(captured.id)
+            self.assertEqual(prepared.write_only_paddle_slots, ("M1",))
+            before_ids = {rp.id for rp in store.list()[0]}
+            stub.write_calls.clear()
+
+            with patch.object(
+                service._apply_coordinator,
+                "apply_snapshot",
+                wraps=service._apply_coordinator.apply_snapshot,
+            ) as apply_snapshot:
+                for invalid_acknowledgement in (False, "false", 1, object()):
+                    with self.subTest(
+                        acknowledgement=repr(invalid_acknowledgement)
+                    ):
+                        with self.assertRaisesRegex(
+                            PermissionError,
+                            "explicit acknowledgement",
+                        ):
+                            service.restore(
+                                prepared,
+                                acknowledge_write_only_paddles=(
+                                    invalid_acknowledgement  # type: ignore[arg-type]
+                                ),
+                            )
+
+                        self.assertEqual(stub.write_calls, [])
+                        self.assertEqual(
+                            {rp.id for rp in store.list()[0]},
+                            before_ids,
+                        )
+                apply_snapshot.assert_not_called()
+
+            result = service.restore(
+                prepared,
+                acknowledge_write_only_paddles=True,
+            )
+            self.assertIn("back_paddle_M1", stub.write_calls)
+            self.assertGreater(result.attempted, 0)
+
     def test_capture_guard_refuses_persistence_after_read(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service, _stub, store = _make_service(
@@ -980,7 +1091,7 @@ class RestoreFlowTests(unittest.TestCase):
                 return calls["n"] < 4
 
             with self.assertRaises(ControllerPresenceChangedError) as raised:
-                service.restore(captured.id, presence_guard=guard)
+                _prepare_and_restore(service, captured.id, presence_guard=guard)
 
             self.assertFalse(raised.exception.writes_may_have_occurred)
             self.assertEqual(stub.write_calls, [])
@@ -999,7 +1110,7 @@ class RestoreFlowTests(unittest.TestCase):
                 return calls["n"] < 5
 
             with self.assertRaises(ControllerPresenceChangedError) as raised:
-                service.restore(captured.id, presence_guard=guard)
+                _prepare_and_restore(service, captured.id, presence_guard=guard)
 
             self.assertTrue(raised.exception.writes_may_have_occurred)
             self.assertTrue(stub.write_calls)
@@ -1011,7 +1122,7 @@ class RestoreFlowTests(unittest.TestCase):
             service, _stub, store = _make_service(tmpdir=tmp, settings_stub=stub)
             captured = service.capture(_basic_trigger(), device_identity=_identity())
             assert captured is not None
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
             valid, _ = store.list()
             ids = {rp.id for rp in valid}
             self.assertIsNotNone(result.before_restore_point_id)
@@ -1030,7 +1141,7 @@ class RestoreFlowTests(unittest.TestCase):
             assert target is not None
             stub.polling_rate = PollingRate.HZ_4000
 
-            result = service.restore(target.id)
+            result = _prepare_and_restore(service, target.id)
 
             assert result.before_restore_point_id is not None
             before = store.load(result.before_restore_point_id)
@@ -1051,7 +1162,7 @@ class RestoreFlowTests(unittest.TestCase):
             service, _stub, _store = _make_service(tmpdir=tmp, settings_stub=stub)
             captured = service.capture(_basic_trigger(), device_identity=_identity())
             assert captured is not None
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
             self.assertEqual(result.label, RestoreResultLabel.VERIFIED)
             self.assertEqual(result.write_failed, 0)
             self.assertEqual(result.mismatched, 0)
@@ -1081,7 +1192,7 @@ class RestoreFlowTests(unittest.TestCase):
 
         service._apply_coordinator.apply_snapshot = apply_then_fail_reads
         with self.assertLogs("zd_app.services.restore_point_service", level="WARNING"):
-            return service.restore(target.id)
+            return _prepare_and_restore(service, target.id)
 
     def test_restore_does_not_publish_totally_failed_readback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1123,7 +1234,7 @@ class RestoreFlowTests(unittest.TestCase):
                 return result
 
             stub.set_step_size_verified = set_step_size_verified_inconclusive
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
 
             self.assertEqual(result.unverified_writes, ())
             self.assertEqual(result.label, RestoreResultLabel.VERIFIED)
@@ -1157,7 +1268,7 @@ class RestoreFlowTests(unittest.TestCase):
                 return result
 
             stub.set_zone_lighting_verified = set_zone_lighting_verified_inconclusive
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
 
             self.assertEqual(result.unverified_writes, ())
             lighting = next(
@@ -1173,7 +1284,7 @@ class RestoreFlowTests(unittest.TestCase):
             assert captured is not None
             stub.fail_labels = {"polling"}
             stub.polling_rate = None
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
             self.assertEqual(result.label, RestoreResultLabel.PARTIALLY_RESTORED)
             self.assertEqual(result.write_failed, 1)
             self.assertEqual(result.could_not_verify, 0)
@@ -1202,7 +1313,7 @@ class RestoreFlowTests(unittest.TestCase):
                 "sens_left", "sens_right",
                 "trigger_left", "trigger_right",
             })
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
             self.assertEqual(result.label, RestoreResultLabel.RESTORE_FAILED)
             self.assertEqual(result.write_failed, result.attempted)
 
@@ -1216,7 +1327,7 @@ class RestoreFlowTests(unittest.TestCase):
             # stub's writes "succeed" (label='polling'), but the readback
             # returns the new value, which won't match the captured value.
             stub.polling_rate = PollingRate.HZ_8000
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
             self.assertEqual(result.label, RestoreResultLabel.MISMATCH_AFTER_RESTORE)
             self.assertEqual(result.write_failed, 0)
             self.assertGreater(result.mismatched, 0)
@@ -1229,7 +1340,7 @@ class RestoreFlowTests(unittest.TestCase):
             assert captured is not None
             # Drop one field's read source so the verification can't run.
             stub.polling_rate = None
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
             self.assertEqual(result.label, RestoreResultLabel.RESTORED_WITH_WARNINGS)
             self.assertGreater(result.could_not_verify, 0)
 
@@ -1249,7 +1360,7 @@ class RestoreFlowTests(unittest.TestCase):
             # default). Flip the stub to HZ_8000 post-capture so the writes
             # report OK but the readback returns the new value.
             stub.polling_rate = PollingRate.HZ_8000
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
             polling_outcome = next(
                 f for f in result.fields if f.field_name == "polling_rate"
             )
@@ -1269,7 +1380,7 @@ class RestoreFlowTests(unittest.TestCase):
             service, _stub, _store = _make_service(tmpdir=tmp, settings_stub=stub)
             captured = service.capture(_basic_trigger(), device_identity=_identity())
             assert captured is not None
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
             verified_outcomes = [
                 f for f in result.fields if f.verify_matched is True
             ]
@@ -1305,7 +1416,7 @@ class RestoreFlowTests(unittest.TestCase):
             def _raise_polling():
                 raise TimeoutError("HID read timed out after 967ms")
             stub.get_polling_rate = _raise_polling
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
             polling_outcome = next(
                 f for f in result.fields if f.field_name == "polling_rate"
             )
@@ -1330,7 +1441,7 @@ class RestoreFlowTests(unittest.TestCase):
             # Drop polling_rate to None — the getter returns None cleanly
             # (no exception raised). This must keep the bare-bones note.
             stub.polling_rate = None
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
             polling_outcome = next(
                 f for f in result.fields if f.field_name == "polling_rate"
             )
@@ -1347,10 +1458,78 @@ class RestoreFlowTests(unittest.TestCase):
             captured = service.capture(_basic_trigger(), device_identity=_identity())
             assert captured is not None
             stub.write_calls.clear()
-            service.restore(captured.id)
+            _prepare_and_restore(service, captured.id)
             self.assertNotIn("motion", stub.write_calls)
             # The set_motion_settings setter isn't even defined on the stub
             # because the coordinator should never try to call it.
+
+    def test_tampered_coverage_cannot_promote_motion_to_verified_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = _full_populated_stub()
+            service, _stub, _store = _make_service(tmpdir=tmp, settings_stub=stub)
+            captured = service.capture(_basic_trigger(), device_identity=_identity())
+            assert captured is not None
+
+            path = next(Path(tmp).glob("*.json"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            motion_coverage = payload["coverage"]["fields"]["motion_settings"]
+            motion_coverage["writable"] = True
+            motion_coverage["state"] = CoverageState.CAPTURED.value
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+            statically_writable = {
+                name
+                for name, _category, writable in _SCALAR_FIELDS
+                if writable
+            } | {
+                name
+                for name, _category, writable, _expected in _COLLECTION_FIELDS
+                if writable
+            }
+            stub.write_calls.clear()
+            result = _prepare_and_restore(
+                service,
+                captured.id,
+                excluded_fields=statically_writable,
+            )
+
+            self.assertEqual(result.attempted, 0)
+            self.assertEqual(result.label, RestoreResultLabel.RESTORE_FAILED)
+            self.assertEqual(result.fields, ())
+            self.assertEqual(stub.write_calls, [])
+
+    def test_persisted_false_cannot_disable_static_writable_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = _full_populated_stub()
+            service, _stub, _store = _make_service(tmpdir=tmp, settings_stub=stub)
+            captured = service.capture(_basic_trigger(), device_identity=_identity())
+            assert captured is not None
+
+            path = next(Path(tmp).glob("*.json"))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["coverage"]["fields"]["polling_rate"]["writable"] = False
+            path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+            statically_writable = {
+                name
+                for name, _category, writable in _SCALAR_FIELDS
+                if writable
+            } | {
+                name
+                for name, _category, writable, _expected in _COLLECTION_FIELDS
+                if writable
+            }
+            stub.write_calls.clear()
+            result = _prepare_and_restore(
+                service,
+                captured.id,
+                excluded_fields=statically_writable - {"polling_rate"},
+            )
+
+            self.assertEqual(result.attempted, 1)
+            self.assertEqual(result.label, RestoreResultLabel.VERIFIED)
+            self.assertEqual([field.field_name for field in result.fields], ["polling_rate"])
+            self.assertEqual(stub.write_calls, ["polling"])
 
     def test_restore_persists_attempt_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1358,7 +1537,7 @@ class RestoreFlowTests(unittest.TestCase):
             service, _stub, store = _make_service(tmpdir=tmp, settings_stub=stub)
             captured = service.capture(_basic_trigger(), device_identity=_identity())
             assert captured is not None
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
             reloaded = store.load(captured.id)
             self.assertIsNotNone(reloaded.last_restore_attempt)
             self.assertEqual(reloaded.last_restore_attempt.label, result.label)
@@ -1887,7 +2066,7 @@ class WearLedgerIntegrationTests(unittest.TestCase):
             service, _stub, ledger = self._service_with_ledger(tmp)
             rp = service.capture(_basic_trigger(), device_identity=_identity())
             assert rp is not None
-            result = service.restore(rp.id)
+            result = _prepare_and_restore(service, rp.id)
             restore_events = [
                 e for e in ledger.read_events() if e.event_type == "rp_restore"
             ]
@@ -1966,7 +2145,7 @@ class Restore8PointSensitivityTests(unittest.TestCase):
             service, _stub, _store = _make_service(tmpdir=tmp, settings_stub=stub)
             captured = service.capture(_basic_trigger(), device_identity=_identity())
             assert captured is not None
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
 
             self.assertEqual(result.label, RestoreResultLabel.VERIFIED)
             self.assertEqual(result.write_failed, 0)
@@ -2000,7 +2179,7 @@ class Restore8PointSensitivityTests(unittest.TestCase):
             # curves; the 8-point read-back is unavailable and must not turn
             # the actual 3-point restore into an "unverified" result.
             stub.supports_8point = False
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
 
             self.assertEqual(
                 result.sensitivity_downgrades,
@@ -2044,7 +2223,7 @@ class Restore8PointSensitivityTests(unittest.TestCase):
             service, _stub, _store = _make_service(tmpdir=tmp, settings_stub=stub)
             captured = service.capture(_basic_trigger(), device_identity=_identity())
             assert captured is not None
-            service.restore(captured.id)
+            _prepare_and_restore(service, captured.id)
 
             self.assertEqual(calls.get("8point"), _LEFT_8POINT)
             self.assertNotIn("3point", calls)
@@ -2058,7 +2237,7 @@ class Restore8PointSensitivityTests(unittest.TestCase):
             # The 8-point writer emits the shared ``sens_left`` label; failing it
             # must flip the 8-point field outcome.
             stub.fail_labels = {"sens_left"}
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
 
             self.assertEqual(result.label, RestoreResultLabel.PARTIALLY_RESTORED)
             left = next(
@@ -2076,7 +2255,7 @@ class Restore8PointSensitivityTests(unittest.TestCase):
             # the read-back differs from the captured curve.
             drifted = tuple(SensitivityAnchor(a.x, a.y + 1) for a in _LEFT_8POINT)
             stub.sensitivity_8point = (drifted, _RIGHT_8POINT)
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
 
             self.assertEqual(result.label, RestoreResultLabel.MISMATCH_AFTER_RESTORE)
             left = next(
@@ -2094,7 +2273,7 @@ class Restore8PointSensitivityTests(unittest.TestCase):
             service, _stub, _store = _make_service(tmpdir=tmp, settings_stub=stub)
             captured = service.capture(_basic_trigger(), device_identity=_identity())
             assert captured is not None
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
 
             names = {f.field_name for f in result.fields}
             self.assertIn("sensitivity_left_8point", names)
@@ -2109,8 +2288,10 @@ class Restore8PointSensitivityTests(unittest.TestCase):
             service, _stub, _store = _make_service(tmpdir=tmp, settings_stub=stub)
             captured = service.capture(_basic_trigger(), device_identity=_identity())
             assert captured is not None
-            result = service.restore(
-                captured.id, excluded_fields={"sensitivity_left"}
+            result = _prepare_and_restore(
+                service,
+                captured.id,
+                excluded_fields={"sensitivity_left"},
             )
             names = {f.field_name for f in result.fields}
             # Excluding the host drops its rider too — neither left field is
@@ -2164,7 +2345,7 @@ class Restore8PointSensitivityTests(unittest.TestCase):
             self.assertIsNone(captured.snapshot.sensitivity_left_8point)
             self.assertIsNone(captured.snapshot.sensitivity_right_8point)
 
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
             names = {f.field_name for f in result.fields}
             # Still verifies the 3-point hosts; no 8-point field appears anywhere.
             self.assertIn("sensitivity_left", names)
@@ -2437,17 +2618,23 @@ class RestorePostApplySettleTests(unittest.TestCase):
     def test_restore_sleeps_default_settle_between_apply_and_verify_read(self) -> None:
         # R5a: the default settle (0.25 s) fires exactly once, strictly
         # between apply_snapshot and the verify-read getters. The leading
-        # read event is the before_restore capture's fresh read.
+        # reads are the confirmation preview and before_restore capture.
         events: list = []
         with tempfile.TemporaryDirectory() as tmp:
             service = self._make_settle_service(tmp, events)
             rp = service.capture(_basic_trigger(), device_identity=_identity())
             assert rp is not None
             events.clear()
-            service.restore(rp.id)
+            _prepare_and_restore(service, rp.id)
         self.assertEqual(
             events,
-            ["read:polling_rate", "apply", ("sleep", 0.25), "read:polling_rate"],
+            [
+                "read:polling_rate",
+                "read:polling_rate",
+                "apply",
+                ("sleep", 0.25),
+                "read:polling_rate",
+            ],
         )
 
     def test_restore_settle_zero_disables_sleep(self) -> None:
@@ -2460,10 +2647,15 @@ class RestorePostApplySettleTests(unittest.TestCase):
             rp = service.capture(_basic_trigger(), device_identity=_identity())
             assert rp is not None
             events.clear()
-            service.restore(rp.id)
+            _prepare_and_restore(service, rp.id)
         self.assertEqual(
             events,
-            ["read:polling_rate", "apply", "read:polling_rate"],
+            [
+                "read:polling_rate",
+                "read:polling_rate",
+                "apply",
+                "read:polling_rate",
+            ],
         )
 
 
@@ -2490,6 +2682,49 @@ def _verify_snapshot(**overrides: Any) -> ControllerSnapshot:
     )
     payload.update(overrides)
     return ControllerSnapshot(**payload)
+
+
+def _successful_apply_result(*labels: str) -> ApplyResult:
+    return ApplyResult(
+        total_attempted=len(labels),
+        succeeded=len(labels),
+        attempted_labels=labels,
+        succeeded_labels=labels,
+    )
+
+
+class StaticRestorePolicyDriftTests(unittest.TestCase):
+    def test_every_static_writable_field_has_writer_label_mapping(self) -> None:
+        snapshot = _verify_snapshot(
+            button_bindings={
+                ButtonSlot.A: ButtonMapping.controller_button(ControllerButtonTarget.B)
+            },
+            back_paddle_bindings={
+                MacroSlot.M1: BackPaddleBinding(target=ControllerButtonTarget.A)
+            },
+            lighting_zones={
+                LightingZone.HOME: LightingSettings(
+                    True,
+                    LightingMode.ALWAYS_ON,
+                    200,
+                    RgbColor(10, 20, 30),
+                )
+            },
+        )
+        static_fields = [
+            (name, writable) for name, _category, writable in _SCALAR_FIELDS
+        ] + [
+            (name, writable)
+            for name, _category, writable, _expected in _COLLECTION_FIELDS
+        ]
+
+        for name, writable in static_fields:
+            with self.subTest(name=name):
+                labels = apply_labels_for(name, snapshot)
+                if writable:
+                    self.assertTrue(labels)
+                else:
+                    self.assertEqual(labels, [])
 
 
 _HOST_CURVE_A = (
@@ -2651,6 +2886,39 @@ class PartialCaptureCollectionVerifyTests(unittest.TestCase):
     _BIND_A = ButtonMapping.controller_button(ControllerButtonTarget.B)
     _BIND_B = ButtonMapping.controller_button(ControllerButtonTarget.A)
 
+    def test_matching_readback_without_writer_receipt_fails_closed(self) -> None:
+        expected = _verify_snapshot(polling_rate=PollingRate.HZ_1000)
+        outcomes = _build_field_outcomes(
+            ["polling_rate"],
+            expected,
+            expected,
+            ApplyResult(total_attempted=1, succeeded=1),
+            {},
+        )
+
+        self.assertFalse(outcomes[0].write_succeeded)
+        self.assertIsNotNone(outcomes[0].write_error)
+
+    def test_matching_unsupported_field_without_writer_fails_closed(self) -> None:
+        expected = _verify_snapshot(
+            motion_settings=MotionSettings(
+                MotionMappingTarget.LEFT_JOYSTICK,
+                0x06,
+                MotionMappingMode.INSTANT,
+                42,
+            )
+        )
+        outcomes = _build_field_outcomes(
+            ["motion_settings"],
+            expected,
+            expected,
+            ApplyResult(),
+            {},
+        )
+
+        self.assertFalse(outcomes[0].write_succeeded)
+        self.assertIsNotNone(outcomes[0].write_error)
+
     def _full_readback(self) -> dict:
         # The two applied entries, correct, among a wider device-enumerated set.
         return {
@@ -2679,7 +2947,7 @@ class PartialCaptureCollectionVerifyTests(unittest.TestCase):
             # recorded (the stub's setters don't mutate stub state, so this
             # is also the post-restore readback).
             stub.button_bindings = self._full_readback()
-            result = service.restore(captured.id)
+            result = _prepare_and_restore(service, captured.id)
 
             outcome = next(
                 f for f in result.fields if f.field_name == "button_bindings"
@@ -2703,7 +2971,7 @@ class PartialCaptureCollectionVerifyTests(unittest.TestCase):
             ["button_bindings"],
             applied,
             readback,
-            ApplyResult(total_attempted=2),
+            _successful_apply_result("binding_A", "binding_B"),
             {},
         )
 
@@ -2733,7 +3001,7 @@ class PartialCaptureCollectionVerifyTests(unittest.TestCase):
             ["button_bindings"],
             applied,
             readback,
-            ApplyResult(total_attempted=2),
+            _successful_apply_result("binding_A", "binding_B"),
             {},
         )
 
@@ -2754,7 +3022,7 @@ class PartialCaptureCollectionVerifyTests(unittest.TestCase):
             ["back_paddle_bindings"],
             applied,
             readback,
-            ApplyResult(total_attempted=1),
+            _successful_apply_result("back_paddle_M1"),
             {},
         )
 
@@ -2776,7 +3044,7 @@ class PartialCaptureCollectionVerifyTests(unittest.TestCase):
             ["button_bindings"],
             applied,
             readback,
-            ApplyResult(total_attempted=1),
+            _successful_apply_result("binding_A"),
             {"button_bindings": "TimeoutError: HID read timed out after 967ms"},
         )
 
@@ -2811,7 +3079,7 @@ class PartialCaptureCollectionVerifyTests(unittest.TestCase):
             ["button_bindings"],
             applied,
             readback,
-            ApplyResult(total_attempted=2),
+            _successful_apply_result("binding_A", "binding_B"),
             # A different slot's getter raised: the whole-collection read error
             # is recorded, but B's mismatch is unambiguous and must still show.
             {"button_bindings": "TimeoutError: HID read timed out after 967ms"},
@@ -2836,7 +3104,7 @@ class RestorePostApplyPersistTests(unittest.TestCase):
     condition (without aborting)."""
 
     def test_restore_returns_result_when_post_apply_persist_fails(self) -> None:
-        # A6: an OSError from the post-apply _store.save must NOT propagate and
+        # A6: an OSError from post-apply attempt bookkeeping must NOT propagate and
         # discard the RestoreResult (the device change already happened).
         with tempfile.TemporaryDirectory() as tmp:
             service, _stub, store = _make_service(
@@ -2845,18 +3113,12 @@ class RestorePostApplyPersistTests(unittest.TestCase):
             target = service.capture(_basic_trigger(), device_identity=_identity())
             self.assertIsNotNone(target)
 
-            real_save = store.save
+            def failing_record(source, attempt):
+                raise OSError("simulated disk-full on post-apply persist")
 
-            def failing_save(rp):
-                # Only the post-apply persist (the rp carrying a restore
-                # attempt) fails; the before-restore capture save still works.
-                if rp.last_restore_attempt is not None:
-                    raise OSError("simulated disk-full on post-apply persist")
-                return real_save(rp)
+            store.record_restore_attempt = failing_record
 
-            store.save = failing_save  # type: ignore[assignment]
-
-            result = service.restore(target.id)  # must not raise
+            result = _prepare_and_restore(service, target.id)  # must not raise
 
             self.assertIsInstance(result, RestoreResult)
             self.assertIsNotNone(result.before_restore_point_id)
@@ -2878,7 +3140,7 @@ class RestorePostApplyPersistTests(unittest.TestCase):
             with self.assertLogs(
                 "zd_app.services.restore_point_service", level="WARNING"
             ) as cm:
-                result = service.restore(target.id)
+                result = _prepare_and_restore(service, target.id)
 
             self.assertIsInstance(result, RestoreResult)
             self.assertIsNone(result.before_restore_point_id)

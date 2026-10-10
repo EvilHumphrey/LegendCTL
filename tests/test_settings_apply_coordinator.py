@@ -103,6 +103,11 @@ class CoordinatorAggregationTests(unittest.TestCase):
         self.assertEqual(result.succeeded, 3)
         self.assertEqual(result.retry_recoveries, 1)  # the polling write used retry
         self.assertEqual(result.failed, [])
+        self.assertEqual(
+            result.attempted_labels,
+            ("polling", "binding_A", "binding_B"),
+        )
+        self.assertEqual(result.succeeded_labels, result.attempted_labels)
 
     def test_apply_failure_carries_transient_flag(self) -> None:
         settings_service = mock.Mock()
@@ -119,6 +124,8 @@ class CoordinatorAggregationTests(unittest.TestCase):
         failure = result.failed[0]
         self.assertEqual(failure.setting_label, "polling")
         self.assertTrue(failure.is_transient, "WRITE_FAILED outcome should be flagged transient")
+        self.assertEqual(result.attempted_labels, ("polling",))
+        self.assertEqual(result.succeeded_labels, ())
 
     def test_apply_failure_open_failed_is_not_transient(self) -> None:
         """Sanity: only WRITE_FAILED is transient; other failure outcomes are not."""
@@ -415,6 +422,8 @@ class CoordinatorRetryTests(unittest.TestCase):
         self.assertEqual(retry_result.total_attempted, 1)
         self.assertEqual(retry_result.succeeded, 1)
         self.assertEqual(retry_result.failed, [])
+        self.assertEqual(retry_result.attempted_labels, ("polling",))
+        self.assertEqual(retry_result.succeeded_labels, ("polling",))
 
     def test_retry_failures_empty_returns_empty_result(self) -> None:
         coordinator = SettingsApplyCoordinator(mock.Mock())

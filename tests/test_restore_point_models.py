@@ -211,6 +211,14 @@ class SchemaErrorTests(unittest.TestCase):
         with self.assertRaises(RestorePointParseError):
             restore_point_from_dict(payload)
 
+    def test_coverage_writable_requires_json_boolean(self) -> None:
+        for value in ("false", 1, 0, [], {}):
+            with self.subTest(value=value):
+                payload = restore_point_to_dict(_full_restore_point())
+                payload["coverage"]["fields"]["motion_settings"]["writable"] = value
+                with self.assertRaises(RestorePointParseError):
+                    restore_point_from_dict(payload)
+
     def test_schema_error_subclasses_parse_error(self) -> None:
         self.assertTrue(issubclass(RestorePointSchemaError, RestorePointParseError))
 
