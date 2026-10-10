@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import threading
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from tests.r2_shell_test_helpers import empty_snapshot, make_shell
+from tests.test_restore_points_screen import _rp
+from zd_app.i18n import t
+from zd_app.services.restore_point_service import _build_restore_preview
 from zd_app.services.settings_service import (
     BackPaddleBinding,
     MacroSlot,
     PollingRate,
 )
+from zd_app.storage.restore_point_models import PreparedRestore
 from zd_app.ui.app_shell import AppShell, threaded_hid_executor
 from zd_app.ui.screens import restore_points
 
@@ -29,9 +34,29 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
         self.new = empty_snapshot(step_size=180, polling_rate=PollingRate.HZ_2000)
 
     def make_shell(self, readback=None):
+        source = _rp()
+        source = replace(
+            source,
+            snapshot=self.new,
+            coverage=replace(
+                source.coverage,
+                captured_supported_count=2,
+                total_supported_count=2,
+                fields={name: source.coverage.fields[name] for name in ("polling_rate", "step_size")},
+            ),
+        )
+        self.prepared = PreparedRestore.from_restore_point(
+            source, preview=_build_restore_preview(source, self.old, {}),
+        )
         service = SimpleNamespace(
             restore=MagicMock(return_value=SimpleNamespace(readback_snapshot=readback))
         )
+
+        def restore(prepared, *, acknowledge_write_only_paddles, presence_guard):
+            self.assert_prepared_call(prepared, acknowledge_write_only_paddles, presence_guard)
+            return service.restore.return_value
+
+        service.restore.side_effect = restore
         shell = make_shell(settings_service=MagicMock(), restore_point_service=service)
         state = shell.device_service.state
         state.connection_state = "connected"
@@ -50,15 +75,23 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
         shell._request_geometry_log = MagicMock()
         shell.restore_points_screen_state = restore_points.RestorePointsScreenState(
             view=restore_points.VIEW_IN_PROGRESS,
-            selected_rp_id="rp_fixture",
+            selected_rp_id=source.id,
+            prepared_restore=self.prepared,
             presence_key=shell._controller_presence_key(),
             presence_generation=shell._controller_presence_generation,
         )
         return shell, service
 
+    def assert_prepared_call(self, prepared, acknowledgement, presence_guard):
+        self.assertIs(prepared, self.prepared)
+        self.assertEqual(prepared.materialize().snapshot, self.new)
+        self.assertIs(acknowledgement, False)
+        self.assertTrue(presence_guard())
+
     def test_restore_then_controller_hydrates_actual_readback(self) -> None:
-        shell, _service = self.make_shell(self.new)
+        shell, service = self.make_shell(self.new)
         restore_points._execute_restore(shell)
+        service.restore.assert_called_once()
 
         values = {}
         shell._set_widget = lambda tag, value: values.__setitem__(tag, value)
@@ -74,8 +107,9 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
         shell.device_service.official_app_summary_service.read_summary.assert_not_called()
 
     def test_restore_then_save_current_persists_readback_not_old_cache(self) -> None:
-        shell, _service = self.make_shell(self.new)
+        shell, service = self.make_shell(self.new)
         restore_points._execute_restore(shell)
+        service.restore.assert_called_once()
         shell.save_current_as_named_wrapper_profile("After restore", include_device=True)
 
         saved = shell.wrapper_profile_store.save.call_args.args[0]
@@ -88,6 +122,7 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
         service.restore.return_value.write_failed = 1
         service.restore.return_value.mismatched = 1
         restore_points._execute_restore(shell)
+        service.restore.assert_called_once()
         shell.save_current_as_named_wrapper_profile("Partial restore", include_device=True)
 
         saved = shell.wrapper_profile_store.save.call_args.args[0]
@@ -97,8 +132,9 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
         self.assertIn("step_size", shell.last_snapshot_status)
 
     def test_unreadable_restore_blocks_save_current(self) -> None:
-        shell, _service = self.make_shell()
+        shell, service = self.make_shell()
         restore_points._execute_restore(shell)
+        service.restore.assert_called_once()
         shell.save_current_as_named_wrapper_profile("Unreadable", include_device=True)
 
         self.assertIsNone(shell.last_controller_snapshot)
@@ -110,18 +146,21 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
     def test_exception_after_possible_write_does_not_restore_old_cache(self) -> None:
         shell, service = self.make_shell(self.new)
 
-        def fail_after_write(_rp_id):
+        def fail_after_write(prepared, *, acknowledge_write_only_paddles, presence_guard):
+            self.assert_prepared_call(prepared, acknowledge_write_only_paddles, presence_guard)
             self.assertIsNone(shell.last_controller_snapshot)
             raise RuntimeError("fixture failure after partial write")
 
         service.restore.side_effect = fail_after_write
         restore_points._execute_restore(shell)
+        service.restore.assert_called_once()
         shell.save_current_as_named_wrapper_profile("Failed", include_device=True)
 
         self.assertIsNone(shell.last_controller_snapshot)
         self.assertIsNone(shell.last_snapshot_ts)
         self.assertIsNone(shell.last_snapshot_identity)
         self.assertEqual(shell.restore_points_screen_state.view, restore_points.VIEW_LIST)
+        self.assertIn("fixture failure after partial write", shell.restore_points_screen_state.status_text)
         shell.wrapper_profile_store.save.assert_not_called()
 
     def test_busy_refusal_preserves_cache_without_starting_restore(self) -> None:
@@ -133,6 +172,7 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
         self.assertIs(shell.last_controller_snapshot, self.old)
         self.assertEqual(shell.last_snapshot_ts, 123.0)
         self.assertEqual(shell.restore_points_screen_state.view, restore_points.VIEW_CONFIRM)
+        self.assertEqual(shell.restore_points_screen_state.status_text, t("apply.busy"))
         service.restore.assert_not_called()
         shell._hid_executor.assert_not_called()
 
@@ -143,6 +183,7 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
 
         self.assertIs(shell.last_controller_snapshot, self.old)
         self.assertEqual(shell.last_snapshot_ts, 123.0)
+        self.assertEqual(shell.restore_points_screen_state.status_text, t("first_run.pending_write_blocked"))
         service.restore.assert_not_called()
 
     def test_threaded_restore_invalidates_before_worker_and_publishes_on_render(self) -> None:
@@ -161,7 +202,8 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
             observed_threads.append(("publish", threading.get_ident()))
             publish(*args)
 
-        def restore(_rp_id):
+        def restore(prepared, *, acknowledge_write_only_paddles, presence_guard):
+            self.assert_prepared_call(prepared, acknowledge_write_only_paddles, presence_guard)
             observed_threads.append(("restore", threading.get_ident()))
             self.assertIsNone(shell.last_controller_snapshot)
             return SimpleNamespace(readback_snapshot=self.new)
@@ -177,18 +219,20 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
         shell._hid_job_completions.put(completion)
         shell._drain_hid_job_completions()
 
+        service.restore.assert_called_once()
         self.assertIs(shell.last_controller_snapshot, self.new)
         self.assertEqual(observed_threads[0], ("prepare", render_thread))
         self.assertNotEqual(observed_threads[1][1], render_thread)
         self.assertEqual(observed_threads[2], ("publish", render_thread))
 
     def test_identity_change_before_completion_discards_readback(self) -> None:
-        shell, _service = self.make_shell(self.new)
+        shell, service = self.make_shell(self.new)
         pending = []
         shell._hid_executor = lambda job, done: pending.append((job, done))
         restore_points._execute_restore(shell)
         job, done = pending.pop()
         result = job()
+        service.restore.assert_called_once()
         shell.device_service.state.stable_identifier = "controller-b"
         done(result)
         shell._drain_hid_job_completions()
@@ -199,10 +243,11 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
         self.assertEqual(shell.restore_points_screen_state.view, restore_points.VIEW_CONFIRM)
 
     def test_same_controller_write_only_paddles_survive_cache_retirement(self) -> None:
-        shell, _service = self.make_shell(self.new)
+        shell, service = self.make_shell(self.new)
         binding = BackPaddleBinding(None)
         shell._remember_back_paddle_binding(MacroSlot.M1, binding)
         restore_points._execute_restore(shell)
+        service.restore.assert_called_once()
 
         self.assertEqual(shell.last_controller_snapshot.back_paddle_bindings[MacroSlot.M1], binding)
         self.assertEqual(shell.last_controller_snapshot.step_size, 180)

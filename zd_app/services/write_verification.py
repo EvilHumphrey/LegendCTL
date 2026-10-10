@@ -92,12 +92,12 @@ def summarize_field_outcomes(
     """Summarize per-field outcomes into the counters that drive the Apply
     footer disclosure and Verification Details (Phase 2 UI).
 
-    ``verified_matched`` counts every ``verify_matched is True`` field — even one
-    whose WRITE failed (a pre-existing value matching the request is genuine
-    read-back evidence for the details view). Callers asserting apply-wide
-    success (the all-verified footer note) must additionally gate on
-    ``write_failed == 0``. ``could_not_verify`` counts only written-but-
-    unconfirmed fields; write-failed fields are disclosed as failures instead.
+    ``verified_matched`` counts fields whose ``verify_matched is True``.
+    The outcome builder only verifies fields with affirmative writer receipts;
+    matching pre-existing values cannot verify a failed or unwritten change.
+    Callers asserting apply-wide success must also require ``write_failed == 0``.
+    ``could_not_verify`` counts only written-but-unconfirmed fields; write-failed
+    fields are disclosed as failures instead.
     """
 
     fields = tuple(outcomes)
