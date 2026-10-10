@@ -1,6 +1,7 @@
 """Pure fixture repositories: no compiler, dependency install, UI or device I/O."""
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import importlib.util
 import json
@@ -60,6 +61,69 @@ class RepositoryFixture(unittest.TestCase):
 
 @unittest.skipUnless(exporter, "raw export helper not present on this revision")
 class RawSourceTests(RepositoryFixture):
+    @unittest.skipUnless(os.name == "nt", "Windows short-path identity")
+    def test_real_short_path_alias_is_the_same_clean_git_root(self):
+        get_short = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
+        get_short.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+        get_short.restype = ctypes.c_uint32
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = get_short(str(self.repo), buffer, len(buffer))
+        if not length:
+            raise ctypes.WinError(ctypes.get_last_error())
+        self.assertLess(length, len(buffer))
+        alias = Path(buffer.value)
+        reported = Path(git(alias, "rev-parse", "--show-toplevel"))
+        if alias == reported:
+            self.skipTest("fixture filesystem does not provide a distinct 8.3 alias")
+        self.assertNotEqual(alias, reported)
+        self.assertTrue(alias.samefile(reported))
+        self.assertEqual(exporter.assert_clean_tree(alias), self.commit_id)
+        # The alias must not bypass later content admission.
+        self.write("main.py", "dirty through the long spelling")
+        with self.assertRaisesRegex(exporter.ExportError, "Dirty tracked"):
+            exporter.assert_clean_tree(alias)
+
+    def test_subdirectory_and_different_git_reported_root_remain_rejected(self):
+        with self.assertRaisesRegex(exporter.ExportError, "Git worktree root"):
+            exporter.assert_clean_tree(self.repo / "zd_app")
+        other_root = self.root / "repo-other"
+        other_root.mkdir()
+        real_git = exporter._git
+
+        def other_report(repo, *args, **kwargs):
+            if args == ("rev-parse", "--show-toplevel"):
+                return str(other_root).encode() + b"\n"
+            return real_git(repo, *args, **kwargs)
+
+        with patch.object(exporter, "_git", side_effect=other_report):
+            with self.assertRaisesRegex(exporter.ExportError, "Git worktree root"):
+                exporter.assert_clean_tree(self.repo)
+
+    @unittest.skipUnless(os.name == "nt", "Windows reparse alias boundary")
+    def test_submitted_and_git_reported_junction_ancestors_remain_rejected(self):
+        alias_parent = self.root / "junction-alias"
+        completed = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+            "New-Item -ItemType Junction -Path $env:PROVENANCE_LINK -Target $env:PROVENANCE_TARGET | Out-Null"],
+            env={**os.environ, "PROVENANCE_LINK": str(alias_parent), "PROVENANCE_TARGET": str(self.root)}, capture_output=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        alias = alias_parent / self.repo.name
+        real_git = exporter._git
+
+        def alias_report(repo, *args, **kwargs):
+            if args == ("rev-parse", "--show-toplevel"):
+                return str(alias).encode() + b"\n"
+            return real_git(repo, *args, **kwargs)
+
+        try:
+            self.assertTrue(alias.samefile(self.repo))
+            with self.assertRaisesRegex(exporter.ExportError, "Reparse"):
+                exporter.assert_clean_tree(alias)
+            with patch.object(exporter, "_git", side_effect=alias_report):
+                with self.assertRaisesRegex(exporter.ExportError, "Reparse"):
+                    exporter.assert_clean_tree(self.repo)
+        finally:
+            alias_parent.rmdir()  # unlink only this task-owned junction
+
     def test_generated_runtime_data_is_never_read_or_exported(self):
         runtime = self.repo / "zd_data"
         self.write("zd_data/logs/zd_wrapper.log", "fixture runtime log")

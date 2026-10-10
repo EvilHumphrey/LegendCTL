@@ -188,8 +188,12 @@ def assert_clean_tree(repo: Path) -> str:
     repo = _absolute(repo)
     with PathGuard() as guard:
         guard.add(repo)
-        top = Path(_git(repo, "rev-parse", "--show-toplevel").decode().strip())
-        if _absolute(top) != repo:
+        top = _absolute(Path(_git(repo, "rev-parse", "--show-toplevel").decode().strip()))
+        # Git expands Windows 8.3 names (including hosted runner TEMP paths).
+        # Validate both spellings before comparing filesystem identity: resolving
+        # first would hide a junction, while lexical equality rejects safe aliases.
+        guard.add(top)
+        if not repo.samefile(top):
             raise ExportError("Release source must be the Git worktree root")
         commit = _git(repo, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
         flags = _git(repo, "ls-files", "-v", "-z").split(b"\0")
