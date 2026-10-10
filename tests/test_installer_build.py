@@ -191,8 +191,7 @@ class BuildReleaseScriptTests(unittest.TestCase):
         captured string; Set-Content then appends its own trailing newline by
         default. Without -NoNewline the round-trip leaves the file one `\\r\\n`
         longer than it started, and the drift accumulates one trailing blank
-        line per build. Both the patched-write and the finally-block rollback
-        must opt out via -NoNewline.
+        line per build. The isolated patched write must opt out via -NoNewline.
         """
         matches = list(
             re.finditer(
@@ -201,14 +200,13 @@ class BuildReleaseScriptTests(unittest.TestCase):
                 re.MULTILINE,
             )
         )
-        # The script has two Set-Content calls on version.py: the patched
-        # write (post-regex __build_commit__/__build_date__ injection) and the
-        # finally-block rollback. Both must exist and both must be -NoNewline.
+        # Only the exported version.py is patched. The live checkout is never
+        # edited, so it requires no rollback.
         self.assertGreaterEqual(
             len(matches),
-            2,
-            "expected at least 2 Set-Content calls on zd_app\\version.py "
-            "(patched-write + rollback); regex matched: "
+            1,
+            "expected at least 1 Set-Content call on zd_app\\version.py "
+            "(isolated patched write); regex matched: "
             + repr([m.group(0) for m in matches]),
         )
         for match in matches:
@@ -260,7 +258,7 @@ class BuildReleaseNativeCommandHardeningTests(unittest.TestCase):
         self.assertRegex(
             self.body,
             re.compile(
-                r'Invoke-NativeCommand\s+-Label\s+"[^"]*pip check[^"]*"\s+-ScriptBlock\s*\{[^}]*\$python\s+-m\s+pip\s+check[^}]*\}',
+                r'Invoke-NativeCommand\s+-Label\s+"[^"]*pip check[^"]*"\s+-ScriptBlock\s*\{[^}]*\$python\s+-I\s+-m\s+pip\s+check[^}]*\}',
                 re.IGNORECASE,
             ),
             "pip check must be wrapped by Invoke-NativeCommand with a pip-labelled -Label and a -ScriptBlock that runs `$python -m pip check`",
@@ -271,7 +269,7 @@ class BuildReleaseNativeCommandHardeningTests(unittest.TestCase):
         self.assertRegex(
             self.body,
             re.compile(
-                r'Invoke-NativeCommand\s+-Label\s+"[^"]*PyInstaller[^"]*"\s+-ScriptBlock\s*\{[^}]*\$python\s+-m\s+PyInstaller[^}]*\}',
+                r'Invoke-NativeCommand\s+-Label\s+"[^"]*PyInstaller[^"]*"\s+-ScriptBlock\s*\{[^}]*\$python\s+-I\s+-m\s+PyInstaller[^}]*\}',
             ),
             "PyInstaller must be wrapped by Invoke-NativeCommand with a PyInstaller-labelled -Label and a -ScriptBlock that runs `$python -m PyInstaller`",
         )

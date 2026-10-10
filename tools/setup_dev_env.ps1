@@ -1,12 +1,12 @@
 <#
-setup_dev_env.ps1 — bootstrap the .venv-zd Python venv used by tools\build_release.ps1.
+setup_dev_env.ps1 -- bootstrap the .venv-zd Python venv used by tools\build_release.ps1.
 
 Why this exists: build_release.ps1 expects an already-populated .venv-zd at the
 repo root and aborts otherwise. The venv is one-time setup, but it can vanish
 (disk wipe, antivirus quarantine, fresh checkout, accidental delete leaving an
 empty directory). Without this script the recovery incantation
 (`py312 -m venv .venv-zd` from a specific Python install path) lives only in
-memory files — easy to forget and easy to get wrong. This script encodes the
+memory files -- easy to forget and easy to get wrong. This script encodes the
 canonical setup so any contributor can run one command and get a build-ready
 venv.
 
@@ -98,9 +98,9 @@ Run .\tools\setup_dev_env.ps1 -Recreate to replace it with a hash-locked offline
 }
 
 if (Test-Path $venvDir) {
-    # Directory exists but Scripts\python.exe is missing — empty shell from a
+    # Directory exists but Scripts\python.exe is missing -- empty shell from a
     # prior wipe, partial extraction, or antivirus quarantine. Recreate it.
-    Write-Host "venv directory exists but is empty (no Scripts\python.exe) — recreating." -ForegroundColor Yellow
+    Write-Host "venv directory exists but is empty (no Scripts\python.exe) -- recreating." -ForegroundColor Yellow
     try {
         Remove-Item -Recurse -Force $venvDir
     } catch {
@@ -139,7 +139,7 @@ try {
     }
     Set-Content -LiteralPath $lockMarker -Value $lockHash -Encoding ASCII -NoNewline
 } catch {
-    # Half-populated venv on pip failure — remove so next run starts clean.
+    # Half-populated venv on pip failure -- remove so next run starts clean.
     Write-Warning "pip install failed; removing partially-populated .venv-zd so retry is clean."
     try {
         Remove-Item -Recurse -Force $venvDir -ErrorAction SilentlyContinue
