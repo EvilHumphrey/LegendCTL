@@ -63,43 +63,94 @@ def close_modals() -> None:
 
 
 def open_file_select(shell) -> None:
+    """Keep reopening a hidden front door off the previous modal's frame."""
+
+    owner_screen = getattr(shell, "current_screen", None)
+
+    def _open() -> None:
+        if getattr(shell, "current_screen", None) != owner_screen:
+            return
+        # autosize, not a fixed height: 210 clipped the Browse/Scan/Cancel row
+        # behind an internal scrollbar at default window size (seen in
+        # local testing), and the hidden error text grows the content when it
+        # shows. width stays as the pre-first-frame size; autosize then fits
+        # both dimensions to content.
+        with dpg.window(
+            tag=FILE_MODAL,
+            label=t("safe_import.file_select.title"),
+            modal=True,
+            no_resize=True,
+            width=560,
+            autosize=True,
+        ):
+            dpg.add_text(t("safe_import.header"), wrap=520)
+            dpg.add_text(t("safe_import.trust_statement"), color=shell.COLORS["muted"], wrap=520)
+            dpg.add_spacer(height=8)
+            dpg.add_text(t("safe_import.file_select.prompt"), color=shell.COLORS["muted"], wrap=520)
+            dpg.add_input_text(tag=PATH_INPUT, label=t("safe_import.file_select.path_label"), width=400)
+            dpg.add_text("", tag=FILE_ERROR, color=shell.COLORS["error"], wrap=520, show=False)
+            dpg.add_spacer(height=8)
+            with dpg.group(horizontal=True):
+                dpg.add_button(label=t("safe_import.file_select.browse"), width=110, callback=lambda: open_browse(shell))
+                dpg.add_button(
+                    label=t("safe_import.file_select.scan"),
+                    width=120,
+                    callback=lambda: shell.safe_import_scan_path(),
+                )
+                dpg.add_button(
+                    label=t("actions.cancel"),
+                    width=100,
+                    callback=lambda: _delete_if_exists(FILE_MODAL),
+                )
+
+    modal_swap = getattr(shell, "_defer_modal_swap", None)
+    # Fresh entry has no predecessor. Reopening after the titlebar X does:
+    # DPG hides that window, so delete/create must be separated by a frame.
+    swap_key = "safe_import_open_file_select"
+    pending = getattr(shell, "_pending_modal_swap_keys", ())
+    if callable(modal_swap) and (dpg.does_item_exist(FILE_MODAL) or swap_key in pending):
+        modal_swap(
+            _open,
+            delete_tags=(FILE_MODAL,),
+            key=swap_key,
+        )
+        return
     _delete_if_exists(FILE_MODAL)
-    # autosize, not a fixed height: 210 clipped the Browse/Scan/Cancel row
-    # behind an internal scrollbar at default window size (seen in
-    # local testing), and the hidden error text grows the content when it
-    # shows. width stays as the pre-first-frame size; autosize then fits
-    # both dimensions to content.
-    with dpg.window(
-        tag=FILE_MODAL,
-        label=t("safe_import.file_select.title"),
-        modal=True,
-        no_resize=True,
-        width=560,
-        autosize=True,
-    ):
-        dpg.add_text(t("safe_import.header"), wrap=520)
-        dpg.add_text(t("safe_import.trust_statement"), color=shell.COLORS["muted"], wrap=520)
-        dpg.add_spacer(height=8)
-        dpg.add_text(t("safe_import.file_select.prompt"), color=shell.COLORS["muted"], wrap=520)
-        dpg.add_input_text(tag=PATH_INPUT, label=t("safe_import.file_select.path_label"), width=400)
-        dpg.add_text("", tag=FILE_ERROR, color=shell.COLORS["error"], wrap=520, show=False)
-        dpg.add_spacer(height=8)
-        with dpg.group(horizontal=True):
-            dpg.add_button(label=t("safe_import.file_select.browse"), width=110, callback=lambda: open_browse())
-            dpg.add_button(
-                label=t("safe_import.file_select.scan"),
-                width=120,
-                callback=lambda: shell.safe_import_scan_path(),
-            )
-            dpg.add_button(
-                label=t("actions.cancel"),
-                width=100,
-                callback=lambda: _delete_if_exists(FILE_MODAL),
-            )
+    _open()
 
 
-def open_browse() -> None:
+def open_browse(shell=None) -> None:
+    """Restore the same import form after either file-picker exit."""
+
     _delete_if_exists(FILE_DIALOG)
+    front_door = dpg.get_alias_id(FILE_MODAL) if dpg.does_item_exist(FILE_MODAL) else None
+
+    def _restore_front_door() -> None:
+        # A late callback must not resurrect a closed form or touch a new one.
+        if front_door is not None and dpg.does_item_exist(front_door):
+            dpg.configure_item(front_door, show=True)
+
+    def _close_and_restore() -> None:
+        if not dpg.does_item_exist(dialog):
+            return
+        modal_swap = getattr(shell, "_defer_modal_swap", None)
+        if callable(modal_swap):
+            modal_swap(
+                _restore_front_door,
+                delete_tags=(dialog,),
+                key="safe_import_browse_close",
+            )
+            return
+        _delete_if_exists(dialog)
+        _restore_front_door()
+
+    def _picked(sender, app_data) -> None:
+        if not dpg.does_item_exist(dialog):
+            return
+        if front_door is not None and dpg.does_item_exist(front_door):
+            _on_file_picked(sender, app_data)
+        _close_and_restore()
+
     with dpg.file_dialog(
         tag=FILE_DIALOG,
         directory_selector=False,
@@ -107,8 +158,9 @@ def open_browse() -> None:
         modal=True,
         width=600,
         height=420,
-        callback=_on_file_picked,
-    ):
+        callback=_picked,
+        cancel_callback=lambda *_args: _close_and_restore(),
+    ) as dialog:
         dpg.add_file_extension(".json", color=(120, 200, 160, 255))
         dpg.add_file_extension(".*")
 
