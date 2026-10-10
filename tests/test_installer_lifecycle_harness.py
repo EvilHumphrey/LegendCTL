@@ -119,6 +119,50 @@ Assert-SameSnapshot $after $after
 """)
         self.assert_success(result)
 
+    def test_data_preservation_accepts_empty_single_and_multiple_snapshot_rows(self):
+        result = self.run_ps("""
+$script:DataRoot=Join-Path $testRoot 'invoking-user'
+$other=Join-Path $testRoot 'other-user'
+$script:DataRoots=@($script:DataRoot,$other)
+foreach($state in @('absent','empty','populated')) {
+    if($state -eq 'empty') { $null=New-Item -ItemType Directory -Path $script:DataRoot }
+    if($state -eq 'populated') {
+        [IO.File]::WriteAllText((Join-Path $script:DataRoot 'settings.json'),'original settings')
+        $null=New-Item -ItemType Directory -Path (Join-Path $script:DataRoot 'profiles')
+        [IO.File]::WriteAllText((Join-Path $script:DataRoot 'profiles/one.json'),'original profile')
+    }
+    $script:DataSnapshot=@(Get-LifecycleTree $script:DataRoot)
+    $expectedCount=@{absent=0;empty=1;populated=4}[$state]
+    if($script:DataSnapshot.Count -ne $expectedCount) { throw 'fixture did not cover snapshot cardinality' }
+    Assert-DataPreserved
+}
+""")
+        self.assert_success(result)
+
+    def test_data_preservation_rejects_changed_missing_and_unexpected_profile_data(self):
+        result = self.run_ps("""
+$script:DataRoot=Join-Path $testRoot 'invoking-user'
+$other=Join-Path $testRoot 'other-user'
+$script:DataRoots=@($script:DataRoot,$other)
+$null=New-Item -ItemType Directory -Path $script:DataRoot
+$file=Join-Path $script:DataRoot 'settings.json'
+[IO.File]::WriteAllText($file,'original settings')
+$script:DataSnapshot=@(Get-LifecycleTree $script:DataRoot)
+foreach($case in @('changed','missing','unexpected')) {
+    [IO.File]::WriteAllText($file,'original settings')
+    if($case -eq 'changed') { [IO.File]::WriteAllText($file,'changed settings') }
+    if($case -eq 'missing') { Remove-Item -LiteralPath $file }
+    if($case -eq 'unexpected') {
+        $null=New-Item -ItemType Directory -Path $other
+        [IO.File]::WriteAllText((Join-Path $other 'settings.json'),'unexpected settings')
+    }
+    $rejected=$false
+    try { Assert-DataPreserved } catch { $rejected=$true }
+    if(-not $rejected) { throw "data mutation was accepted: $case" }
+}
+""")
+        self.assert_success(result)
+
     def test_wrong_hash_cannot_reach_mock_launcher_and_retains_failure_receipt(self):
         result = self.run_ps("""
 $script:Evidence=$testRoot

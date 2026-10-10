@@ -89,6 +89,7 @@ jobs:
   build:
     name: Test-gate + build (Windows · Python 3.13)
     runs-on: windows-2025
+    timeout-minutes: 45
     permissions:
       contents: read # build + rehearsal runs never hold a write-capable token
 

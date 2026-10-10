@@ -272,7 +272,7 @@ function Assert-InstalledShortcuts {
 function Assert-DataPreserved {
     foreach ($path in $script:DataRoots) {
         $actual = @(Get-LifecycleTree $path)
-        $expected = if ($path -ieq $script:DataRoot) { $script:DataSnapshot } else { @() }
+        $expected = @(if ($path -ieq $script:DataRoot) { $script:DataSnapshot })
         Require-Lifecycle ((ConvertTo-Json -InputObject $actual -Depth 20 -Compress) -ceq
             (ConvertTo-Json -InputObject $expected -Depth 20 -Compress)) "Installer changed per-user data: $path"
     }
