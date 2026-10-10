@@ -68,7 +68,7 @@ from zd_app.ui.components import (
     table,
     table_empty_state,
 )
-from zd_app.ui.themes import SPACE_LG, SPACE_MD
+from zd_app.ui.themes import COLORS, SPACE_LG, SPACE_MD
 from zd_app.ui.typography import helper_text, screen_title, section_title
 from zd_app.ui.verification_details import format_verification_outcome
 
@@ -105,6 +105,7 @@ TAG_DETAIL_EXPORT_BUTTON = "restore_points_detail_export_button"
 TAG_DETAIL_RESTORE_BUTTON = "restore_points_detail_restore_button"
 TAG_CONFIRM_RESTORE_BUTTON = "restore_points_confirm_restore_button"
 TAG_CONFIRM_PADDLE_ACK = "restore_points_confirm_paddle_ack"
+TAG_CONFIRM_CONTROLS_THEME = "restore_points_confirm_controls_theme"
 TAG_CONFIRM_VIEW_BUTTON = "restore_points_confirm_view_button"
 TAG_CONFIRM_CANCEL_BUTTON = "restore_points_confirm_cancel_button"
 TAG_RESULT_CLOSE_BUTTON = "restore_points_result_close_button"
@@ -693,6 +694,27 @@ def _build_will_restore_lists(shell, rp: RestorePoint) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _bind_confirm_control_theme(item: str) -> None:
+    """Keep consent controls visible without changing other screen widgets."""
+    if not dpg.does_item_exist(TAG_CONFIRM_CONTROLS_THEME):
+        with dpg.theme(tag=TAG_CONFIRM_CONTROLS_THEME):
+            with dpg.theme_component(dpg.mvCheckbox):
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBg, COLORS["bg.raised"])
+                dpg.add_theme_color(dpg.mvThemeCol_Border, COLORS["text.secondary"])
+                dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 1.0)
+            with dpg.theme_component(dpg.mvButton):
+                dpg.add_theme_color(dpg.mvThemeCol_Button, COLORS["accent.muted"])
+                dpg.add_theme_color(dpg.mvThemeCol_Border, COLORS["accent.primary"])
+                dpg.add_theme_color(dpg.mvThemeCol_Text, COLORS["text.primary"])
+                dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 1.0)
+            with dpg.theme_component(dpg.mvButton, enabled_state=False):
+                dpg.add_theme_color(dpg.mvThemeCol_Button, COLORS["bg.base"])
+                dpg.add_theme_color(dpg.mvThemeCol_Border, COLORS["border.subtle"])
+                dpg.add_theme_color(dpg.mvThemeCol_Text, COLORS["text.muted"])
+                dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 1.0)
+    dpg.bind_item_theme(item, TAG_CONFIRM_CONTROLS_THEME)
+
+
 def _build_confirm(shell, service, state: RestorePointsScreenState) -> None:
     token_check = getattr(shell, "_controller_presence_token_is_current", None)
     preview_token_current = (
@@ -785,6 +807,7 @@ def _build_confirm(shell, service, state: RestorePointsScreenState) -> None:
                 )
             ),
         )
+        _bind_confirm_control_theme(TAG_CONFIRM_RESTORE_BUTTON)
         dpg.add_button(
             label=t("restore_points.confirm.view_covered"),
             tag=TAG_CONFIRM_VIEW_BUTTON,
@@ -882,6 +905,7 @@ def _build_write_only_paddle_acknowledgement(
         default_value=state.write_only_paddles_acknowledged,
         callback=lambda _sender, value: _on_paddle_ack_changed(shell, value is True),
     )
+    _bind_confirm_control_theme(TAG_CONFIRM_PADDLE_ACK)
 
 
 # ---------------------------------------------------------------------------
