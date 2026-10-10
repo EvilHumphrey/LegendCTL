@@ -34,9 +34,9 @@ class ExportBoundaryTests(unittest.TestCase):
 
     def test_copied_json_decodes_escaped_keys_and_preserves_scalar_types(self):
         raw = {
-            r"C:\Users\privacy-test\key.json": [{
+            r"C:\Users\secretuser\key.json": [{
                 "id": r"HID\VID_413D&PID_2104\UNIT-PRIVATE",
-                "path": r"C:\Users\privacy-test\capture\trace.json",
+                "path": r"C:\Users\secretuser\capture\trace.json",
                 "count": 3, "ratio": 0.25, "ready": True, "missing": None,
                 "model": "VID_413D&PID_2104", "name": "operator-module-7",
             }]
@@ -48,7 +48,7 @@ class ExportBoundaryTests(unittest.TestCase):
         with zipfile.ZipFile(target) as archive:
             text = archive.read("health_reports/health.json").decode()
             result = json.loads(text)
-        self.assertNotIn("privacy-test", text)
+        self.assertNotIn("secretuser", text)
         self.assertNotIn("UNIT-PRIVATE", text)
         row = result["key.json"][0]
         self.assertEqual(row["path"], "trace.json")
@@ -145,7 +145,7 @@ class ClipboardBoundaryTests(unittest.TestCase):
         shell = make_shell(settings_service=MagicMock())
         shell.device_service.recent_events = MagicMock(return_value=[
             "Connected successfully", r"HID\VID_413D&PID_2104\UNIT-PRIVATE",
-            r"Loaded C:\Users\privacy-test\capture\trace.json",
+            r"Loaded C:\Users\secretuser\capture\trace.json",
         ])
         with _DiagnosticsChildWindowRecorder():
             diagnostics.build(shell, "content_region")
@@ -157,7 +157,7 @@ class ClipboardBoundaryTests(unittest.TestCase):
         self.assertIn("VID_413D&PID_2104", copied)
         self.assertIn("trace.json", copied)
         self.assertNotIn("UNIT-PRIVATE", copied)
-        self.assertNotIn("privacy-test", copied)
+        self.assertNotIn("secretuser", copied)
 
 
 class ReviewedPrivacyBypassTests(unittest.TestCase):
@@ -200,7 +200,7 @@ class ReviewedPrivacyBypassTests(unittest.TestCase):
             base_dir=self.root / "bundles", module_passport_service=passports
         )
         for stamp, expected in (
-            (r"C:\Users\PRIVATEACCOUNT\capture\run.json", "left_stock_run.json_000.json"),
+            (r"C:\Users\SECRETUSER\capture\run.json", "left_stock_run.json_000.json"),
             ("2026-05-26T18:00:00Z", "left_stock_2026-05-26T18_00_00Z_000.json"),
         ):
             with self.subTest(stamp=stamp):
@@ -208,7 +208,7 @@ class ReviewedPrivacyBypassTests(unittest.TestCase):
                 source.write_text(raw, encoding="utf-8")
                 manifest = self.service.preview_bundle_manifest()
                 with self.subTest(boundary="preview"):
-                    self.assertNotIn("PRIVATEACCOUNT", repr(manifest))
+                    self.assertNotIn("SECRETUSER", repr(manifest))
                     self.assertIn("module_passports/archive/" + expected, manifest.member_paths)
                 target = self.root / "passport.zip"
                 self.assertEqual(self.service.generate_bundle_zip(target), target)
@@ -216,8 +216,8 @@ class ReviewedPrivacyBypassTests(unittest.TestCase):
                     self.assertEqual(tuple(archive.namelist()), manifest.member_paths)
                     for name in archive.namelist():
                         with self.subTest(boundary="zip", member=name):
-                            self.assertNotIn("PRIVATEACCOUNT", name)
-                            self.assertNotIn("PRIVATEACCOUNT", archive.read(name).decode())
+                            self.assertNotIn("SECRETUSER", name)
+                            self.assertNotIn("SECRETUSER", archive.read(name).decode())
                 self.assertEqual(source.read_text(encoding="utf-8"), raw)
 
 
