@@ -2635,6 +2635,7 @@ class SettingsService:
                     query,
                     expected_cat=CATEGORY_BUTTON_BINDING,
                     expected_selector=slot.value,
+                    min_length=11,
                 )
             except SettingsServiceError as exc:
                 last_error = str(exc)
@@ -2816,13 +2817,20 @@ class SettingsService:
 
         try:
             query = build_read_query_payload(CATEGORY_STICK_DEADZONE, DEADZONE_SUBCOMMAND)
-            response = self._read_response(query, expected_cat=CATEGORY_STICK_DEADZONE)
-            return StickDeadzones(
+            response = self._read_response(
+                query, expected_cat=CATEGORY_STICK_DEADZONE, min_length=11
+            )
+            deadzones = StickDeadzones(
                 left_center=response[7],
                 right_center=response[8],
                 left_outer=response[9],
                 right_outer=response[10],
             )
+            try:
+                return _validate_stick_deadzones(deadzones)
+            except (TypeError, ValueError):
+                logger.warning("invalid deadzones readback; omitting category")
+                return None
         except SettingsServiceError as exc:
             logger.warning("get_deadzones failed: %s", exc)
             return None
@@ -2993,6 +3001,7 @@ class SettingsService:
             response = self._read_response(
                 query,
                 expected_cat=CATEGORY_STICK_SENSITIVITY,
+                min_length=19,
             )
             left: SensitivityAnchorTuple = (
                 SensitivityAnchor(x=response[7], y=response[8]),
@@ -3004,7 +3013,14 @@ class SettingsService:
                 SensitivityAnchor(x=response[15], y=response[16]),
                 SensitivityAnchor(x=response[17], y=response[18]),
             )
-            return (left, right)
+            try:
+                return (
+                    _validate_sensitivity_anchors(left),
+                    _validate_sensitivity_anchors(right),
+                )
+            except (TypeError, ValueError):
+                logger.warning("invalid sensitivity readback; omitting category")
+                return None
         except SettingsServiceError as exc:
             logger.warning("get_sensitivity_curves failed: %s", exc)
             return None
@@ -3045,7 +3061,12 @@ class SettingsService:
 
         try:
             query = build_read_query_payload(CATEGORY_STICK_INVERSION, INVERSION_SUBCOMMAND)
-            response = self._read_response(query, expected_cat=CATEGORY_STICK_INVERSION)
+            response = self._read_response(
+                query, expected_cat=CATEGORY_STICK_INVERSION, min_length=11
+            )
+            if any(flag not in (0, 1) for flag in response[7:11]):
+                logger.warning("invalid axis inversion readback; omitting category")
+                return None
             left = AxisInversion(
                 x_inverted=bool(response[7]),
                 y_inverted=bool(response[8]),
@@ -3106,24 +3127,29 @@ class SettingsService:
 
         try:
             query = build_read_query_payload(CATEGORY_TRIGGER_SETTINGS, TRIGGER_SUBCOMMAND)
-            response = self._read_response(query, expected_cat=CATEGORY_TRIGGER_SETTINGS)
+            response = self._read_response(
+                query, expected_cat=CATEGORY_TRIGGER_SETTINGS, min_length=13
+            )
             try:
                 left_mode = TriggerMode(response[11])
                 right_mode = TriggerMode(response[12])
-            except ValueError as exc:
-                logger.warning("unknown trigger mode byte: %s", exc)
+                left = TriggerSettings(
+                    range_min=response[7],
+                    range_max=response[10],
+                    mode=left_mode,
+                )
+                right = TriggerSettings(
+                    range_min=response[8],
+                    range_max=response[9],
+                    mode=right_mode,
+                )
+                return (
+                    _validate_trigger_settings(left),
+                    _validate_trigger_settings(right),
+                )
+            except (TypeError, ValueError):
+                logger.warning("invalid trigger settings readback; omitting category")
                 return None
-            left = TriggerSettings(
-                range_min=response[7],
-                range_max=response[10],
-                mode=left_mode,
-            )
-            right = TriggerSettings(
-                range_min=response[8],
-                range_max=response[9],
-                mode=right_mode,
-            )
-            return (left, right)
         except SettingsServiceError as exc:
             logger.warning("get_trigger_settings failed: %s", exc)
             return None
@@ -3143,19 +3169,22 @@ class SettingsService:
 
         try:
             query = build_read_query_payload(CATEGORY_VIBRATION, VIBRATION_SUBCOMMAND)
-            response = self._read_response(query, expected_cat=CATEGORY_VIBRATION)
+            response = self._read_response(
+                query, expected_cat=CATEGORY_VIBRATION, min_length=12
+            )
             try:
                 mode = TriggerVibrationMode(response[11])
-            except ValueError:
-                logger.warning("unknown vibration mode byte: 0x%02x", response[11])
+                vibration = VibrationSettings(
+                    left_grip_strength=response[7],
+                    right_grip_strength=response[8],
+                    left_trigger_motor_strength=response[9],
+                    right_trigger_motor_strength=response[10],
+                    mode=mode,
+                )
+                return _validate_vibration_settings(vibration)
+            except (TypeError, ValueError):
+                logger.warning("invalid vibration readback; omitting category")
                 return None
-            return VibrationSettings(
-                left_grip_strength=response[7],
-                right_grip_strength=response[8],
-                left_trigger_motor_strength=response[9],
-                right_trigger_motor_strength=response[10],
-                mode=mode,
-            )
         except SettingsServiceError as exc:
             logger.warning("get_vibration failed: %s", exc)
             return None
@@ -3170,7 +3199,9 @@ class SettingsService:
 
         try:
             query = build_read_query_payload(CATEGORY_MOTION, MOTION_SUBCOMMAND)
-            response = self._read_response(query, expected_cat=CATEGORY_MOTION)
+            response = self._read_response(
+                query, expected_cat=CATEGORY_MOTION, min_length=12
+            )
             try:
                 target = MotionMappingTarget(response[7])
             except ValueError:
@@ -3388,6 +3419,7 @@ class SettingsService:
                 query,
                 expected_cat=CATEGORY_LIGHTING,
                 expected_selector=zone.value,
+                min_length=14,
             )
             if response[7] != zone.value:
                 logger.warning(
@@ -3862,6 +3894,7 @@ class SettingsService:
         expected_cat: int,
         expected_selector: Optional[int] = None,
         timeout_ms: int = READ_RESPONSE_TIMEOUT_MS,
+        min_length: int = 8,
     ) -> bytes:
         if len(query_payload) != HID_FEATURE_REPORT_SIZE:
             raise SettingsServiceError(
@@ -3977,6 +4010,13 @@ class SettingsService:
                     f"got 0x{response[7]:02x}"
                 )
             else:
+                # Keep ACK/stale-frame filtering independent of the requested
+                # category's payload size. Only matching replies reach decode.
+                if len(response) < min_length:
+                    raise SettingsServiceError(
+                        f"read response too short: {len(response)} bytes "
+                        f"(need >= {min_length})"
+                    )
                 return response
             if self._clock() >= deadline:
                 break

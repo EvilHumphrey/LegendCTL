@@ -42,7 +42,11 @@ from typing import Any, Callable, Iterable, Mapping, Optional
 
 from zd_app.services.diagnostic_bundle.boundary import CLAIM_BOUNDARY_PARAGRAPH
 from zd_app.services.markdown_safety import escape_markdown
-from zd_app.services.path_scrub import APP_DATA_PLACEHOLDER, scrub_value
+from zd_app.services.path_scrub import (
+    APP_DATA_PLACEHOLDER,
+    sanitize_shareable_json,
+    sanitize_shareable_text,
+)
 from zd_app.services.module_passport import ModulePassportService
 from zd_app.services.wear_ledger import WearLedgerService
 from zd_app.services.wear_ledger.models import (
@@ -217,7 +221,10 @@ class DiagnosticBundleService:
             self._render_lifecycle_summary(wear_ledger_days=wear_ledger_days),
             self._render_not_included(),
         ]
-        return "\n\n".join(s.rstrip() for s in sections if s) + "\n"
+        rendered = "\n\n".join(s.rstrip() for s in sections if s) + "\n"
+        # Markdown-only export bypasses the ZIP writer, so enforce the same
+        # privacy boundary on the completed standalone artifact.
+        return self._sanitize_path(rendered)
 
     def generate_bundle_zip(
         self,
@@ -246,12 +253,15 @@ class DiagnosticBundleService:
         target_path = Path(target_path)
 
         try:
-            members = self._bundle_members(
+            raw_members = self._bundle_members(
                 include_archived=include_archived,
                 health_report_limit=health_report_limit,
                 wear_ledger_days=wear_ledger_days,
                 device_identity=device_identity,
             )
+            # Final share-safety choke. Source-specific sanitizers remain useful
+            # for previews, but no raw/new member may bypass this boundary.
+            members = self._validated_bundle_members(raw_members)
             target_path.parent.mkdir(parents=True, exist_ok=True)
             with zipfile.ZipFile(
                 target_path,
@@ -260,7 +270,13 @@ class DiagnosticBundleService:
             ) as zf:
                 for member in members:
                     zf.writestr(member.path, member.text)
-        except (OSError, zipfile.BadZipFile, ValueError):
+        except (
+            OSError,
+            TypeError,
+            ValueError,
+            RecursionError,
+            zipfile.BadZipFile,
+        ):
             logger.exception(
                 "DiagnosticBundleService: ZIP write failed at %r",
                 str(target_path),
@@ -291,7 +307,7 @@ class DiagnosticBundleService:
             device_identity=device_identity,
         )
         return self._preview_manifest_from_members(
-            members,
+            self._validated_bundle_members(members),
             wear_ledger_days=wear_ledger_days,
         )
 
@@ -346,7 +362,7 @@ class DiagnosticBundleService:
         ``""``; other non-strings via ``str(...)``.
         """
 
-        return scrub_value(value)
+        return sanitize_shareable_text(value)
 
     def _sanitize_markdown(self, value: Any) -> str:
         return escape_markdown(self._sanitize_path(value))
@@ -630,8 +646,8 @@ class DiagnosticBundleService:
             ]
             return result
         try:
-            payload = read_guarded_json(json_sibling)
-        except (OSError, ValueError, RecursionError, json.JSONDecodeError):
+            payload = sanitize_shareable_json(read_guarded_json(json_sibling))
+        except (OSError, TypeError, ValueError, RecursionError):
             logger.exception(
                 "DiagnosticBundleService: failed to read health report JSON %r",
                 str(json_sibling),
@@ -730,14 +746,16 @@ class DiagnosticBundleService:
                 )
             elif event.event_type == SERVICE_NOTE:
                 if len(recent_service_notes) < DEFAULT_RECENT_SERVICE_NOTES:
-                    preview = str(details.get("note") or event.summary or "")
+                    preview = self._sanitize_path(
+                        details.get("note") or event.summary or ""
+                    )
                     preview = preview.strip().replace("\n", " ")
                     if len(preview) > 80:
                         preview = preview[:80] + "..."
                     recent_service_notes.append(
                         {
                             "ts": self._sanitize_path(event.ts),
-                            "preview": self._sanitize_path(preview),
+                            "preview": preview,
                         }
                     )
         return {
@@ -754,19 +772,99 @@ class DiagnosticBundleService:
     # ------------------------------------------------------------------
 
     def _sanitized_passport_dict(self, passport: ModulePassport) -> dict[str, Any]:
-        """``passport.to_dict()`` with the operator-assignable freeform fields
-        (``module_id`` + ``notes``) run through :meth:`_sanitize_path`.
+        """Return a recursively share-sanitized passport JSON mapping."""
 
-        These are the only passport fields that can carry an absolute path
-        (the rest are timestamps / numeric metrics), so scrubbing them keeps
-        the JSON dump inside the bundle consistent with report.md and the
-        module's "all paths sanitized" guarantee.
+        sanitized = sanitize_shareable_json(passport.to_dict())
+        if not isinstance(sanitized, dict):  # defensive schema assertion
+            raise TypeError("sanitized passport must remain a mapping")
+        return sanitized
+
+    def _sanitize_bundle_member(self, member: _BundleMember) -> _BundleMember:
+        """Enforce share-safety on one member at the final ZIP boundary."""
+
+        path = self._sanitize_member_path(member.path)
+        if path.casefold().endswith(".json"):
+            payload = json.loads(member.text)
+            sanitized_payload = sanitize_shareable_json(payload)
+            text = json.dumps(
+                sanitized_payload,
+                indent=2,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        else:
+            text = self._sanitize_path(member.text)
+        return _BundleMember(
+            path=path,
+            text=text,
+            class_key=member.class_key,
+            metadata=sanitize_shareable_json(member.metadata),
+        )
+
+    def _validated_bundle_members(
+        self, raw_members: Iterable[_BundleMember]
+    ) -> tuple[_BundleMember, ...]:
+        """Validate the entire archive before opening or truncating its target.
+
+        ZIP permits duplicate names, but consumers disagree on which wins.
+        Reject duplicates using Unicode casefold, including differently cased
+        names, for portable extraction on case-insensitive filesystems. Reject
+        file/directory prefix conflicts under the same policy.
         """
+        members = tuple(self._sanitize_bundle_member(m) for m in raw_members)
+        names: set[str] = set()
+        for member in members:
+            name = member.path.casefold()
+            if name in names:
+                raise ValueError("duplicate diagnostic bundle member after sanitation")
+            names.add(name)
+            # ZipFile encodes strings while writing. Validate encoding before
+            # opening the output so malformed Unicode cannot truncate it.
+            member.path.encode("utf-8")
+            member.text.encode("utf-8")
+        for name in names:
+            parts = name.split("/")
+            if any("/".join(parts[:i]) in names for i in range(1, len(parts))):
+                raise ValueError("conflicting diagnostic bundle member paths")
+        return members
 
-        raw = passport.to_dict()
-        raw["module_id"] = self._sanitize_path(raw.get("module_id"))
-        raw["notes"] = self._sanitize_path(raw.get("notes"))
-        return raw
+    def _sanitize_member_path(self, value: object) -> str:
+        """Sanitize a relative ZIP path; reject unsafe raw and resulting parts.
+
+        Backslashes are path separators for validation, just as on Windows.
+        Empty/dot components, drive/ADS colons, controls, Windows reserved
+        names and trailing dots/spaces are rejected rather than normalized.
+        """
+        if not isinstance(value, str):
+            raise TypeError("diagnostic bundle member path must be a string")
+
+        def validate(parts: list[str]) -> None:
+            reserved = {"con", "prn", "aux", "nul", "conin$", "conout$"}
+            reserved.update(f"{prefix}{n}" for prefix in ("com", "lpt") for n in range(1, 10))
+            for part in parts:
+                if (
+                    not part or part in {".", ".."}
+                    or part.endswith((".", " "))
+                    or any(ord(c) < 32 or ord(c) == 127 for c in part)
+                    or any(c in part for c in ':<>"/\\|?*')
+                    or part.split(".", 1)[0].casefold() in reserved
+                ):
+                    raise ValueError("unsafe diagnostic bundle member path")
+
+        raw_parts = value.replace("\\", "/").split("/")
+        validate(raw_parts)
+        parts: list[str] = []
+        for raw_part in raw_parts:
+            safe_part = self._sanitize_path(raw_part)
+            suffix = Path(raw_part).suffix
+            if (
+                suffix.casefold() in {".json", ".md"}
+                and not safe_part.casefold().endswith(suffix.casefold())
+            ):
+                safe_part += suffix
+            parts.append(safe_part)
+        validate(parts)
+        return "/".join(parts)
 
     def _bundle_members(
         self,
@@ -997,7 +1095,10 @@ class DiagnosticBundleService:
                     # own metadata so the entry order matches the rendered
                     # order in the Markdown.
                     safe_id = _safe_filename_segment(self._sanitize_path(passport.module_id))
-                    stamp = _safe_filename_segment(passport.assigned_at_utc)
+                    # Stored timestamps are string-validated, not necessarily
+                    # dates. Scrub before filename normalization erases path
+                    # separators and makes sensitive components unrecognizable.
+                    stamp = _safe_filename_segment(self._sanitize_path(passport.assigned_at_utc))
                     members.append(
                         _BundleMember(
                             path=(
@@ -1034,7 +1135,10 @@ class DiagnosticBundleService:
             try:
                 members.append(
                     _BundleMember(
-                        path=f"health_reports/{md_path.name}",
+                        path=(
+                            "health_reports/"
+                            f"{self._sanitize_member_path(md_path.name)}"
+                        ),
                         text=self._sanitize_path(
                             md_path.read_text(encoding="utf-8")
                         ),
@@ -1054,11 +1158,22 @@ class DiagnosticBundleService:
             json_sibling = md_path.with_suffix(".json")
             if json_sibling.exists():
                 try:
+                    payload = read_guarded_json(json_sibling)
+                    sanitized_payload = sanitize_shareable_json(payload)
                     members.append(
                         _BundleMember(
-                            path=f"health_reports/{json_sibling.name}",
-                            text=self._sanitize_path(
-                                json_sibling.read_text(encoding="utf-8")
+                            path=(
+                                "health_reports/"
+                                f"{self._sanitize_member_path(json_sibling.name)}"
+                            ),
+                            # Sanitize structurally here so preview assembly
+                            # remains best-effort for malformed siblings. The
+                            # final ZIP choke repeats this before writing.
+                            text=json.dumps(
+                                sanitized_payload,
+                                indent=2,
+                                ensure_ascii=False,
+                                sort_keys=True,
                             ),
                             class_key="health_report",
                             metadata={
@@ -1067,9 +1182,14 @@ class DiagnosticBundleService:
                             },
                         )
                     )
-                except OSError:
+                except (
+                    OSError,
+                    TypeError,
+                    ValueError,
+                    RecursionError,
+                ):
                     logger.exception(
-                        "DiagnosticBundleService: failed to read JSON %r",
+                        "DiagnosticBundleService: failed to sanitize JSON %r",
                         str(json_sibling),
                     )
         return members

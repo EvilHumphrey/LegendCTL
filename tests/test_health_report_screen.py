@@ -11,6 +11,7 @@ fully deterministic and independent of the real sample capture pipeline.
 
 from __future__ import annotations
 
+import dataclasses
 import tempfile
 import unittest
 from pathlib import Path
@@ -492,6 +493,37 @@ class SummaryRenderTests(unittest.TestCase):
             clipboard_calls = [c for c in ps.calls if c[0] == "set_clipboard_text"]
 
         self.assertEqual(len(clipboard_calls), 1)
+
+    def test_summary_copy_redacts_instance_tail_and_home_path(self) -> None:
+        base = _fixture_report()
+        report = dataclasses.replace(
+            base,
+            device=dataclasses.replace(
+                base.device,
+                controller_name=(
+                    r"HID\VID_413D&PID_2104&MI_02\UNIT-SERIAL-123"
+                ),
+                profile_name=r"C:\Users\Jane Doe\profiles\apex.json",
+            ),
+        )
+        service = _FakeService(
+            state=HealthReportState.COMPLETE,
+            report=report,
+        )
+        shell = _shell_with(service)
+
+        with _PatchedScreen(shell) as ps:
+            ps.build()
+            ps.buttons[screen.TAG_SUMMARY_COPY]()
+            clipboard_calls = [
+                call for call in ps.calls if call[0] == "set_clipboard_text"
+            ]
+
+        copied = clipboard_calls[0][1][0]
+        self.assertIn("VID_413D&PID_2104", copied)
+        self.assertIn("apex.json", copied)
+        self.assertNotIn("UNIT-SERIAL-123", copied)
+        self.assertNotIn("Jane Doe", copied)
 
     def test_summary_renders_three_comparison_tables(self) -> None:
         service = _FakeService(state=HealthReportState.COMPLETE,

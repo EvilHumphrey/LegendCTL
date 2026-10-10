@@ -18,6 +18,8 @@ from zd_app.services.path_scrub import (
     APP_DATA_PLACEHOLDER,
     HOME_PLACEHOLDER,
     PathScrubbingFormatter,
+    sanitize_shareable_json,
+    sanitize_shareable_text,
     scrub_paths,
     scrub_value,
 )
@@ -1870,6 +1872,78 @@ class TraversalInMarkerTailTrimTests(unittest.TestCase):
             _d("C:/Users/jane.doe/AppData/Roaming/ZDUltimateLegend/logs/sub/x.log")
         )
         self.assertEqual(out, f"{APP_DATA_PLACEHOLDER}/logs/sub/x.log")
+
+
+class ShareableArtifactSanitizerTests(unittest.TestCase):
+    def test_composes_path_and_inline_instance_redaction(self) -> None:
+        raw = (
+            r"open \\?\HID#VID_413D&PID_2104&MI_02#"
+            r"7&2f3a1c2b&0&0000#{12345678-1234-1234-1234-123456789abc} "
+            r"from C:\Users\Jane Doe\capture\trace.json"
+        )
+
+        out = sanitize_shareable_text(raw)
+
+        self.assertIn("VID_413D&PID_2104", out)
+        self.assertIn("trace.json", out)
+        self.assertNotIn("2f3a1c2b", out)
+        self.assertNotIn("Jane", out)
+
+    def test_recursive_json_sanitizes_nested_string_values_and_keeps_types(self) -> None:
+        raw = {
+            "fingerprints": [
+                {
+                    "notes": r"HID\VID_413D&PID_2104&MI_02\UNIT-123",
+                    "samples": 12000,
+                    "ok": True,
+                    "missing": None,
+                }
+            ]
+        }
+
+        out = sanitize_shareable_json(raw)
+
+        self.assertEqual(
+            out["fingerprints"][0]["notes"],
+            r"HID\VID_413D&PID_2104",
+        )
+        self.assertEqual(out["fingerprints"][0]["samples"], 12000)
+        self.assertIs(out["fingerprints"][0]["ok"], True)
+        self.assertIsNone(out["fingerprints"][0]["missing"])
+
+    def test_recursive_json_rejects_unknown_objects(self) -> None:
+        with self.assertRaises(TypeError):
+            sanitize_shareable_json({"value": object()})
+
+    def test_instance_tail_with_legal_punctuation_is_fully_redacted(self) -> None:
+        for tail in (
+            "UNIT!SERIAL-123",
+            "UNIT@SERIAL(123)",
+            "UNIT;SERIAL=123",
+            "UNIT[ABC]:~",
+        ):
+            with self.subTest(tail=tail):
+                raw = rf"HID\VID_413D&PID_2104&MI_02\{tail}"
+                self.assertEqual(
+                    sanitize_shareable_text(raw),
+                    r"HID\VID_413D&PID_2104",
+                )
+
+    def test_adjacent_status_text_is_not_mistaken_for_an_instance_tail(self) -> None:
+        raw = "VID_413D&PID_2104&status=failed"
+        self.assertEqual(sanitize_shareable_text(raw), raw)
+
+    def test_recursive_json_sanitizes_string_mapping_keys(self) -> None:
+        raw = {
+            r"C:\Users\Jane Doe\keys\secret.json": (
+                r"HID\VID_413D&PID_2104&MI_02\UNIT-SERIAL-123"
+            )
+        }
+
+        self.assertEqual(
+            sanitize_shareable_json(raw),
+            {"secret.json": r"HID\VID_413D&PID_2104"},
+        )
 
 
 class InteriorDotTraversalClosureMatrixTests(unittest.TestCase):

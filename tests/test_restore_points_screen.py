@@ -26,6 +26,7 @@ from zd_app.services.restore_points import (
 )
 from zd_app.services.settings_service import (
     AxisInversion,
+    BackPaddleBinding,
     ButtonMapping,
     ButtonSlot,
     ControllerButtonTarget,
@@ -33,6 +34,7 @@ from zd_app.services.settings_service import (
     LightingMode,
     LightingSettings,
     LightingZone,
+    MacroSlot,
     PollingRate,
     RgbColor,
     SensitivityAnchor,
@@ -51,6 +53,7 @@ from zd_app.storage.restore_point_models import (
     DeviceIdentity,
     FieldCoverage,
     IdentityConfidence,
+    PreparedRestore,
     RestoreFieldDelta,
     RestoreFieldOutcome,
     RestorePoint,
@@ -183,6 +186,30 @@ def _rp(
     )
 
 
+def _rp_with_paddle(
+    id: str = "rp_20260524_190355_9b42de",
+) -> RestorePoint:
+    rp = _rp(id=id)
+    fields = dict(rp.coverage.fields)
+    fields["back_paddle_bindings"] = FieldCoverage(
+        state=CoverageState.CAPTURED,
+        readable=False,
+        writable=True,
+        category=CoverageCategory.LAYOUT,
+        note="Write-only; cannot be read back.",
+    )
+    return replace(
+        rp,
+        snapshot=replace(
+            rp.snapshot,
+            back_paddle_bindings={
+                MacroSlot.M1: BackPaddleBinding(ControllerButtonTarget.A),
+            },
+        ),
+        coverage=replace(rp.coverage, fields=fields),
+    )
+
+
 def _result() -> RestoreResult:
     return RestoreResult(
         label=RestoreResultLabel.VERIFIED,
@@ -242,8 +269,18 @@ class _FakeService:
         self.calls.append(("list_with_skipped", (), {}))
         return list(self._valid), list(self._skipped)
 
-    def restore(self, rp_id: str, *, excluded_fields=None):
-        self.calls.append(("restore", (rp_id,), {"excluded_fields": excluded_fields}))
+    def restore(self, prepared: PreparedRestore, *, acknowledge_write_only_paddles=False, presence_guard=None):
+        self.calls.append(
+            (
+                "restore",
+                (prepared.restore_point_id,),
+                {
+                    "acknowledge_write_only_paddles": (
+                        acknowledge_write_only_paddles
+                    )
+                },
+            )
+        )
         if self._restore_raises is not None:
             raise self._restore_raises
         return self._restore_result
@@ -267,6 +304,31 @@ class _FakeService:
                 fields_unreadable=0,
             )
         return self._preview
+
+    def prepare_restore(self, rp_id: str) -> PreparedRestore:
+        self.calls.append(("prepare_restore", (rp_id,), {}))
+        if self._preview_raises is not None:
+            raise self._preview_raises
+        rp = self._fake_load(rp_id)
+        preview = self.compute_restore_preview(rp_id)
+        paddle_coverage = rp.coverage.fields.get("back_paddle_bindings")
+        paddle_slots: tuple[str, ...] = ()
+        if (
+            paddle_coverage is not None
+            and paddle_coverage.writable
+            and paddle_coverage.state
+            in (CoverageState.CAPTURED, CoverageState.PARTIAL)
+        ):
+            paddle_slots = tuple(
+                slot.name
+                for slot in MacroSlot
+                if slot in (rp.snapshot.back_paddle_bindings or {})
+            )
+        return PreparedRestore.from_restore_point(
+            rp,
+            preview=preview,
+            write_only_paddle_slots=paddle_slots,
+        )
 
 
 def _shell_with(
@@ -312,6 +374,7 @@ class _PatchedScreen:
         self.values: dict[str, object] = {}
         self.calls: list[tuple[str, tuple, dict]] = []
         self.buttons: list[dict] = []
+        self.checkboxes: list[dict] = []
         self.child_windows: list[dict] = []
         self.tables: list[dict] = []
         self.table_columns: list[dict] = []
@@ -325,6 +388,8 @@ class _PatchedScreen:
                 self.calls.append((name, args, kw))
                 if name == "add_button":
                     self.buttons.append(kw)
+                elif name == "add_checkbox":
+                    self.checkboxes.append(kw)
                 elif name == "add_table_column":
                     self.table_columns.append(kw)
                 return kw.get("tag", name)
@@ -368,6 +433,7 @@ class _PatchedScreen:
             add_text=record("add_text"),
             add_spacer=record("add_spacer"),
             add_button=record("add_button"),
+            add_checkbox=record("add_checkbox"),
             add_progress_bar=record("add_progress_bar"),
             add_table_column=record("add_table_column"),
             child_window=record_child_window,
@@ -751,6 +817,65 @@ class ConfirmViewTests(unittest.TestCase):
         self.assertEqual(state.view, screen.VIEW_IN_PROGRESS)
         ps.shell.rebuild_current_screen.assert_called()
 
+    def test_write_only_paddle_requires_visible_acknowledgement(self) -> None:
+        rp = _rp_with_paddle()
+        service = _FakeService(valid=[rp])
+        ps = self._open_confirm(service, rp.id)
+        try:
+            all_text = " ".join(ps.text_strings())
+            restore_button = next(
+                kw
+                for kw in ps.buttons
+                if kw.get("tag") == screen.TAG_CONFIRM_RESTORE_BUTTON
+            )
+            acknowledgement = next(
+                kw
+                for kw in ps.checkboxes
+                if kw.get("tag") == screen.TAG_CONFIRM_PADDLE_ACK
+            )
+        finally:
+            ps.__exit__(None, None, None)
+
+        self.assertIn("Write-only back-paddle bindings", all_text)
+        self.assertIn("M1: →A", all_text)
+        self.assertIn("cannot read these bindings back", all_text)
+        self.assertNotIn("No changes detected", all_text)
+        self.assertFalse(restore_button["enabled"])
+        self.assertIn("cannot be read back or verified", acknowledgement["label"])
+
+        screen._on_confirm_restore(ps.shell)
+        state = ps.shell.restore_points_screen_state
+        self.assertEqual(state.view, screen.VIEW_CONFIRM)
+        self.assertEqual(
+            state.status_text,
+            i18n.t("restore_points.confirm.paddle_ack_required"),
+        )
+
+        screen._on_paddle_ack_changed(ps.shell, True)
+        screen._on_confirm_restore(ps.shell)
+        self.assertEqual(state.view, screen.VIEW_IN_PROGRESS)
+
+    def test_selection_change_invalidates_prepared_restore_before_write(self) -> None:
+        first = _rp(id="rp_20260524_190355_000001")
+        second = _rp(id="rp_20260524_190355_000002")
+        service = _FakeService(valid=[first, second])
+        ps = self._open_confirm(service, first.id)
+        try:
+            screen._on_confirm_restore(ps.shell)
+            state = ps.shell.restore_points_screen_state
+            self.assertEqual(state.view, screen.VIEW_IN_PROGRESS)
+            state.selected_rp_id = second.id
+            screen._execute_restore(ps.shell)
+        finally:
+            ps.__exit__(None, None, None)
+
+        self.assertEqual(state.view, screen.VIEW_CONFIRM)
+        self.assertIsNone(state.prepared_restore)
+        self.assertEqual(
+            [call for call in service.calls if call[0] == "restore"],
+            [],
+        )
+
     def test_confirm_cancel_returns_to_detail(self) -> None:
         rp = _rp()
         service = _FakeService(valid=[rp])
@@ -933,10 +1058,12 @@ class ConfirmViewTests(unittest.TestCase):
 
 class InProgressViewTests(unittest.TestCase):
     def test_in_progress_view_renders_spinner_text(self) -> None:
+        rp_id = "rp_20260524_190355_000999"
         state = screen.RestorePointsScreenState(
-            view=screen.VIEW_IN_PROGRESS, selected_rp_id="rp_test"
+            view=screen.VIEW_IN_PROGRESS, selected_rp_id=rp_id
         )
-        service = _FakeService(valid=[_rp(id="rp_test")])
+        service = _FakeService(valid=[_rp(id=rp_id)])
+        state.prepared_restore = service.prepare_restore(rp_id)
         shell = _shell_with(service, screen_state=state)
         with _PatchedScreen(shell) as ps:
             ps.build()
@@ -944,10 +1071,12 @@ class InProgressViewTests(unittest.TestCase):
         self.assertIn("Restoring", all_text)
 
     def test_execute_restore_transitions_to_result_on_success(self) -> None:
+        rp_id = "rp_20260524_190355_000999"
         state = screen.RestorePointsScreenState(
-            view=screen.VIEW_IN_PROGRESS, selected_rp_id="rp_test"
+            view=screen.VIEW_IN_PROGRESS, selected_rp_id=rp_id
         )
-        service = _FakeService(valid=[_rp(id="rp_test")])
+        service = _FakeService(valid=[_rp(id=rp_id)])
+        state.prepared_restore = service.prepare_restore(rp_id)
         shell = _shell_with(service, screen_state=state)
         screen._execute_restore(shell)
         self.assertEqual(shell.restore_points_screen_state.view, screen.VIEW_RESULT)
@@ -958,10 +1087,12 @@ class InProgressViewTests(unittest.TestCase):
         )
 
     def test_execute_restore_pending_consent_refuses_without_calling_service(self) -> None:
+        rp_id = "rp_20260524_190355_000999"
         state = screen.RestorePointsScreenState(
-            view=screen.VIEW_IN_PROGRESS, selected_rp_id="rp_test"
+            view=screen.VIEW_IN_PROGRESS, selected_rp_id=rp_id
         )
-        service = _FakeService(valid=[_rp(id="rp_test")])
+        service = _FakeService(valid=[_rp(id=rp_id)])
+        state.prepared_restore = service.prepare_restore(rp_id)
         shell = _shell_with(service, screen_state=state)
         shell._consent_pending_write_allowed_or_refuse = MagicMock(return_value=False)
 
@@ -980,13 +1111,15 @@ class InProgressViewTests(unittest.TestCase):
         )
 
     def test_execute_restore_transitions_to_list_on_exception(self) -> None:
+        rp_id = "rp_20260524_190355_000999"
         state = screen.RestorePointsScreenState(
-            view=screen.VIEW_IN_PROGRESS, selected_rp_id="rp_test"
+            view=screen.VIEW_IN_PROGRESS, selected_rp_id=rp_id
         )
         service = _FakeService(
-            valid=[_rp(id="rp_test")],
+            valid=[_rp(id=rp_id)],
             restore_raises=RuntimeError("HID timeout"),
         )
+        state.prepared_restore = service.prepare_restore(rp_id)
         shell = _shell_with(service, screen_state=state)
         screen._execute_restore(shell)
         self.assertEqual(shell.restore_points_screen_state.view, screen.VIEW_LIST)

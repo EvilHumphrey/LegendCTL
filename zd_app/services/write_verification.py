@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Optional
 
+from zd_app.i18n import t
 from zd_app.services.restore_field_formatting import format_field_value
 from zd_app.services.settings_service import (
     SENSITIVITY_STICK_LEFT,
@@ -91,12 +92,12 @@ def summarize_field_outcomes(
     """Summarize per-field outcomes into the counters that drive the Apply
     footer disclosure and Verification Details (Phase 2 UI).
 
-    ``verified_matched`` counts every ``verify_matched is True`` field — even one
-    whose WRITE failed (a pre-existing value matching the request is genuine
-    read-back evidence for the details view). Callers asserting apply-wide
-    success (the all-verified footer note) must additionally gate on
-    ``write_failed == 0``. ``could_not_verify`` counts only written-but-
-    unconfirmed fields; write-failed fields are disclosed as failures instead.
+    ``verified_matched`` counts fields whose ``verify_matched is True``.
+    The outcome builder only verifies fields with affirmative writer receipts;
+    matching pre-existing values cannot verify a failed or unwritten change.
+    Callers asserting apply-wide success must also require ``write_failed == 0``.
+    ``could_not_verify`` counts only written-but-unconfirmed fields; write-failed
+    fields are disclosed as failures instead.
     """
 
     fields = tuple(outcomes)
@@ -549,17 +550,43 @@ def build_field_outcomes(
     """Map attempted fields to distinct write and three-valued read outcomes."""
 
     failures_by_label = {failure.setting_label: failure for failure in apply_result.failed}
+    attempted_labels = frozenset(getattr(apply_result, "attempted_labels", ()))
+    succeeded_labels = frozenset(getattr(apply_result, "succeeded_labels", ()))
 
     outcomes: list[RestoreFieldOutcome] = []
     for name in attempted_fields:
         labels = apply_labels_for(name, expected_snapshot)
-        write_succeeded = True
+        write_succeeded = bool(labels)
         write_error: Optional[str] = None
+        if not labels:
+            logger.error(
+                "write verification: attempted field %r has no supported writer label",
+                name,
+            )
+            write_error = t("apply.error.write_failed")
         for label in labels:
             failure = failures_by_label.get(label)
             if failure is not None:
                 write_succeeded = False
                 write_error = failure.error
+                break
+            if label not in attempted_labels:
+                logger.error(
+                    "write verification: field %r has no attempt receipt for label %r",
+                    name,
+                    label,
+                )
+                write_succeeded = False
+                write_error = t("apply.error.write_failed")
+                break
+            if label not in succeeded_labels:
+                logger.error(
+                    "write verification: field %r has no success receipt for label %r",
+                    name,
+                    label,
+                )
+                write_succeeded = False
+                write_error = t("apply.error.write_failed")
                 break
 
         expected_value = getattr(expected_snapshot, name)
@@ -568,7 +595,10 @@ def build_field_outcomes(
         observed_str: Optional[str] = None
         verify_matched: Optional[bool]
         verify_note: Optional[str]
-        if name in COLLECTION_FIELD_NAMES:
+        if not write_succeeded:
+            verify_matched = None
+            verify_note = "write success was not established"
+        elif name in COLLECTION_FIELD_NAMES:
             (
                 verify_matched,
                 verify_note,

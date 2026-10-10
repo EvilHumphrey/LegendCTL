@@ -173,7 +173,12 @@ class ProfileApplyReadbackUiTests(unittest.TestCase):
         outcomes = all_unverified_outcomes(
             attempted,
             sent,
-            ApplyResult(),  # no failed writes: writes succeeded, reads did not run
+            ApplyResult(
+                total_attempted=3,
+                succeeded=3,
+                attempted_labels=("vibration", "deadzones", "trigger_left"),
+                succeeded_labels=("vibration", "deadzones", "trigger_left"),
+            ),
             reason="post-apply read-back sweep failed",
         )
         self.assertTrue(all(o.verify_matched is None for o in outcomes))
@@ -217,6 +222,8 @@ class ProfileApplyReadbackUiTests(unittest.TestCase):
         apply_result = ApplyResult(
             total_attempted=2,
             succeeded=1,
+            attempted_labels=("vibration", "deadzones"),
+            succeeded_labels=("vibration",),
             failed=[ApplyFailure("deadzones", "HID write rejected", True)],
         )
         outcomes = all_unverified_outcomes(
@@ -260,6 +267,7 @@ class ProfileApplyReadbackUiTests(unittest.TestCase):
         apply_result = ApplyResult(
             total_attempted=2,
             succeeded=0,
+            attempted_labels=("vibration", "deadzones"),
             failed=[
                 ApplyFailure("vibration", "HID write rejected", True),
                 ApplyFailure("deadzones", "HID write rejected", True),
@@ -291,12 +299,8 @@ class ProfileApplyReadbackUiTests(unittest.TestCase):
     def test_all_writes_failed_with_matching_readback_does_not_claim_all_verified(
         self,
     ) -> None:
-        # Review round-3 fix 2026-07-17: verification is computed
-        # independently of write success, so an Apply whose writes ALL failed can
-        # still read back PRE-EXISTING values that coincidentally equal the
-        # requested ones (verify_matched=True on write-failed fields). That must
-        # NOT emit "All readable changes were confirmed by read-back" right after
-        # the all-failed partial result — any write failure gates the note off.
+        # Matching pre-existing values cannot verify a failed or unwritten
+        # operation. Both the per-field count and the status note abstain.
         vib, dz = object(), object()
         sent = empty_snapshot(vibration=vib, deadzones=dz)
         attempted = attempted_fields_from_snapshot(sent)
@@ -314,7 +318,7 @@ class ProfileApplyReadbackUiTests(unittest.TestCase):
             build_field_outcomes(attempted, sent, sent, apply_result, {})
         )
         self.assertEqual(verification.write_failed, 2)
-        self.assertEqual(verification.verified_matched, 2)
+        self.assertEqual(verification.verified_matched, 0)
         self.assertEqual(verification.mismatched, 0)
         self.assertEqual(verification.could_not_verify, 0)
 
@@ -341,13 +345,15 @@ class ProfileApplyReadbackUiTests(unittest.TestCase):
         apply_result = ApplyResult(
             total_attempted=2,
             succeeded=1,
+            attempted_labels=("vibration", "deadzones"),
+            succeeded_labels=("vibration",),
             failed=[ApplyFailure("deadzones", "HID write rejected", True)],
         )
         verification = summarize_field_outcomes(
             build_field_outcomes(attempted, sent, sent, apply_result, {})
         )
         self.assertEqual(verification.write_failed, 1)
-        self.assertEqual(verification.verified_matched, 2)
+        self.assertEqual(verification.verified_matched, 1)
         self.assertEqual(verification.mismatched, 0)
         self.assertEqual(verification.could_not_verify, 0)
 

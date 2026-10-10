@@ -28,6 +28,7 @@ import dearpygui.dearpygui as dpg
 
 from tests.r2_shell_test_helpers import make_shell
 from tests.test_live_verify import _FakeXInputService, _live_snap
+from tests.test_restore_points_screen import _rp as _restore_point_fixture
 from zd_app import i18n
 from zd_app.models import DeviceState
 from zd_app.services.device_service import (
@@ -36,6 +37,7 @@ from zd_app.services.device_service import (
     instance_id_is_allowlisted_zd,
 )
 from zd_app.services.settings_service import StickDeadzones
+from zd_app.storage.restore_point_models import PreparedRestore, RestorePreview
 from zd_app.ui.screens import controller as controller_screen
 from zd_app.ui.screens import live_verify
 from zd_app.ui.screens import restore_points as rp_screen
@@ -43,6 +45,19 @@ from zd_app.ui.screens import restore_points as rp_screen
 
 _ZD_INSTANCE_ID = "USB\\VID_413D&PID_2104\\ABC123"
 _XBOX_INSTANCE_ID = "USB\\VID_045E&PID_028E\\XYZ789"
+_RESTORE_POINT_ID = "rp_20260524_190355_000001"
+
+
+def _prepared_restore() -> PreparedRestore:
+    return PreparedRestore.from_restore_point(
+        _restore_point_fixture(id=_RESTORE_POINT_ID),
+        preview=RestorePreview(
+            fields=(),
+            fields_changing=0,
+            fields_unchanged=0,
+            fields_unreadable=0,
+        ),
+    )
 
 
 class _RecordingSettingsService:
@@ -316,8 +331,11 @@ class RestoreExecutionGateTests(unittest.TestCase):
         i18n.set_locale("en")
 
     def _shell(self, device_class: str):
+        prepared = _prepared_restore()
         rp_service = MagicMock()
-        rp_service.restore.return_value = SimpleNamespace(id="rp1")
+        rp_service.restore.return_value = SimpleNamespace(
+            id=prepared.restore_point_id
+        )
         shell = _shell_with_class(
             device_class,
             settings_service=MagicMock(),
@@ -325,23 +343,30 @@ class RestoreExecutionGateTests(unittest.TestCase):
         )
         shell.rebuild_current_screen = MagicMock()
         shell.restore_points_screen_state = rp_screen.RestorePointsScreenState(
-            view=rp_screen.VIEW_IN_PROGRESS, selected_rp_id="rp1"
+            view=rp_screen.VIEW_IN_PROGRESS,
+            selected_rp_id=prepared.restore_point_id,
+            prepared_restore=prepared,
         )
-        return shell, rp_service
+        return shell, rp_service, prepared
 
     def test_restore_refused_on_generic_xinput(self) -> None:
-        shell, rp_service = self._shell("generic_xinput")
+        shell, rp_service, prepared = self._shell("generic_xinput")
         rp_screen._execute_restore(shell)
         rp_service.restore.assert_not_called()
         state = shell.restore_points_screen_state
         self.assertEqual(state.view, rp_screen.VIEW_CONFIRM)
         self.assertEqual(state.status_text, i18n.t("apply.device_unverified"))
         self.assertEqual(state.status_kind, "warn")
+        self.assertIs(state.prepared_restore, prepared)
 
     def test_restore_executes_on_zd(self) -> None:
-        shell, rp_service = self._shell("zd_ultimate_legend")
+        shell, rp_service, prepared = self._shell("zd_ultimate_legend")
         rp_screen._execute_restore(shell)
-        rp_service.restore.assert_called_once_with("rp1")
+        rp_service.restore.assert_called_once_with(
+            prepared,
+            acknowledge_write_only_paddles=False,
+            presence_guard=unittest.mock.ANY,
+        )
         self.assertEqual(shell.restore_points_screen_state.view, rp_screen.VIEW_RESULT)
 
 

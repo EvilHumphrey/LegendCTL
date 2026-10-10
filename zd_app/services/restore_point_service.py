@@ -72,6 +72,7 @@ from zd_app.storage.restore_point_models import (
     DeviceIdentity,
     FieldCoverage,
     IdentityConfidence,
+    PreparedRestore,
     RestoreAttemptRecord,
     RestoreFieldDelta,
     RestorePoint,
@@ -146,6 +147,16 @@ _COLLECTION_FIELDS: tuple[tuple[str, CoverageCategory, bool, int], ...] = (
     ("button_bindings", CoverageCategory.LAYOUT, True, len(ButtonSlot)),
     ("back_paddle_bindings", CoverageCategory.LAYOUT, True, len(MacroSlot)),
     ("lighting_zones", CoverageCategory.COSMETIC, True, len(LightingZone)),
+)
+
+# Persisted coverage describes what capture observed; it is not authorization
+# to dispatch a write.  Keep restore eligibility rooted in this code-owned
+# policy so a locally modified restore-point JSON cannot promote a read-only
+# field (notably ``motion_settings``) into the apply/verification pipeline.
+_STATIC_WRITABLE_FIELDS: frozenset[str] = frozenset(
+    name for name, _category, writable in _SCALAR_FIELDS if writable
+) | frozenset(
+    name for name, _category, writable, _expected in _COLLECTION_FIELDS if writable
 )
 
 def _utc_now_iso() -> str:
@@ -427,12 +438,12 @@ class RestorePointService:
 
     def restore(
         self,
-        rp_id: str,
+        prepared: PreparedRestore,
         *,
-        excluded_fields: Optional[Iterable[str]] = None,
+        acknowledge_write_only_paddles: bool = False,
         presence_guard: Callable[[], bool] | None = None,
     ) -> RestoreResult:
-        """Restore a previously captured restore point.
+        """Apply the exact content previously prepared for confirmation.
 
         Flow per the "Apply coordinator interaction" design:
 
@@ -443,14 +454,41 @@ class RestorePointService:
         4. Read controller back with fresh reads (the same per-field success
            pass used in :meth:`capture`).
         5. Compare expected vs read-back per attempted field.
-        6. Persist the summary as :class:`RestoreAttemptRecord` on the
-           restore point.
+        6. Persist a content-bound :class:`RestoreAttemptRecord` sidecar.
+
+        ``prepared`` owns the canonical serialized restore point used for the
+        preview.  The service deliberately does not accept a restore-point id:
+        reloading an id here would reopen a confirmation-to-write race.
+
+        A prepared restore containing write-only back-paddle bindings also
+        requires the confirmation UI's dedicated acknowledgement to be the
+        literal boolean ``True``.  Enforcing that at this final service
+        boundary prevents a callback or alternate caller from silently
+        bypassing the disclosure.
 
         Returns a :class:`RestoreResult` describing the outcome.
         """
 
-        excluded = set(excluded_fields or ())
-        target_rp = self._store.load(rp_id)
+        if not isinstance(prepared, PreparedRestore):
+            raise TypeError("restore() requires a PreparedRestore")
+        target_rp = prepared.materialize()
+        excluded = set(prepared.excluded_fields)
+        filtered, attempted_fields = _filter_snapshot_for_restore(
+            target_rp.snapshot,
+            target_rp.coverage,
+            excluded,
+        )
+        actual_paddle_slots = tuple(
+            slot.name
+            for slot in MacroSlot
+            if slot in (filtered.back_paddle_bindings or {})
+        )
+        if actual_paddle_slots != prepared.write_only_paddle_slots:
+            raise ValueError("prepared restore paddle disclosure does not match payload")
+        if actual_paddle_slots and acknowledge_write_only_paddles is not True:
+            raise PermissionError(
+                "write-only back-paddle bindings require explicit acknowledgement"
+            )
 
         # 1. before_restore safety snapshot.
         before_trigger = RestorePointTrigger(
@@ -488,13 +526,6 @@ class RestorePointService:
                 "recoverable pre-restore controller state).",
                 target_rp.title,
             )
-
-        # 2. Filter the snapshot to writable + captured + not-excluded fields.
-        filtered, attempted_fields = _filter_snapshot_for_restore(
-            target_rp.snapshot,
-            target_rp.coverage,
-            excluded,
-        )
 
         # 3. Apply through the coordinator.
         _require_restore_presence(
@@ -591,22 +622,15 @@ class RestorePointService:
             could_not_verify=could_not_verify,
             mismatched=mismatched,
         )
-        updated_rp = replace(target_rp, last_restore_attempt=record)
-        # The firmware apply already committed above; persisting the attempt
-        # record is best-effort bookkeeping. An OSError here must NOT propagate
-        # and discard the RestoreResult (the caller needs before_restore_point_id
-        # for rollback), so log and continue.
+        # Presence loss still takes the public recovery path. Bookkeeping after
+        # a committed write is best effort and never rewrites source content.
+        _require_restore_presence(presence_guard, writes_may_have_occurred=True)
         try:
-            _require_restore_presence(
-                presence_guard,
-                writes_may_have_occurred=True,
-            )
-            self._store.save(updated_rp)
-        except OSError:
+            self._store.record_restore_attempt(target_rp, record)
+        except Exception:  # noqa: BLE001 - preserve the committed result/rollback
             logger.exception(
-                "restore: persisting RestoreAttemptRecord failed after a "
-                "committed apply (rp_id=%s); returning the result regardless",
-                rp_id,
+                "restore: attempt bookkeeping failed after apply (rp_id=%s)",
+                target_rp.id,
             )
         if self._wear_ledger is not None:
             _require_restore_presence(
@@ -617,7 +641,7 @@ class RestorePointService:
                 RP_RESTORE,
                 summary=f"Restored '{target_rp.title}' ({label.value})",
                 details={
-                    "rp_id": rp_id,
+                    "rp_id": target_rp.id,
                     "title": target_rp.title,
                     "result_label": label.value,
                     "attempted": len(field_outcomes),
@@ -632,6 +656,44 @@ class RestorePointService:
         return result
 
     # -- pre-restore preview -------------------------------------------------
+
+    def prepare_restore(
+        self,
+        rp_id: str,
+        *,
+        excluded_fields: Optional[Iterable[str]] = None,
+    ) -> PreparedRestore:
+        """Freeze one restore point together with the preview shown for it.
+
+        The store is loaded exactly once.  Later source-file rewrites cannot
+        change the canonical payload held by the returned object.
+        """
+
+        excluded = set(excluded_fields or ())
+        target_rp = self._store.load(rp_id)
+        current_snapshot, _read_success, read_errors = self._do_fresh_read()
+        preview = _build_restore_preview(
+            target_rp,
+            current_snapshot,
+            read_errors,
+            excluded_fields=excluded,
+        )
+        filtered, _attempted_fields = _filter_snapshot_for_restore(
+            target_rp.snapshot,
+            target_rp.coverage,
+            excluded,
+        )
+        paddle_slots = tuple(
+            slot.name
+            for slot in MacroSlot
+            if slot in (filtered.back_paddle_bindings or {})
+        )
+        return PreparedRestore.from_restore_point(
+            target_rp,
+            preview=preview,
+            excluded_fields=tuple(excluded),
+            write_only_paddle_slots=paddle_slots,
+        )
 
     def compute_restore_preview(self, rp_id: str) -> RestorePreview:
         """Compute a pre-restore preview comparing the captured RP snapshot
@@ -652,9 +714,7 @@ class RestorePointService:
         :func:`zd_app.ui.screens.restore_points._build_result`.
         """
 
-        target_rp = self._store.load(rp_id)
-        current_snapshot, _read_success, read_errors = self._do_fresh_read()
-        return _build_restore_preview(target_rp, current_snapshot, read_errors)
+        return self.prepare_restore(rp_id).preview
 
 
 # ---------------------------------------------------------------------------
@@ -785,8 +845,10 @@ def _filter_snapshot_for_restore(
     def _keep(name: str) -> bool:
         if name in excluded:
             return False
+        if name not in _STATIC_WRITABLE_FIELDS:
+            return False
         field_coverage = coverage.fields.get(name)
-        if field_coverage is None or not field_coverage.writable:
+        if field_coverage is None:
             return False
         return field_coverage.state in (CoverageState.CAPTURED, CoverageState.PARTIAL)
 
@@ -849,6 +911,12 @@ def _filter_snapshot_for_restore(
 
     filtered = ControllerSnapshot(**kwargs)  # type: ignore[arg-type]
     return filtered, attempted
+
+
+def restorable_field_names(rp: RestorePoint) -> tuple[str, ...]:
+    """Expose the code-owned write plan for the detail screen's disclosure."""
+    _snapshot, names = _filter_snapshot_for_restore(rp.snapshot, rp.coverage, set())
+    return tuple(names)
 
 
 def verify_applied_snapshot(
@@ -934,6 +1002,8 @@ def _build_restore_preview(
     rp: RestorePoint,
     current_snapshot: ControllerSnapshot,
     read_errors: Mapping[str, str],
+    *,
+    excluded_fields: Optional[set[str]] = None,
 ) -> RestorePreview:
     """Walk the field surface restore() would write and compare RP vs live.
 
@@ -950,7 +1020,7 @@ def _build_restore_preview(
     _, attempted_fields = _filter_snapshot_for_restore(
         target_snapshot,
         rp.coverage,
-        excluded=set(_PREVIEW_EXCLUDED_FIELDS),
+        excluded=set(_PREVIEW_EXCLUDED_FIELDS) | set(excluded_fields or ()),
     )
 
     deltas: list[RestoreFieldDelta] = []

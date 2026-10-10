@@ -183,41 +183,11 @@ class BuildReleaseScriptTests(unittest.TestCase):
         self.assertIn("__build_date__", self.body)
         self.assertRegex(self.body, r"\$buildDate\s*=\s*Get-Date")
 
-    def test_version_py_write_uses_no_newline_flag(self) -> None:
-        """Regression guard: every
-        Set-Content call that targets zd_app/version.py must use -NoNewline.
-
-        Get-Content -Raw preserves the source file's trailing newline in the
-        captured string; Set-Content then appends its own trailing newline by
-        default. Without -NoNewline the round-trip leaves the file one `\\r\\n`
-        longer than it started, and the drift accumulates one trailing blank
-        line per build. Both the patched-write and the finally-block rollback
-        must opt out via -NoNewline.
-        """
-        matches = list(
-            re.finditer(
-                r'^[^\r\n#]*Set-Content\s+["\']?zd_app\\version\.py["\']?[^\r\n]*$',
-                self.body,
-                re.MULTILINE,
-            )
-        )
-        # The script has two Set-Content calls on version.py: the patched
-        # write (post-regex __build_commit__/__build_date__ injection) and the
-        # finally-block rollback. Both must exist and both must be -NoNewline.
-        self.assertGreaterEqual(
-            len(matches),
-            2,
-            "expected at least 2 Set-Content calls on zd_app\\version.py "
-            "(patched-write + rollback); regex matched: "
-            + repr([m.group(0) for m in matches]),
-        )
-        for match in matches:
-            line = match.group(0)
-            self.assertIn(
-                "-NoNewline",
-                line,
-                f"Set-Content on zd_app\\version.py without -NoNewline (trailing-newline regression): {line!r}",
-            )
+    def test_version_py_write_is_bom_free_without_an_added_newline(self) -> None:
+        """The actual worker-prefix regression also feeds the bytes to ast.parse."""
+        self.assertIn("$versionEncoding = New-Object System.Text.UTF8Encoding($false)", self.body)
+        self.assertIn('[IO.File]::WriteAllText((Join-Path $repoRoot "zd_app\\version.py"), $patchedVersionPy, $versionEncoding)', self.body)
+        self.assertNotRegex(self.body, r'(?m)^Set-Content\s+"zd_app\\version\.py"')
 
 
 class BuildReleaseNativeCommandHardeningTests(unittest.TestCase):
@@ -260,7 +230,7 @@ class BuildReleaseNativeCommandHardeningTests(unittest.TestCase):
         self.assertRegex(
             self.body,
             re.compile(
-                r'Invoke-NativeCommand\s+-Label\s+"[^"]*pip check[^"]*"\s+-ScriptBlock\s*\{[^}]*\$python\s+-m\s+pip\s+check[^}]*\}',
+                r'Invoke-NativeCommand\s+-Label\s+"[^"]*pip check[^"]*"\s+-ScriptBlock\s*\{[^}]*\$python\s+-I\s+-m\s+pip\s+check[^}]*\}',
                 re.IGNORECASE,
             ),
             "pip check must be wrapped by Invoke-NativeCommand with a pip-labelled -Label and a -ScriptBlock that runs `$python -m pip check`",
@@ -271,7 +241,7 @@ class BuildReleaseNativeCommandHardeningTests(unittest.TestCase):
         self.assertRegex(
             self.body,
             re.compile(
-                r'Invoke-NativeCommand\s+-Label\s+"[^"]*PyInstaller[^"]*"\s+-ScriptBlock\s*\{[^}]*\$python\s+-m\s+PyInstaller[^}]*\}',
+                r'Invoke-NativeCommand\s+-Label\s+"[^"]*PyInstaller[^"]*"\s+-ScriptBlock\s*\{[^}]*\$python\s+-I\s+-m\s+PyInstaller[^}]*\}',
             ),
             "PyInstaller must be wrapped by Invoke-NativeCommand with a PyInstaller-labelled -Label and a -ScriptBlock that runs `$python -m PyInstaller`",
         )

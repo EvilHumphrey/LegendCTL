@@ -155,6 +155,24 @@ class ExportBundleEventLogRedactionTests(unittest.TestCase):
         # Basename still kept.
         self.assertIn("config.json", joined)
 
+    def test_event_log_instance_tail_is_redacted_but_vid_pid_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as data_root:
+            with patch.dict(os.environ, {"ZDUL_DATA_DIR": data_root}):
+                service = DiagnosticsService()
+                service.log_event(
+                    r"Opened HID\VID_413D&PID_2104&MI_02\UNIT-SERIAL-123"
+                )
+                bundle_path = service.export_bundle(
+                    DeviceState(), 1.0, 2.0, data_root
+                )
+                event_log = json.loads(
+                    bundle_path.read_text(encoding="utf-8")
+                )["snapshot"]["event_log"]
+
+        joined = "\n".join(event_log)
+        self.assertIn("HID\\VID_413D&PID_2104", joined)
+        self.assertNotIn("UNIT-SERIAL-123", joined)
+
 
 if __name__ == "__main__":
     unittest.main()

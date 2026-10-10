@@ -192,18 +192,20 @@ jobs:
       - name: Run test suite before building (constraint gates included)
         shell: pwsh
         run: |
-          # Mirrors ci.yml exactly: an attested "trustworthy" release that
+          # Mirrors ci.yml's gate: an attested "trustworthy" release that
           # skipped the honesty/constraint gates would be self-contradictory.
           # The shared evaluator requires a real `Ran ...` + `OK` summary and
           # combines it with the process exit code. Only exit 0 and the
           # documented post-summary DPG teardown artifact (139 or Windows'
           # signed/unsigned 0xC0000005 form) are allowed.
           # unittest writes to stderr, hence 2>&1.
+          # Keep runner diagnostics outside the source checkout admitted below.
+          $testLog = Join-Path $env:RUNNER_TEMP "legendctl-release-tests.txt"
           $ErrorActionPreference = 'Continue'
-          .\.venv-zd\Scripts\python.exe -m unittest discover -s tests 2>&1 | Tee-Object -FilePath test_output.txt
+          .\.venv-zd\Scripts\python.exe -m unittest discover -s tests 2>&1 | Tee-Object -FilePath $testLog
           $code = $LASTEXITCODE
           & .\.github\scripts\evaluate-unittest-result.ps1 `
-            -LogPath test_output.txt `
+            -LogPath $testLog `
             -ProcessExitCode $code `
             -MinimumTestCount 3000
           exit $LASTEXITCODE
@@ -257,10 +259,8 @@ jobs:
       - name: Build release artifacts (PyInstaller + Inno Setup)
         shell: pwsh
         run: |
-          # The same script the maintainer runs locally. Its trailing
-          # install_local.ps1 step (Desktop/Start-Menu shortcut refresh) is
-          # meaningless on a runner but warn-guarded — a shortcut hiccup
-          # cannot fail the build.
+          # The same raw-source artifact builder the maintainer runs locally.
+          # Local installation and shortcut refresh are separate explicit steps.
           & tools\build_release.ps1
 
       - name: Guard — exactly one installer and one portable zip built

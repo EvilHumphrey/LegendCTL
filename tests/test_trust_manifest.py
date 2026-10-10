@@ -132,6 +132,21 @@ class TrustManifestGeneratorTests(unittest.TestCase):
             self._generate(repo, dist)
             self.assertEqual(manifest_path.read_bytes(), first)
 
+    def test_raw_export_identity_requires_matching_full_version_label(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo, dist = self._mini_tree(Path(temporary))
+            with patch.object(self.tool, "_git", side_effect=AssertionError("raw export must not query Git")):
+                with self.assertRaisesRegex(self.tool.ManifestBuildError, "source identity"):
+                    self.tool.generate_manifest(repo_root=repo, dist_root=dist,
+                                                scanner_repo_root=_REPO_ROOT, source_commit=_COMMIT)
+                (repo / "zd_app/version.py").write_text(
+                    f'__version__ = "9.9.9"\n__build_commit__ = "{_COMMIT}"\n', encoding="utf-8")
+                path = self.tool.generate_manifest(repo_root=repo, dist_root=dist,
+                                                  scanner_repo_root=_REPO_ROOT, source_commit=_COMMIT)
+                record = json.loads(path.read_text())
+                self.assertEqual(record["build_commit"], _COMMIT)
+                self.assertEqual(record["build_commit_short"], _COMMIT)
+
     def test_generator_fails_closed_for_source_scan_problems(self) -> None:
         cases = {
             "network": lambda repo: (repo / "zd_app" / "clean.py").write_text(

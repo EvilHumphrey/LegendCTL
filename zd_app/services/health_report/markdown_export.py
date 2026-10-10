@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from zd_app.services.health_report.boundary import CLAIM_BOUNDARY_PARAGRAPH
 from zd_app.services.markdown_safety import escape_markdown
-from zd_app.services.path_scrub import scrub_value
+from zd_app.services.path_scrub import sanitize_shareable_text
 from zd_app.services.health_report.models import (
     HealthReport,
     OverallStatus,
@@ -88,7 +88,7 @@ def to_markdown(report: HealthReport) -> str:
     sections.append(_section_trigger_range(report.trigger_range))
     sections.append(_section_retest_notes(report.caveats))
     sections.append(_section_build_identity(report))
-    return "\n\n".join(sections).rstrip() + "\n"
+    return sanitize_shareable_text("\n\n".join(sections).rstrip() + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -117,10 +117,16 @@ def _section_device(report: HealthReport) -> str:
     # controller_name / profile_name are freeform — profile_name in particular
     # is operator text that can be an absolute path. Scrub, then escape Markdown
     # table syntax before the standalone export (also copied to clipboard and
-    # embedded in the diagnostic bundle). scrub_value returns "" for None, so the
-    # fallbacks hold.
-    controller = escape_markdown(scrub_value(device.controller_name)) or "(unknown)"
-    profile = escape_markdown(scrub_value(device.profile_name)) or "(none)"
+    # embedded in the diagnostic bundle). The composed helper removes both
+    # filesystem paths and per-unit device-instance tails.
+    controller = (
+        escape_markdown(sanitize_shareable_text(device.controller_name))
+        or "(unknown)"
+    )
+    profile = (
+        escape_markdown(sanitize_shareable_text(device.profile_name))
+        or "(none)"
+    )
     polling = (
         f"{device.configured_polling_hz} Hz" if device.configured_polling_hz else "(unknown)"
     )
@@ -222,7 +228,10 @@ def _trigger_row(label: str, trig: TriggerRange) -> str:
 
 def _section_retest_notes(caveats: tuple[str, ...]) -> str:
     if caveats:
-        body = "\n".join(f"- {note}" for note in caveats)
+        body = "\n".join(
+            f"- {escape_markdown(sanitize_shareable_text(note))}"
+            for note in caveats
+        )
     else:
         body = "- No additional notes for this run."
     return "## Retest notes and caveats\n\n" + body

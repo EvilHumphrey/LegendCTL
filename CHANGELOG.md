@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Restore confirmation now binds to the reviewed snapshot content. Write-only
+  paddle changes disclose exact slots and targets and require explicit consent.
+  Attempt summaries are stored separately without rewriting snapshot settings.
+- Restore and profile verification require successful writer receipts as well as
+  matching readable values. Missing receipts cannot count as verified writes.
+- Settings reads reject malformed percentages, inversion flags, trigger ranges
+  and modes, and incomplete replies; unread categories remain unverified.
+- Diagnostic exports sanitize nested JSON, text, clipboard output and archive
+  names. Unsafe or colliding archive entries are rejected before output is opened.
+- Local release builds use an immutable Git source export, record its full commit
+  and artifact hashes, preserve existing output, and no longer refresh local
+  installs or shortcuts. See [build provenance](docs/BUILD_PROVENANCE.md).
+
 ## v2.6.2 — 2026-07-19
 
 Verification and localization release on top of v2.6.1.

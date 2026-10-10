@@ -27,6 +27,7 @@ def generate_manifest(
     repo_root: str | Path,
     generated_at: datetime | None = None,
     scanner_repo_root: str | Path | None = None,
+    source_commit: str | None = None,
 ) -> Path:
     """Write one deterministic record and return its path.
 
@@ -50,6 +51,7 @@ def generate_manifest(
         manifest_path=manifest_path,
         scanners=scanners,
         generated_at=generated_at,
+        source_commit=source_commit,
     )
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     _write_json(manifest_path, document)
@@ -63,6 +65,7 @@ def _build_document(
     manifest_path: Path,
     scanners: dict[str, Any],
     generated_at: datetime | None,
+    source_commit: str | None = None,
 ) -> dict[str, object]:
     if not distribution.is_dir():
         raise ManifestBuildError(f"distribution root is missing: {distribution}")
@@ -90,14 +93,16 @@ def _build_document(
     if driver_findings:
         raise ManifestBuildError("driver or virtual-device findings are not permitted")
 
-    build_commit = _git(repository, "rev-parse", "HEAD")
+    # A raw Git export deliberately has no .git directory. Its orchestrator
+    # supplies the verified full object ID; never infer it from a parent repo.
+    build_commit = source_commit if source_commit is not None else _git(repository, "rev-parse", "HEAD")
     if not _is_hex(build_commit, length=40):
         raise ManifestBuildError("git rev-parse HEAD did not return a full commit SHA")
-    build_commit_short = _git(repository, "rev-parse", "--short", "HEAD")
+    build_commit_short = build_commit if source_commit is not None else _git(repository, "rev-parse", "--short", "HEAD")
     version, patched_commit = _version_metadata(repository / "zd_app" / "version.py")
     if not patched_commit or patched_commit != build_commit_short:
         raise ManifestBuildError(
-            "zd_app/version.py build commit does not match git rev-parse --short HEAD"
+            "zd_app/version.py build commit does not match source identity"
         )
 
     source_files = _source_files(scan.files, repository)
@@ -276,9 +281,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dist-root", required=True, type=Path)
     parser.add_argument("--repo-root", required=True, type=Path)
+    parser.add_argument("--source-commit", help="Verified full commit of a raw source export")
     args = parser.parse_args(argv)
     try:
-        generate_manifest(dist_root=args.dist_root, repo_root=args.repo_root)
+        generate_manifest(dist_root=args.dist_root, repo_root=args.repo_root,
+                          source_commit=args.source_commit)
     except ManifestBuildError as exc:
         print(f"trust manifest failed: {exc}", file=sys.stderr)
         return 1

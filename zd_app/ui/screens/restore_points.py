@@ -38,6 +38,7 @@ from typing import Optional
 import dearpygui.dearpygui as dpg
 
 from zd_app.i18n import t
+from zd_app.services.restore_field_formatting import format_field_value
 from zd_app.services.restore_points import (
     CLAIM_BOUNDARY_PARAGRAPH,
     CLAIM_BOUNDARY_SHORT_UI,
@@ -45,11 +46,13 @@ from zd_app.services.restore_points import (
 from zd_app.services.restore_point_service import (
     ControllerPresenceChangedError,
     RestorePointService,
+    restorable_field_names,
 )
 from zd_app.storage.restore_point_models import (
     CaptureSource,
     CoverageCategory,
     CoverageState,
+    PreparedRestore,
     RestorePoint,
     RestorePreview,
     RestoreResult,
@@ -65,7 +68,7 @@ from zd_app.ui.components import (
     table,
     table_empty_state,
 )
-from zd_app.ui.themes import SPACE_LG, SPACE_MD
+from zd_app.ui.themes import COLORS, SPACE_LG, SPACE_MD
 from zd_app.ui.typography import helper_text, screen_title, section_title
 from zd_app.ui.verification_details import format_verification_outcome
 
@@ -101,6 +104,8 @@ TAG_DETAIL_BACK_BUTTON = "restore_points_detail_back_button"
 TAG_DETAIL_EXPORT_BUTTON = "restore_points_detail_export_button"
 TAG_DETAIL_RESTORE_BUTTON = "restore_points_detail_restore_button"
 TAG_CONFIRM_RESTORE_BUTTON = "restore_points_confirm_restore_button"
+TAG_CONFIRM_PADDLE_ACK = "restore_points_confirm_paddle_ack"
+TAG_CONFIRM_CONTROLS_THEME = "restore_points_confirm_controls_theme"
 TAG_CONFIRM_VIEW_BUTTON = "restore_points_confirm_view_button"
 TAG_CONFIRM_CANCEL_BUTTON = "restore_points_confirm_cancel_button"
 TAG_RESULT_CLOSE_BUTTON = "restore_points_result_close_button"
@@ -176,6 +181,8 @@ class RestorePointsScreenState:
     hide_routine_captures: bool = True
     status_text: str = ""
     status_kind: str = "info"
+    prepared_restore: Optional[PreparedRestore] = None
+    write_only_paddles_acknowledged: bool = False
     # The confirm/preview belongs to the controller that opened it. A visible
     # A preview must never recapture a fresh B token when Restore is clicked.
     presence_key: Optional[tuple[str, str, str]] = None
@@ -654,16 +661,8 @@ def _build_detail_field_groups(shell, rp: RestorePoint) -> None:
 
 
 def _build_will_restore_lists(shell, rp: RestorePoint) -> None:
-    will: list[str] = []
-    wont: list[str] = []
-    for name, coverage in rp.coverage.fields.items():
-        if (
-            coverage.writable
-            and coverage.state in (CoverageState.CAPTURED, CoverageState.PARTIAL)
-        ):
-            will.append(name)
-        else:
-            wont.append(name)
+    will = restorable_field_names(rp)
+    wont = [name for name in rp.coverage.fields if name not in will]
 
     # Heading + N items (or "-" placeholder) per side, in autosizing card()
     # panels laid out as two columns. The fixed width=440 is real layout (two
@@ -695,8 +694,68 @@ def _build_will_restore_lists(shell, rp: RestorePoint) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _bind_confirm_control_theme(item: str) -> None:
+    """Keep consent controls visible without changing other screen widgets."""
+    if not dpg.does_item_exist(TAG_CONFIRM_CONTROLS_THEME):
+        with dpg.theme(tag=TAG_CONFIRM_CONTROLS_THEME):
+            with dpg.theme_component(dpg.mvCheckbox):
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBg, COLORS["bg.raised"])
+                dpg.add_theme_color(dpg.mvThemeCol_Border, COLORS["text.secondary"])
+                dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 1.0)
+            with dpg.theme_component(dpg.mvButton):
+                dpg.add_theme_color(dpg.mvThemeCol_Button, COLORS["accent.muted"])
+                dpg.add_theme_color(dpg.mvThemeCol_Border, COLORS["accent.primary"])
+                dpg.add_theme_color(dpg.mvThemeCol_Text, COLORS["text.primary"])
+                dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 1.0)
+            with dpg.theme_component(dpg.mvButton, enabled_state=False):
+                dpg.add_theme_color(dpg.mvThemeCol_Button, COLORS["bg.base"])
+                dpg.add_theme_color(dpg.mvThemeCol_Border, COLORS["border.subtle"])
+                dpg.add_theme_color(dpg.mvThemeCol_Text, COLORS["text.muted"])
+                dpg.add_theme_style(dpg.mvStyleVar_FrameBorderSize, 1.0)
+    dpg.bind_item_theme(item, TAG_CONFIRM_CONTROLS_THEME)
+
+
 def _build_confirm(shell, service, state: RestorePointsScreenState) -> None:
-    rp = _load_selected(service, state)
+    token_check = getattr(shell, "_controller_presence_token_is_current", None)
+    preview_token_current = (
+        state.presence_key is None
+        or state.presence_generation is None
+        or not callable(token_check)
+        or token_check(state.presence_key, state.presence_generation)
+    )
+    if not preview_token_current:
+        _invalidate_prepared_restore(state)
+    prepared = state.prepared_restore
+    if (
+        prepared is None
+        and state.selected_rp_id is not None
+        and not getattr(shell, "hid_busy", False)
+        and preview_token_current
+    ):
+        try:
+            prepared = service.prepare_restore(state.selected_rp_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Preparing restore confirmation failed")
+            state.status_text = t("restore_points.confirm.prepare_failed")
+            state.status_kind = "warn"
+        else:
+            state.prepared_restore = prepared
+            state.write_only_paddles_acknowledged = False
+
+    rp: Optional[RestorePoint] = None
+    if prepared is not None:
+        try:
+            if prepared.restore_point_id != state.selected_rp_id:
+                raise ValueError("prepared restore selection no longer matches")
+            rp = prepared.materialize()
+        except Exception:  # noqa: BLE001
+            logger.exception("Prepared restore confirmation became invalid")
+            _invalidate_prepared_restore(state)
+            prepared = None
+            state.status_text = t("restore_points.confirm.prepare_failed")
+            state.status_kind = "warn"
+    if rp is None:
+        rp = _load_selected(service, state)
     if rp is None:
         _back_to_list(shell, status=t("restore_points.list.unavailable"), status_kind="warn")
         return
@@ -718,26 +777,20 @@ def _build_confirm(shell, service, state: RestorePointsScreenState) -> None:
     # as field-level notes; the broad except is defensive belt-and-braces
     # so an unexpected store/HID failure mid-build still lets the modal
     # render (user can Cancel out).
-    preview: Optional[RestorePreview] = None
-    token_check = getattr(shell, "_controller_presence_token_is_current", None)
-    preview_token_current = (
-        state.presence_key is None
-        or state.presence_generation is None
-        or not callable(token_check)
-        or token_check(state.presence_key, state.presence_generation)
-    )
-    if not getattr(shell, "hid_busy", False) and preview_token_current:
-        try:
-            preview = service.compute_restore_preview(rp.id)
-        except Exception:  # noqa: BLE001
-            logger.exception("Pre-restore preview computation failed")
-    # else: a threaded HID job is mid-flight (e.g. this rebuild came from
-    # _on_confirm_restore's own busy refusal) — skip the preview's live read
-    # and render CONFIRM without the section rather than interleave frames.
-
+    preview = prepared.preview if prepared is not None else None
     if preview is not None:
         dpg.add_spacer(height=SPACE_MD)
-        _build_confirm_preview(shell, preview)
+        _build_confirm_preview(
+            shell, preview,
+            has_write_only_writes=bool(prepared.write_only_paddle_slots),
+        )
+    if prepared is not None and prepared.write_only_paddle_slots:
+        dpg.add_spacer(height=SPACE_MD)
+        _build_write_only_paddle_acknowledgement(shell, state, prepared, rp)
+    if state.status_text:
+        dpg.add_spacer(height=SPACE_MD)
+        dpg.add_text(state.status_text, tag=TAG_STATUS_TEXT,
+                     color=shell.COLORS["warn"], wrap=900)
 
     dpg.add_spacer(height=SPACE_LG)
     with dpg.group(horizontal=True):
@@ -746,7 +799,15 @@ def _build_confirm(shell, service, state: RestorePointsScreenState) -> None:
             tag=TAG_CONFIRM_RESTORE_BUTTON,
             width=220,
             callback=lambda: _on_confirm_restore(shell),
+            enabled=(
+                prepared is not None
+                and (
+                    not prepared.write_only_paddle_slots
+                    or state.write_only_paddles_acknowledged
+                )
+            ),
         )
+        _bind_confirm_control_theme(TAG_CONFIRM_RESTORE_BUTTON)
         dpg.add_button(
             label=t("restore_points.confirm.view_covered"),
             tag=TAG_CONFIRM_VIEW_BUTTON,
@@ -761,7 +822,12 @@ def _build_confirm(shell, service, state: RestorePointsScreenState) -> None:
         )
 
 
-def _build_confirm_preview(shell, preview: RestorePreview) -> None:
+def _build_confirm_preview(
+    shell,
+    preview: RestorePreview,
+    *,
+    has_write_only_writes: bool = False,
+) -> None:
     """Render the "What this restore will change" section under the
     claim-boundary text in CONFIRM. Shows only the changing-fields list
     (preview, not status report). Appends an unreadable-count note when
@@ -772,7 +838,11 @@ def _build_confirm_preview(shell, preview: RestorePreview) -> None:
     section_title(
         t("restore_points.confirm.preview_heading"),
     )
-    if preview.fields_changing == 0 and preview.fields_unreadable == 0:
+    if (
+        preview.fields_changing == 0
+        and preview.fields_unreadable == 0
+        and not has_write_only_writes
+    ):
         dpg.add_text(
             t("restore_points.confirm.preview_no_op"),
             color=shell.COLORS["muted"],
@@ -796,6 +866,46 @@ def _build_confirm_preview(shell, preview: RestorePreview) -> None:
             color=shell.COLORS["muted"],
             wrap=900,
         )
+
+
+def _build_write_only_paddle_acknowledgement(
+    shell,
+    state: RestorePointsScreenState,
+    prepared: PreparedRestore,
+    rp: RestorePoint,
+) -> None:
+    """Disclose every write-only paddle target and require acknowledgement."""
+
+    section_title(t("restore_points.confirm.paddle_heading"))
+    bindings_by_name = {
+        slot.name: binding
+        for slot, binding in (rp.snapshot.back_paddle_bindings or {}).items()
+    }
+    for slot_name in prepared.write_only_paddle_slots:
+        binding = bindings_by_name.get(slot_name)
+        if binding is None:
+            # restore() independently validates this invariant before any
+            # capture or write. Keep the visible action disabled as well.
+            state.status_text = t("restore_points.confirm.prepare_failed")
+            state.status_kind = "warn"
+            continue
+        dpg.add_text(
+            f"  {slot_name}: {format_field_value('back_paddle_bindings', binding)}",
+            color=shell.COLORS["muted"],
+            wrap=900,
+        )
+    dpg.add_text(
+        t("restore_points.confirm.paddle_warning"),
+        color=shell.COLORS["warn"],
+        wrap=900,
+    )
+    dpg.add_checkbox(
+        label=t("restore_points.confirm.paddle_ack"),
+        tag=TAG_CONFIRM_PADDLE_ACK,
+        default_value=state.write_only_paddles_acknowledged,
+        callback=lambda _sender, value: _on_paddle_ack_changed(shell, value is True),
+    )
+    _bind_confirm_control_theme(TAG_CONFIRM_PADDLE_ACK)
 
 
 # ---------------------------------------------------------------------------
@@ -990,6 +1100,7 @@ def _on_toggle_routine_captures(shell) -> None:
 
 def _on_view(shell, rp_id: str) -> None:
     state = _ensure_state(shell)
+    _invalidate_prepared_restore(state)
     state.view = VIEW_DETAIL
     state.selected_rp_id = rp_id
     state.status_text = ""
@@ -1008,6 +1119,7 @@ def _on_open_confirm(shell, rp_id: str) -> None:
         state.status_kind = "warn"
         shell.rebuild_current_screen()
         return
+    _invalidate_prepared_restore(state)
     state.view = VIEW_CONFIRM
     state.selected_rp_id = rp_id
     state.status_text = ""
@@ -1022,6 +1134,7 @@ def _on_open_confirm(shell, rp_id: str) -> None:
 
 def _on_back_to_detail(shell) -> None:
     state = _ensure_state(shell)
+    _invalidate_prepared_restore(state)
     state.view = VIEW_DETAIL
     state.status_text = ""
     shell.rebuild_current_screen()
@@ -1029,6 +1142,7 @@ def _on_back_to_detail(shell) -> None:
 
 def _on_back_to_list(shell) -> None:
     state = _ensure_state(shell)
+    _invalidate_prepared_restore(state)
     state.view = VIEW_LIST
     state.selected_rp_id = None
     state.result = None
@@ -1061,9 +1175,40 @@ def _on_confirm_restore(shell) -> None:
         state.status_kind = "warn"
         shell.rebuild_current_screen()
         return
+    prepared = state.prepared_restore
+    try:
+        prepared_matches = (
+            prepared is not None
+            and prepared.restore_point_id == state.selected_rp_id
+        )
+    except Exception:  # noqa: BLE001
+        prepared_matches = False
+    if not prepared_matches:
+        _invalidate_prepared_restore(state)
+        state.status_text = t("restore_points.confirm.prepare_failed")
+        state.status_kind = "warn"
+        shell.rebuild_current_screen()
+        return
+    if (
+        prepared is not None
+        and prepared.write_only_paddle_slots
+        and state.write_only_paddles_acknowledged is not True
+    ):
+        state.status_text = t("restore_points.confirm.paddle_ack_required")
+        state.status_kind = "warn"
+        shell.rebuild_current_screen()
+        return
     state.view = VIEW_IN_PROGRESS
     state.result = None
     state.status_text = ""
+    shell.rebuild_current_screen()
+
+
+def _on_paddle_ack_changed(shell, acknowledged: bool) -> None:
+    state = _ensure_state(shell)
+    state.write_only_paddles_acknowledged = acknowledged is True
+    state.status_text = ""
+    state.status_kind = "info"
     shell.rebuild_current_screen()
 
 
@@ -1084,9 +1229,29 @@ def _execute_restore(shell) -> None:
 
     state = _ensure_state(shell)
     service = getattr(shell, "restore_point_service", None)
-    if service is None or state.selected_rp_id is None:
-        state.view = VIEW_LIST
-        state.status_text = t("restore_points.list.unavailable")
+    prepared = state.prepared_restore
+    try:
+        prepared_matches = (
+            service is not None
+            and prepared is not None
+            and prepared.restore_point_id == state.selected_rp_id
+        )
+    except Exception:  # noqa: BLE001
+        prepared_matches = False
+    if not prepared_matches:
+        _invalidate_prepared_restore(state)
+        state.view = VIEW_CONFIRM
+        state.status_text = t("restore_points.confirm.prepare_failed")
+        state.status_kind = "warn"
+        shell.rebuild_current_screen()
+        return
+    assert prepared is not None
+    if (
+        prepared.write_only_paddle_slots
+        and state.write_only_paddles_acknowledged is not True
+    ):
+        state.view = VIEW_CONFIRM
+        state.status_text = t("restore_points.confirm.paddle_ack_required")
         state.status_kind = "warn"
         shell.rebuild_current_screen()
         return
@@ -1112,7 +1277,7 @@ def _execute_restore(shell) -> None:
         shell.rebuild_current_screen()
         return
 
-    rp_id = state.selected_rp_id
+    paddle_acknowledged = state.write_only_paddles_acknowledged
     presence_key = state.presence_key
     presence_generation = state.presence_generation
     token_check = getattr(shell, "_controller_presence_token_is_current", None)
@@ -1144,9 +1309,11 @@ def _execute_restore(shell) -> None:
         return token_check(presence_key, presence_generation)
 
     def job():
-        if isinstance(service, RestorePointService):
-            return service.restore(rp_id, presence_guard=presence_guard)
-        return service.restore(rp_id)
+        return service.restore(
+            prepared,
+            acknowledge_write_only_paddles=paddle_acknowledged,
+            presence_guard=presence_guard,
+        )
 
     def finish_presence_changed(*, writes_may_have_occurred: bool) -> None:
         if presence_key is not None and presence_generation is not None:
@@ -1178,6 +1345,7 @@ def _execute_restore(shell) -> None:
             if not isinstance(outcome, Exception):
                 raise outcome  # keep today's `except Exception` scope
             logger.error("Restore failed", exc_info=outcome)
+            _invalidate_prepared_restore(state)
             state.view = VIEW_LIST
             state.status_text = t("restore_points.manual.failure", reason=str(outcome))
             state.status_kind = "warn"
@@ -1401,12 +1569,18 @@ def _on_save_result_to_diagnostics(shell) -> None:
 
 def _back_to_list(shell, *, status: str, status_kind: str) -> None:
     state = _ensure_state(shell)
+    _invalidate_prepared_restore(state)
     state.view = VIEW_LIST
     state.selected_rp_id = None
     state.result = None
     state.status_text = status
     state.status_kind = status_kind
     shell.rebuild_current_screen()
+
+
+def _invalidate_prepared_restore(state: RestorePointsScreenState) -> None:
+    state.prepared_restore = None
+    state.write_only_paddles_acknowledged = False
 
 
 def _load_selected(service, state: RestorePointsScreenState) -> Optional[RestorePoint]:

@@ -2817,7 +2817,7 @@ class TestGetVibration(unittest.TestCase):
         with self.assertLogs("zd_app.services.settings_service", level="WARNING") as logs:
             self.assertIsNone(service.get_vibration())
 
-        self.assertIn("unknown vibration mode byte: 0xff", "\n".join(logs.output))
+        self.assertIn("invalid vibration readback; omitting category", "\n".join(logs.output))
 
     def test_get_vibration_read_error_returns_none(self) -> None:
         rec = _Recorder(read_results=[SettingsServiceError("synthetic vibration read failure")])
@@ -3551,7 +3551,7 @@ class TestGetTriggerSettings(unittest.TestCase):
         with self.assertLogs("zd_app.services.settings_service", level="WARNING") as logs:
             self.assertIsNone(service.get_trigger_settings())
 
-        self.assertIn("unknown trigger mode byte:", "\n".join(logs.output))
+        self.assertIn("invalid trigger settings readback; omitting category", "\n".join(logs.output))
 
     def test_get_trigger_settings_read_error_returns_none(self) -> None:
         rec = _Recorder(read_results=[SettingsServiceError("synthetic trigger read failure")])

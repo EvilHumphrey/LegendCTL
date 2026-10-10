@@ -31,6 +31,8 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from tests.test_restore_points_screen import _rp as _restore_point_fixture
+from zd_app.storage.restore_point_models import PreparedRestore, RestorePreview
 from tests.r2_shell_test_helpers import empty_snapshot
 from zd_app import i18n
 from zd_app.models import AppSettings, DeviceState, WrapperProfile
@@ -60,6 +62,31 @@ from zd_app.ui.screens import restore_points as rp_screen
 
 
 _GATE_TIMEOUT_S = 5.0
+_RESTORE_POINT_ID = "rp_20260524_190355_000001"
+
+
+def _prepared_restore(rp_id: str = _RESTORE_POINT_ID) -> PreparedRestore:
+    return PreparedRestore.from_restore_point(
+        _restore_point_fixture(id=rp_id),
+        preview=RestorePreview(
+            fields=(),
+            fields_changing=0,
+            fields_unchanged=0,
+            fields_unreadable=0,
+        ),
+    )
+
+
+def _restore_screen_state(
+    *,
+    view: str = rp_screen.VIEW_IN_PROGRESS,
+) -> rp_screen.RestorePointsScreenState:
+    prepared = _prepared_restore()
+    return rp_screen.RestorePointsScreenState(
+        view=view,
+        selected_rp_id=prepared.restore_point_id,
+        prepared_restore=prepared,
+    )
 
 
 def _make_shell(
@@ -509,9 +536,21 @@ class _StubRestoreService:
         self.started = threading.Event()
         self.release = threading.Event()
         self.restore_calls = 0
+        self.last_prepared = None
+        self.last_acknowledgement = None
 
-    def restore(self, rp_id):
+    def restore(
+        self,
+        prepared: PreparedRestore,
+        *,
+        acknowledge_write_only_paddles: bool = False,
+        presence_guard=None,
+    ):
+        if not isinstance(prepared, PreparedRestore):
+            raise TypeError("test restore stub requires PreparedRestore")
         self.restore_calls += 1
+        self.last_prepared = prepared
+        self.last_acknowledgement = acknowledge_write_only_paddles
         if self._gate:
             self.started.set()
             if not self.release.wait(timeout=_GATE_TIMEOUT_S):
@@ -623,23 +662,21 @@ class SyncDefaultBehaviorTests(unittest.TestCase):
     def test_restore_runs_inline_to_result_view(self) -> None:
         service = _StubRestoreService()
         shell = _make_shell(MagicMock(), restore_point_service=service)
-        shell.restore_points_screen_state = rp_screen.RestorePointsScreenState(
-            view=rp_screen.VIEW_IN_PROGRESS, selected_rp_id="rp1"
-        )
+        shell.restore_points_screen_state = _restore_screen_state()
 
         rp_screen._execute_restore(shell)
 
         state = shell.restore_points_screen_state
         self.assertEqual(state.view, rp_screen.VIEW_RESULT)
         self.assertIs(state.result, service.result)
+        self.assertEqual(service.restore_calls, 1)
+        self.assertIs(service.last_prepared, state.prepared_restore)
         self.assertFalse(shell._hid_job_in_flight)
 
     def test_restore_failure_runs_inline_to_list_view(self) -> None:
         service = _StubRestoreService(raises=RuntimeError("HID timeout"))
         shell = _make_shell(MagicMock(), restore_point_service=service)
-        shell.restore_points_screen_state = rp_screen.RestorePointsScreenState(
-            view=rp_screen.VIEW_IN_PROGRESS, selected_rp_id="rp1"
-        )
+        shell.restore_points_screen_state = _restore_screen_state()
 
         rp_screen._execute_restore(shell)
 
@@ -648,14 +685,13 @@ class SyncDefaultBehaviorTests(unittest.TestCase):
         self.assertIn("HID timeout", state.status_text)
         self.assertEqual(state.status_kind, "warn")
         self.assertIsNone(state.result)
+        self.assertEqual(service.restore_calls, 1)
 
     def test_restore_supports_stub_shells_without_runner(self) -> None:
         # restore_points tests drive the state machine with SimpleNamespace
         # shells; the seam must keep that contract.
         service = _StubRestoreService()
-        state = rp_screen.RestorePointsScreenState(
-            view=rp_screen.VIEW_IN_PROGRESS, selected_rp_id="rp1"
-        )
+        state = _restore_screen_state()
         shell = SimpleNamespace(
             restore_point_service=service,
             restore_points_screen_state=state,
@@ -666,6 +702,7 @@ class SyncDefaultBehaviorTests(unittest.TestCase):
 
         self.assertEqual(state.view, rp_screen.VIEW_RESULT)
         self.assertIs(state.result, service.result)
+        self.assertEqual(service.restore_calls, 1)
         shell.rebuild_current_screen.assert_called_once()
 
 
@@ -708,9 +745,7 @@ class ThreadedExecutorLifecycleTests(unittest.TestCase):
         )
         rebuilds = MagicMock()
         shell.rebuild_current_screen = rebuilds
-        shell.restore_points_screen_state = rp_screen.RestorePointsScreenState(
-            view=rp_screen.VIEW_IN_PROGRESS, selected_rp_id="rp1"
-        )
+        shell.restore_points_screen_state = _restore_screen_state()
 
         rp_screen._execute_restore(shell)
 
@@ -727,6 +762,7 @@ class ThreadedExecutorLifecycleTests(unittest.TestCase):
 
         self.assertEqual(state.view, rp_screen.VIEW_RESULT)
         self.assertIs(state.result, service.result)
+        self.assertEqual(service.restore_calls, 1)
         self.assertFalse(shell._hid_job_in_flight)
         rebuilds.assert_called_once()
 
@@ -740,7 +776,8 @@ class ThreadedExecutorLifecycleTests(unittest.TestCase):
         _set_connected_identity(shell, "zd-unit-a")
         shell.restore_points_screen_state = rp_screen.RestorePointsScreenState(
             view=rp_screen.VIEW_IN_PROGRESS,
-            selected_rp_id="rp1",
+            selected_rp_id=_RESTORE_POINT_ID,
+            prepared_restore=_prepared_restore(),
         )
 
         rp_screen._execute_restore(shell)
@@ -826,8 +863,8 @@ class BusyRefusalTests(unittest.TestCase):
 
     def test_confirm_restore_refused_while_busy_stays_on_confirm(self) -> None:
         shell, service = self._gated_busy_shell()
-        shell.restore_points_screen_state = rp_screen.RestorePointsScreenState(
-            view=rp_screen.VIEW_CONFIRM, selected_rp_id="rp1"
+        shell.restore_points_screen_state = _restore_screen_state(
+            view=rp_screen.VIEW_CONFIRM
         )
         _capture_widget_state(shell.refresh_from_controller)
         self.assertTrue(service.started.wait(_GATE_TIMEOUT_S))
@@ -912,9 +949,7 @@ class ThreadedFailurePropagationTests(unittest.TestCase):
             hid_executor=threaded_hid_executor,
             restore_point_service=service,
         )
-        shell.restore_points_screen_state = rp_screen.RestorePointsScreenState(
-            view=rp_screen.VIEW_IN_PROGRESS, selected_rp_id="rp1"
-        )
+        shell.restore_points_screen_state = _restore_screen_state()
 
         rp_screen._execute_restore(shell)
         self.assertTrue(service.started.wait(_GATE_TIMEOUT_S))
@@ -927,6 +962,7 @@ class ThreadedFailurePropagationTests(unittest.TestCase):
         self.assertEqual(state.view, rp_screen.VIEW_LIST)
         self.assertIn("HID wedge", state.status_text)
         self.assertEqual(state.status_kind, "warn")
+        self.assertEqual(service.restore_calls, 1)
         self.assertFalse(shell._hid_job_in_flight)
 
 
@@ -1058,7 +1094,8 @@ class ApplyOriginPresenceBindingTests(unittest.TestCase):
         origin_generation = shell._controller_presence_generation
         shell.restore_points_screen_state = rp_screen.RestorePointsScreenState(
             view=rp_screen.VIEW_CONFIRM,
-            selected_rp_id="rp1",
+            selected_rp_id=_RESTORE_POINT_ID,
+            prepared_restore=_prepared_restore(),
             presence_key=origin_key,
             presence_generation=origin_generation,
         )

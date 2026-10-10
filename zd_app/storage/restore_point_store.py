@@ -19,10 +19,13 @@ UI is out of scope (restore-point UI-integration follow-up work).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
+import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -31,6 +34,9 @@ from zd_app.storage._import_guards import read_guarded_json
 from zd_app.storage.restore_point_models import (
     KIND,
     RestorePoint,
+    RestoreAttemptRecord,
+    _restore_attempt_from_dict,
+    _restore_attempt_to_dict,
     RestorePointParseError,
     RestorePointSchemaError,
     SkippedFile,
@@ -127,6 +133,79 @@ class RestorePointStore:
         temp_path.replace(final_path)
         return final_path
 
+    def _attempt_path(self, rp_id: str) -> Path:
+        if not isinstance(rp_id, str) or not re.fullmatch(
+            r"rp_\d{8}_\d{6}_[0-9a-f]{6}", rp_id
+        ):
+            raise RestorePointStoreError("invalid restore point id")
+        # A separate suffix excludes metadata from restore-point enumeration.
+        return self._contained(rp_id + ".attempt")
+
+    def record_restore_attempt(
+        self, source: RestorePoint, record: RestoreAttemptRecord,
+    ) -> None:
+        """Record bookkeeping without rewriting any restore-point content.
+
+        A concurrent external editor can replace the source at any time. A
+        reload/save or userspace compare-and-swap cannot protect against that
+        writer. Keep the summary in a separate atomic sidecar instead; load and
+        list overlay it only when the source fingerprint still matches.
+        Concurrent attempt writers use distinct temporary files;
+        the last completed replacement wins for metadata only.
+        """
+        rp_id = source.id
+        final_path = self._attempt_path(rp_id)
+        payload = json.dumps({
+            "source_sha256": self._source_fingerprint(source),
+            "attempt": _restore_attempt_to_dict(record),
+        }, allow_nan=False)
+        temp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=self.base_dir,
+                prefix=rp_id + ".attempt-", suffix=TEMP_SUFFIX, delete=False,
+            ) as handle:
+                temp_path = Path(handle.name)
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            temp_path.replace(final_path)
+        finally:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _source_fingerprint(rp: RestorePoint) -> str:
+        payload = restore_point_to_dict(rp)
+        payload.pop("last_restore_attempt", None)
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+                               ensure_ascii=True, allow_nan=False).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    def _with_attempt(self, rp: RestorePoint) -> RestorePoint:
+        try:
+            payload = read_guarded_json(self._attempt_path(rp.id))
+            if not isinstance(payload, dict):
+                raise ValueError("attempt metadata must be an object")
+            if payload.get("source_sha256") != self._source_fingerprint(rp):
+                return rp
+            record = _restore_attempt_from_dict(payload["attempt"])
+        except FileNotFoundError:
+            return rp
+        except (
+            OSError, ValueError, TypeError, KeyError, OverflowError,
+            RecursionError, RestorePointStoreError,
+        ):
+            logger.warning("restore attempt metadata unavailable for %s", rp.id)
+            return rp
+        return replace(rp, last_restore_attempt=record)
+
+    def _remove_attempt(self, rp_id: str) -> None:
+        try:
+            self._attempt_path(rp_id).unlink(missing_ok=True)
+        except (OSError, RestorePointStoreError):
+            logger.warning("restore attempt cleanup failed for %s", rp_id)
+
     # -- read ---------------------------------------------------------------
 
     def list(self) -> tuple[list[RestorePoint], list[SkippedFile]]:
@@ -164,7 +243,7 @@ class RestorePointStore:
                 logger.warning("could not load restore point %s: %s", path.name, exc)
                 skipped.append(SkippedFile(path=str(path), error=scrub_paths(str(exc))))
                 continue
-            valid.append(rp)
+            valid.append(self._with_attempt(rp))
         valid.sort(key=lambda rp: rp.created_at, reverse=True)
         return valid, skipped
 
@@ -184,7 +263,7 @@ class RestorePointStore:
                 continue
             if not isinstance(payload, dict) or payload.get("id") != rp_id:
                 continue
-            return restore_point_from_dict(payload)
+            return self._with_attempt(restore_point_from_dict(payload))
         raise FileNotFoundError(f"restore point not found: {rp_id!r}")
 
     # -- delete + prune -----------------------------------------------------
@@ -199,6 +278,7 @@ class RestorePointStore:
                 continue
             if isinstance(payload, dict) and payload.get("id") == rp_id:
                 path.unlink()
+                self._remove_attempt(rp_id)
                 return True
         return False
 
@@ -274,6 +354,7 @@ class RestorePointStore:
             if path is None or not path.exists():
                 return
             path.unlink()
+            self._remove_attempt(rp.id)
             pruned.append(rp.id)
             remaining.remove(rp)
 

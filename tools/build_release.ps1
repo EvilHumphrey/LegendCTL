@@ -1,3 +1,12 @@
+[CmdletBinding()]
+param(
+    [string]$ArtifactDestination,
+    # Internal worker: invoked only from the raw-blob export orchestrator.
+    [switch]$FromVerifiedSnapshot,
+    [string]$BuildPython,
+    [string]$ExpectedCommit
+)
+
 $ErrorActionPreference = "Stop"
 
 function Invoke-NativeCommand {
@@ -14,13 +23,13 @@ function Invoke-NativeCommand {
     checks $LASTEXITCODE and throws on non-zero. Restores the prior preference
     in finally so caller-scope behaviour is unchanged. The explicit exit-code check
     is a no-op-equivalent override on PS 7+ (where the wrap-as-ErrorRecord bug was
-    fixed) but remains correct — belt-and-suspenders, no regression.
+    fixed) but remains correct -- belt-and-suspenders, no regression.
 
     .PARAMETER Label
     Short description used in the throw message (e.g. "pip install", "PyInstaller").
 
     .PARAMETER ScriptBlock
-    The native invocation, e.g. { & $python -m pip install -r requirements-build.txt }.
+    The native invocation, e.g. { & $python -I -m pip install -r requirements-build.txt }.
     #>
     param(
         [Parameter(Mandatory)][string]$Label,
@@ -41,18 +50,48 @@ function Invoke-NativeCommand {
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
-$python = Join-Path $repoRoot ".venv-zd\Scripts\python.exe"
+$python = if ($FromVerifiedSnapshot) { $BuildPython } else { Join-Path $repoRoot ".venv-zd\Scripts\python.exe" }
+if (-not $FromVerifiedSnapshot) {
+    if ($BuildPython -or $ExpectedCommit) { throw "Snapshot parameters are internal to the release builder." }
+    if (-not $ArtifactDestination) { $ArtifactDestination = Join-Path $repoRoot "dist" }
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+        throw "Expected venv at .venv-zd; run tools\setup_dev_env.ps1 first."
+    }
+    Invoke-NativeCommand -Label "commit-bound release build" -ScriptBlock { & $python -I -S (Join-Path $PSScriptRoot "export_git_tree.py") --repo $repoRoot --destination $ArtifactDestination --python $python }
+    return
+}
+if ($ArtifactDestination -or $ExpectedCommit -notmatch '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' -or -not [IO.Path]::IsPathRooted($BuildPython)) {
+    throw "Invalid isolated build identity or toolchain."
+}
+if (Test-Path -LiteralPath (Join-Path $repoRoot ".git")) {
+    throw "The internal worker requires a raw export without Git checkout metadata."
+}
 if (-not (Test-Path $python)) {
     Write-Error "Expected venv at .venv-zd; run ``tools\setup_dev_env.ps1`` first."
 }
 $releaseLock = Join-Path $repoRoot "requirements-release.lock"
-$lockMarker = Join-Path $repoRoot ".venv-zd\.legendctl-release-lock.sha256"
+$lockMarker = Join-Path (Split-Path -Parent (Split-Path -Parent $python)) ".legendctl-release-lock.sha256"
 if (-not (Test-Path -LiteralPath $releaseLock) -or -not (Test-Path -LiteralPath $lockMarker)) {
     Write-Error "Expected a hash-locked release venv; run ``tools\setup_dev_env.ps1`` first."
 }
 $expectedLockHash = (Get-FileHash -LiteralPath $releaseLock -Algorithm SHA256).Hash.ToLowerInvariant()
 $recordedLockHash = (Get-Content -LiteralPath $lockMarker -Raw).Trim()
-if ($recordedLockHash -ne $expectedLockHash) {
+# Existing setup markers hash checkout bytes. A text checkout may have CRLF
+# while this raw Git export has LF. Accept only exact raw/LF/CRLF encodings of
+# this same lock; every pin, wheel hash and other character stays unchanged.
+$lockEncoding = New-Object System.Text.UTF8Encoding($false, $true)
+$lockText = $lockEncoding.GetString([IO.File]::ReadAllBytes($releaseLock))
+$lfLockText = $lockText.Replace("`r`n", "`n")
+$acceptedLockHashes = @($expectedLockHash)
+$lockHasher = [Security.Cryptography.SHA256]::Create()
+try {
+    foreach ($variant in @($lfLockText, $lfLockText.Replace("`n", "`r`n"))) {
+        $acceptedLockHashes += [BitConverter]::ToString($lockHasher.ComputeHash($lockEncoding.GetBytes($variant))).Replace("-", "").ToLowerInvariant()
+    }
+} finally {
+    $lockHasher.Dispose()
+}
+if ($recordedLockHash -notin $acceptedLockHashes) {
     Write-Error "The release venv does not match requirements-release.lock; run ``tools\setup_dev_env.ps1 -Recreate``."
 }
 
@@ -62,13 +101,12 @@ if ($versionPy -match '__version__\s*=\s*"([^"]+)"') {
 } else {
     Write-Error "Could not parse __version__ from zd_app\version.py"
 }
-
-$buildCommit = (& git rev-parse --short HEAD).Trim()
-if (-not $buildCommit) {
-    $buildCommit = "unknown"
+if ($version -notmatch '^\d+\.\d+\.\d+(?:[a-zA-Z0-9.+-]*)$') {
+    throw "Version is not a safe artifact filename component."
 }
+
+$buildCommit = $ExpectedCommit
 $buildDate = Get-Date -Format "yyyy-MM-dd"
-$originalVersionPy = $versionPy
 $patchedVersionPy = $versionPy -replace '__build_commit__\s*=\s*"[^"]*"', "__build_commit__ = `"$buildCommit`""
 if ($patchedVersionPy -eq $versionPy -and $versionPy -notmatch '__build_commit__') {
     $patchedVersionPy = $patchedVersionPy.TrimEnd() + "`r`n__build_commit__ = `"$buildCommit`"`r`n"
@@ -77,7 +115,10 @@ $patchedVersionPy = $patchedVersionPy -replace '__build_date__\s*=\s*"[^"]*"', "
 if ($patchedVersionPy -notmatch '__build_date__') {
     $patchedVersionPy = $patchedVersionPy.TrimEnd() + "`r`n__build_date__ = `"$buildDate`"`r`n"
 }
-Set-Content "zd_app\version.py" -Value $patchedVersionPy -Encoding UTF8 -NoNewline
+# PS5.1's Set-Content -Encoding UTF8 emits a BOM, which ast.parse(str) rejects.
+# WriteAllText preserves the supplied newline text and is BOM-free on PS5/PS7.
+$versionEncoding = New-Object System.Text.UTF8Encoding($false)
+[IO.File]::WriteAllText((Join-Path $repoRoot "zd_app\version.py"), $patchedVersionPy, $versionEncoding)
 
 Write-Host "Building ZDUltimateLegend v$version" -ForegroundColor Cyan
 
@@ -85,19 +126,16 @@ try {
     # setup_dev_env.ps1 already installed this exact release lock from a
     # hash-verified wheelhouse. Do not run pip install here: a second resolver
     # would undermine the offline artifact-build boundary.
-    Invoke-NativeCommand -Label "pip check (hash-locked release venv)" -ScriptBlock { & $python -m pip check }
-    Invoke-NativeCommand -Label "pip-audit (hash-locked release venv)" -ScriptBlock { & $python -m pip_audit }
+    Invoke-NativeCommand -Label "pip check (hash-locked release venv)" -ScriptBlock { & $python -I -m pip check }
+    Invoke-NativeCommand -Label "pip-audit (hash-locked release venv)" -ScriptBlock { & $python -I -m pip_audit }
 
-    if (Test-Path "build") {
-        Remove-Item -Recurse -Force "build"
-    }
-    if (Test-Path "dist") {
-        Remove-Item -Recurse -Force "dist"
+    if ((Test-Path -LiteralPath "build") -or (Test-Path -LiteralPath "dist")) {
+        throw "Isolated source unexpectedly contains build outputs. Refusing replacement."
     }
 
-    Invoke-NativeCommand -Label "PyInstaller" -ScriptBlock { & $python -m PyInstaller --noconfirm pyinstaller_main_zd.spec }
+    Invoke-NativeCommand -Label "PyInstaller" -ScriptBlock { & $python -I -m PyInstaller --noconfirm pyinstaller_main_zd.spec }
 
-    Invoke-NativeCommand -Label "trust manifest" -ScriptBlock { & $python tools\generate_trust_manifest.py --dist-root dist\ZDUltimateLegend --repo-root . }
+    Invoke-NativeCommand -Label "trust manifest" -ScriptBlock { & $python -I tools\generate_trust_manifest.py --dist-root dist\ZDUltimateLegend --repo-root . --source-commit $ExpectedCommit }
 
     $srcDir = Join-Path $repoRoot "dist\ZDUltimateLegend"
     $dstDir = Join-Path $repoRoot "dist\ZDUltimateLegend-v$version"
@@ -129,7 +167,7 @@ try {
         if (Test-Path $installerPath) {
             $installerHash = (Get-FileHash $installerPath -Algorithm SHA256).Hash
         } else {
-            Write-Warning "Inno Setup reported success but installer not found at $installerPath"
+            throw "Inno Setup reported success but installer not found at $installerPath"
         }
     }
 
@@ -145,7 +183,7 @@ try {
     Set-Content -Path $sumsPath -Value $sumsLines -Encoding UTF8
 
     Write-Host ""
-    Write-Host "Build complete:" -ForegroundColor Green
+    Write-Host "Isolated artifacts ready for provenance validation:" -ForegroundColor Cyan
     Write-Host "  Folder:    $dstDir"
     Write-Host "  Zip:       $zipPath"
     Write-Host "  SHA256:    $($hash.Hash)"
@@ -157,19 +195,7 @@ try {
     }
     Write-Host "  Checksums: $sumsPath"
 } finally {
-    Set-Content "zd_app\version.py" -Value $originalVersionPy -Encoding UTF8 -NoNewline
-}
-
-# --- Refresh the local install + Desktop/Start Menu shortcuts to this build ---
-# dist\ is wiped + versioned on every build, so the operator's clickable
-# shortcuts can't target it directly. install_local.ps1 mirrors this fresh build
-# to <repo>\local-install\ and re-points the shortcuts at it. Guarded so a
-# shortcut hiccup never makes a successful build look failed.
-try {
-    Write-Host ""
-    Write-Host "Refreshing local install + Desktop/Start Menu shortcuts..." -ForegroundColor Cyan
-    & (Join-Path $PSScriptRoot "install_local.ps1")
-} catch {
-    Write-Warning "Build succeeded but shortcut refresh failed: $_"
-    Write-Warning "Re-run tools\install_local.ps1 manually (close the app first if it's open)."
+    # Keep the stamped source with the isolated diagnostics. The operator's
+    # checkout was never edited, so there is nothing there to roll back.
+    Set-Location $repoRoot
 }

@@ -13,7 +13,7 @@ from zd_app.services.diagnostic_bundle import DiagnosticBundleService
 from zd_app.services.diagnostics_service import _redact_instance_id
 from zd_app.services.share_card import build_share_card
 from zd_app.services.model_fingerprint import fingerprint_display_rows
-from zd_app.services.path_scrub import scrub_paths
+from zd_app.services.path_scrub import sanitize_shareable_text, scrub_paths
 from zd_app.services.trust_matrix import (
     TrustMatrixSignals,
     build_trust_matrix,
@@ -419,7 +419,9 @@ def _build_guidance_tab(shell) -> None:
         dpg.add_button(
             label=t("diagnostics.event_log.copy"),
             width=160,
-            callback=lambda: dpg.set_clipboard_text("\n".join(shell.device_service.recent_events(100))),
+            callback=lambda: dpg.set_clipboard_text(
+                sanitize_shareable_text("\n".join(shell.device_service.recent_events(100)))
+            ),
         )
         dpg.add_text(
             tag="diag_event_log",

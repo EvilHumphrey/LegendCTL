@@ -18,6 +18,7 @@ and reuses :mod:`zd_app.storage.snapshot_codec` for the embedded
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
@@ -139,7 +140,8 @@ class FieldCoverage:
     """One field's coverage record. ``state`` is the capture outcome,
     ``category`` is the static classification, ``readable`` is True/False/
     'intermittent' per the denial-aware example, and ``writable`` says
-    whether restore should attempt to write this field.
+    what capture recorded about support. Persisted flags are descriptive;
+    restore eligibility is owned by the service code.
     """
 
     state: CoverageState
@@ -295,6 +297,63 @@ class RestorePoint:
     last_restore_attempt: Optional[RestoreAttemptRecord] = None
     claim_boundary_paragraph: str = CLAIM_BOUNDARY_PARAGRAPH
     claim_boundary_short: str = CLAIM_BOUNDARY_SHORT_UI
+
+
+@dataclass(frozen=True)
+class PreparedRestore:
+    """Immutable restore content prepared for one confirmation decision.
+
+    ``payload_json`` is a canonical, validated serialization of the exact
+    :class:`RestorePoint` used to build ``preview``.  Keeping the payload as an
+    immutable string (rather than retaining ``ControllerSnapshot``'s mutable
+    collection members) prevents a later store rewrite or selection change
+    from changing what the confirmed restore applies.
+
+    This is an in-memory service/UI contract only; it is never persisted and
+    does not change the restore-point schema.
+    """
+
+    payload_json: str
+    preview: RestorePreview
+    excluded_fields: tuple[str, ...]
+    write_only_paddle_slots: tuple[str, ...]
+
+    @classmethod
+    def from_restore_point(
+        cls,
+        restore_point: RestorePoint,
+        *,
+        preview: RestorePreview,
+        excluded_fields: tuple[str, ...] = (),
+        write_only_paddle_slots: tuple[str, ...] = (),
+    ) -> "PreparedRestore":
+        payload_json = json.dumps(
+            restore_point_to_dict(restore_point),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        # Validate the frozen representation before it can be confirmed.
+        restore_point_from_dict(json.loads(payload_json))
+        return cls(
+            payload_json=payload_json,
+            preview=preview,
+            excluded_fields=tuple(sorted(set(excluded_fields))),
+            write_only_paddle_slots=tuple(write_only_paddle_slots),
+        )
+
+    def materialize(self) -> RestorePoint:
+        """Return a fresh validated object from the frozen prepared bytes."""
+
+        payload = json.loads(self.payload_json)
+        if not isinstance(payload, dict):
+            raise RestorePointParseError("prepared restore payload must be an object")
+        return restore_point_from_dict(payload)
+
+    @property
+    def restore_point_id(self) -> str:
+        return self.materialize().id
 
 
 @dataclass(frozen=True)
@@ -492,10 +551,13 @@ def _field_coverage_from_dict(payload: Mapping[str, Any]) -> FieldCoverage:
     readable = payload["readable"]
     if not isinstance(readable, (bool, str)):
         raise ValueError(f"readable must be bool or str, got {readable!r}")
+    writable = payload["writable"]
+    if not isinstance(writable, bool):
+        raise ValueError(f"writable must be bool, got {writable!r}")
     return FieldCoverage(
         state=CoverageState(payload["state"]),
         readable=readable,
-        writable=bool(payload["writable"]),
+        writable=writable,
         category=CoverageCategory(payload["category"]),
         note=_optional_str(payload.get("note")),
     )
@@ -544,6 +606,7 @@ __all__ = [
     "DeviceIdentity",
     "FieldCoverage",
     "IdentityConfidence",
+    "PreparedRestore",
     "RestoreAttemptRecord",
     "RestoreFieldDelta",
     "RestoreFieldOutcome",
