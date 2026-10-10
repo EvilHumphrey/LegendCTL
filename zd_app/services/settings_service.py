@@ -2635,6 +2635,7 @@ class SettingsService:
                     query,
                     expected_cat=CATEGORY_BUTTON_BINDING,
                     expected_selector=slot.value,
+                    min_length=11,
                 )
             except SettingsServiceError as exc:
                 last_error = str(exc)
@@ -3198,7 +3199,9 @@ class SettingsService:
 
         try:
             query = build_read_query_payload(CATEGORY_MOTION, MOTION_SUBCOMMAND)
-            response = self._read_response(query, expected_cat=CATEGORY_MOTION)
+            response = self._read_response(
+                query, expected_cat=CATEGORY_MOTION, min_length=12
+            )
             try:
                 target = MotionMappingTarget(response[7])
             except ValueError:
@@ -3416,6 +3419,7 @@ class SettingsService:
                 query,
                 expected_cat=CATEGORY_LIGHTING,
                 expected_selector=zone.value,
+                min_length=14,
             )
             if response[7] != zone.value:
                 logger.warning(

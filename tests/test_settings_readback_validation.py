@@ -154,5 +154,45 @@ class TestReadbackValidation(unittest.TestCase):
                                 self.assertIsNotNone(getattr(snapshot, field))
 
 
+class TestAdditionalReadbackFraming(unittest.TestCase):
+    CASES = (
+        (settings.CATEGORY_BUTTON_BINDING, "get_button_binding", (settings.ButtonSlot.A,),
+         [settings.ButtonSlot.A.value, 1, 0, settings.ControllerButtonTarget.B.value]),
+        (settings.CATEGORY_MOTION, "get_motion_settings", (),
+         [settings.MotionMappingTarget.DISABLED.value, 0, 0,
+          settings.MotionMappingMode.INSTANT.value, 100]),
+        (settings.CATEGORY_LIGHTING, "get_zone_lighting", (settings.LightingZone.HOME,),
+         [settings.LightingZone.HOME.value, 1, settings.LightingMode.ALWAYS_ON.value,
+          255, 255, 255, 255]),
+    )
+
+    def test_matching_truncated_frames_abstain(self):
+        for category, getter, args, payload in self.CASES:
+            frame = _make_read_response(category=category, payload=bytes(payload))
+            for length in range(8, 7 + len(payload)):
+                with self.subTest(getter=getter, length=length):
+                    # Button binding retries remain bounded and receive the same
+                    # malformed reply on each attempt, never a fabricated success.
+                    rec = _Recorder(read_results=[frame[:length]] * settings.BUTTON_BINDING_READ_ATTEMPTS)
+                    with self.assertLogs(settings.__name__, level="WARNING"):
+                        self.assertIsNone(getattr(_make_service(rec), getter)(*args))
+
+    def test_shortest_valid_frames_and_stale_selector_filtering(self):
+        for category, getter, args, payload in self.CASES:
+            with self.subTest(getter=getter):
+                valid = _make_read_response(category=category, payload=bytes(payload))[:7 + len(payload)]
+                frames = [_make_write_ack_response(category=category)[:8]]
+                if args:
+                    stale = bytearray(valid[:8])
+                    stale[7] = payload[0] + 1
+                    frames.append(bytes(stale))
+                else:
+                    frames.append(_make_read_response(category=settings.CATEGORY_POLLING_RATE)[:8])
+                frames.append(valid)
+                rec = _Recorder(read_results=frames)
+                self.assertIsNotNone(getattr(_make_service(rec), getter)(*args))
+                self.assertEqual(sum(event[0] == "read_file" for event in rec.events), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
