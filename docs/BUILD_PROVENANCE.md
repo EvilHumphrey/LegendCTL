@@ -29,7 +29,7 @@ Clean tracked files are accepted even if their names match an ignore pattern.
 
 The only untracked/ignored allowances are `.venv-zd`, `build`, `dist`,
 `local-install`, `zd_data`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`,
-`.release-wheelhouse`, and ordinary `.pyc` files under `__pycache__` directories.
+`.release-wheelhouse`, `.release-tools`, and ordinary `.pyc` files under `__pycache__` directories.
 An importable `.py`/`.pyd` outside those excluded generated roots is rejected;
 `__pycache__` is inspected and may contain only ordinary bytecode/cache
 directories. Whole generated roots are excluded without traversing their
@@ -38,7 +38,9 @@ contents. Their root itself may not be a link or junction. A leftover
 and relocate it before building. None of these excluded bytes enters the source
 export. The existing release venv is separately trusted executable tooling;
 the lock marker is not a claim that an adversarial local account cannot tamper
-with installed tools.
+with installed tools. The excluded `.release-tools` compiler cache is separately
+checked against the commit-bound Inno Setup file hashes before use; its bytes
+are not application source and do not enter the raw export.
 
 `zd_data` is the application's ignored runtime-data directory. Tests and render
 fixtures may leave logs/crash notices there before a build. Its untracked
@@ -88,7 +90,16 @@ The hosted release workflow calls this same builder from its checked-out ref;
 its test log lives under `RUNNER_TEMP` so it cannot dirty admitted source.
 Its later checksum regeneration and attestation/publication steps are separate.
 The local completion receipt describes files at builder completion; the hosted
-workflow does not publish that receipt and subsequently rewrites its checksum
-file. This builder does not push, publish, tag, dispatch workflows, or prove hardware
+workflow retains that unsigned receipt in its distribution workflow artifact,
+then uses its separate regenerated checksum file for attesting the two binaries.
+The receipt's checksum-file hash describes the original builder output, not the
+later regenerated checksum-file bytes. The receipt is not a release asset or an
+attestation subject. This builder does not push, publish, tag, dispatch workflows, or prove hardware
 behavior. Qualification still requires the project's release gates and an
 actual compiler/packager rehearsal on the reviewed candidate.
+
+The hosted build also runs an actual installer lifecycle gate on its disposable
+Windows Server runner. It checks the built installer, upgrade from pinned 2.6.2
+bytes, uninstall, payload identity, registration, permissions and preservation
+of test data. Its separate evidence artifact does not replace Windows client
+UAC/SmartScreen checks or physical-controller qualification.

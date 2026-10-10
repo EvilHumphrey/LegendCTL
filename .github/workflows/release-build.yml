@@ -261,6 +261,41 @@ jobs:
           "SETUP_PATH=$($setup[0].FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "ZIP_PATH=$($zip[0].FullName)"     | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Qualify the actual installer lifecycle on the disposable runner
+        shell: pwsh
+        run: |
+          # This is an actual install/upgrade/uninstall gate in the disposable
+          # hosted VM. It never runs on the maintainer's installed application.
+          # The prior release bytes were checked against its published checksum
+          # and GitHub attestation before this pin was added.
+          $previous = Join-Path $env:RUNNER_TEMP 'LegendCTL-previous-v2.6.2-Setup.exe'
+          if (Test-Path -LiteralPath $previous) { throw 'Previous-installer destination already exists.' }
+          Invoke-WebRequest -Uri 'https://github.com/EvilHumphrey/LegendCTL/releases/download/v2.6.2/ZDUltimateLegend-v2.6.2-Setup.exe' -OutFile $previous
+          $previousHash = '2cf5f0e198c72d3ac19884021df0b0e22448a6ad5e627fb0afc89c5c0c199d96'
+          if ((Get-FileHash -LiteralPath $previous -Algorithm SHA256).Hash.ToLowerInvariant() -cne $previousHash) {
+            throw 'Prior released installer does not match the reviewed bytes.'
+          }
+          $versionMatch = [regex]::Match((Get-Content -LiteralPath 'zd_app/version.py' -Raw), '__version__\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"')
+          if (-not $versionMatch.Success) { throw 'Cannot identify candidate version.' }
+          $version = $versionMatch.Groups[1].Value
+          $candidateHash = (Get-FileHash -LiteralPath $env:SETUP_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
+          & tools\qualify_installer_lifecycle.ps1 -AllowDisposableRunner `
+            -CandidateSetup $env:SETUP_PATH -CandidateSha256 $candidateHash `
+            -CandidatePayloadDirectory (Join-Path $PWD "dist\ZDUltimateLegend-v$version") `
+            -PreviousSetup $previous -PreviousSha256 $previousHash `
+            -ExpectedVersion $version -ExpectedBuildCommit $env:GITHUB_SHA `
+            -EvidenceDirectory (Join-Path $env:RUNNER_TEMP 'installer-lifecycle-evidence')
+
+      - name: Preserve actual installer lifecycle evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: installer-lifecycle-${{ github.run_number }}
+          path: ${{ runner.temp }}/installer-lifecycle-evidence/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Regenerate SHA256SUMS.txt (documented shasum binary format)
         shell: pwsh
         run: |
@@ -293,6 +328,8 @@ jobs:
             dist/*-Setup.exe
             dist/*-windows.zip
             dist/SHA256SUMS.txt
+            dist/SOURCE_PROVENANCE.json
+          if-no-files-found: error
           retention-days: 14
 
   release:

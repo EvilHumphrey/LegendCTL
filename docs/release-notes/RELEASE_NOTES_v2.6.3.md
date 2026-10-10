@@ -50,6 +50,10 @@ and does not identify which physical control produced it.
 
 ## Build and maintenance changes
 
+- Installer builds verify the reviewed Inno Setup installer and compiler inputs.
+  The application installer enforces its managed Program Files destination and
+  refuses redirected locations or conflicting prior registrations. It relies on
+  normal protected Program Files permissions; it does not repair weakened ACLs.
 - Python release dependencies use a transitive version-and-hash lock. The build
   environment installs from a verified wheelhouse offline and audits the same
   environment used for packaging. Build/audit dependencies and pinned CI actions

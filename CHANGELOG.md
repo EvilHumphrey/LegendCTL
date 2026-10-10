@@ -27,6 +27,9 @@ hardware, and release-artifact qualification remains pending.
 - Local release builds use an immutable Git source export, record its full commit
   and artifact hashes, preserve existing output, and no longer refresh local
   installs or shortcuts. See [build provenance](docs/BUILD_PROVENANCE.md).
+- Installer builds verify the pinned compiler inputs. Installation enforces the
+  managed Program Files destination and rejects redirected paths or conflicting
+  prior registrations; it assumes normal protected Program Files permissions.
 - Python release dependencies are transitively pinned with SHA-256 hashes,
   installed from a verified wheelhouse offline, and audited in the build
   environment. Build/audit dependencies and pinned CI actions were refreshed;
