@@ -14,6 +14,25 @@ From the [Releases page](https://github.com/EvilHumphrey/LegendCTL/releases/late
 - **`ZDUltimateLegend-v<version>-windows.zip`** — portable. Unzip anywhere and run `ZD Ultimate Legend.exe`. Nothing is installed; delete the folder to remove it. **Recommended if you just want to try it.**
 - **`ZDUltimateLegend-v<version>-Setup.exe`** — installer (adds Start-Menu / Desktop shortcuts; uninstall via Settings → Apps).
 
+### Installer destination policy in the next release
+
+Installer builds from this revision accept only the standard
+`%ProgramFiles%\ZDUltimateLegend\` directory. Custom destinations supplied through
+`/DIR`, `/LOADINF`, or old installation settings are not supported. The final
+destination is checked before files or uninstall registration are changed;
+directory links in its existing parent chain are rejected too. This assumes
+the normal Program Files permissions have not been weakened by an administrator.
+The portable ZIP still supports running from another folder.
+
+If Setup finds an older installation registered in another directory, it blocks
+instead of silently leaving two installations sharing one uninstall entry.
+Review that installation before migrating: Setup does not move or delete its
+files and never launches its old uninstaller. A rejected path uses Inno Setup's
+standard folder-name error; `/LOG` records a `LEGENDCTL_INSTALL_PATH_*` or
+`LEGENDCTL_PREVIOUS_INSTALL_PATH_REJECTED` reason code. Existing published
+installers are unchanged by this source update. The check covers machine-wide
+registrations and Setup's current account, not every other user's installations.
+
 ## 2. Why Windows may show "Windows protected your PC"
 
 LegendCTL is **not code-signed** and its downloads may have limited reputation. Depending on the file's reputation, how it was downloaded, and system or enterprise policy, Windows SmartScreen may show a blue **"Windows protected your PC"** dialog.
