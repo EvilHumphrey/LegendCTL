@@ -21,7 +21,7 @@ from typing import Any
 from zd_app.i18n import t
 from zd_app.models import DeviceState, DiagnosticSnapshot, utc_now_iso
 from zd_app.services._log_entry import LogEntry, render_log_entry
-from zd_app.services.path_scrub import scrub_paths
+from zd_app.services.path_scrub import sanitize_shareable_json, sanitize_shareable_text
 from zd_app.storage.settings_store import _default_user_data_dir
 
 
@@ -70,21 +70,19 @@ def _redact_instance_id(identifier: str | None) -> str:
 
 
 def _redact_paths(text: str) -> str:
-    """Reduce absolute filesystem paths in event-log text to a privacy-safe form.
+    """Sanitize shareable event-log text at the privacy boundary.
 
     Event-log messages routinely carry absolute paths (e.g. an
     "Attempted path: C:\\Users\\<name>\\..." entry, config file paths, or the
     exported-bundle path the app logs on every export). The on-screen log feeds
     the shareable diagnostic bundle, so the OS username / home directory must
-    never ship in it. Delegates to the shared scrubber
-    (:func:`zd_app.services.path_scrub.scrub_paths`) so this surface and the
-    diagnostic bundle stay in lock-step: app-data paths collapse to
-    ``<APP_DATA>``, the username after a ``Users``/``home`` root is dropped
-    (even a spaced display name), and any other path is reduced to its
-    basename. Non-path text is returned unchanged.
+    never ship in it. Delegates to the shared composed sanitizer so app-data
+    paths collapse to ``<APP_DATA>``, home paths lose the account component,
+    other paths reduce to their basename, and per-unit PnP/HID tails reduce to
+    model-level VID/PID. Other text is returned unchanged.
     """
 
-    return scrub_paths(text)
+    return sanitize_shareable_text(text)
 
 
 class DiagnosticsService:
@@ -152,7 +150,7 @@ class DiagnosticsService:
         bundle_path = output_path / f"diagnostic_bundle_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         bundle_path.write_text(
             json.dumps(
-                {
+                sanitize_shareable_json({
                     "device_state": self._bundle_device_state(device_state),
                     "snapshot": {
                         "timestamp": snapshot.timestamp,
@@ -165,7 +163,7 @@ class DiagnosticsService:
                         "last_write_duration_ms": snapshot.last_write_duration_ms,
                         "event_log": snapshot.event_log,
                     },
-                },
+                }),
                 indent=2,
             ),
             encoding="utf-8",

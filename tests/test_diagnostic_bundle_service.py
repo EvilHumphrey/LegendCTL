@@ -16,12 +16,14 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
+from unittest.mock import patch
 
 from zd_app.services.diagnostic_bundle import (
     APP_DATA_PLACEHOLDER,
     CLAIM_BOUNDARY_PARAGRAPH,
     DiagnosticBundleService,
 )
+from zd_app.services.diagnostic_bundle.service import _BundleMember
 from zd_app.services.module_passport import ModulePassportService
 from zd_app.services.wear_ledger import WearLedgerService
 from zd_app.services.wear_ledger.models import (
@@ -854,6 +856,26 @@ class GenerateBundleZipTests(unittest.TestCase):
         result = self.service.generate_bundle_zip(target)
         self.assertIsNone(result)
 
+    def test_malformed_health_json_is_omitted_without_blocking_bundle(self) -> None:
+        json_path = (
+            self.health_dir / "zd_health_report_2026-05-26_180000.json"
+        )
+        json_path.write_text("{not valid json", encoding="utf-8")
+        target = self.root / "malformed_health.zip"
+
+        self.assertIsNotNone(self.service.generate_bundle_zip(target))
+
+        with zipfile.ZipFile(target, "r") as zf:
+            names = zf.namelist()
+        self.assertIn(
+            "health_reports/zd_health_report_2026-05-26_180000.md",
+            names,
+        )
+        self.assertNotIn(
+            "health_reports/zd_health_report_2026-05-26_180000.json",
+            names,
+        )
+
 
 class BundlePreviewEmptySourcesTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -1144,6 +1166,154 @@ class HealthReportPathSanitizationTests(unittest.TestCase):
             self.assertIn("Overall: ready", zf.read(md_entry).decode("utf-8"))
 
 
+class RecursivePrivacyBoundaryTests(unittest.TestCase):
+    _INSTANCE = r"HID\VID_413D&PID_2104&MI_02\UNIT-SERIAL-123"
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.clock = _frozen_clock(
+            datetime(2026, 5, 26, 18, 0, 0, tzinfo=timezone.utc)
+        )
+        self.ledger = WearLedgerService(
+            base_dir=self.root / "ledger", utc_now=self.clock
+        )
+        self.passports = ModulePassportService(
+            base_dir=self.root / "passports",
+            wear_ledger=self.ledger,
+            utc_now=self.clock,
+        )
+        self.passports.assign(
+            SIDE_LEFT,
+            self._INSTANCE,
+            notes=r"saved at C:\Users\Jane Doe\modules\left.bin",
+        )
+        self.passports.append_fingerprint(
+            SIDE_LEFT,
+            _fingerprint(
+                notes=(
+                    f"nested {self._INSTANCE}; "
+                    r"capture C:\Users\Jane Doe\capture\trace.json"
+                )
+            ),
+        )
+        # Archive the path-bearing / instance-bearing passport so both the
+        # archive name and its recursive JSON body are exercised.
+        self.passports.assign(SIDE_LEFT, "STOCK_LEFT_CLEAN")
+
+        self.health_dir = self.root / "health_reports"
+        self.health_dir.mkdir(parents=True)
+        stamp = "2026-05-26_180000"
+        (self.health_dir / f"zd_health_report_{stamp}.md").write_text(
+            f"# Controller Health Report\n\n{self._INSTANCE}\n"
+            r"C:\Users\Jane Doe\health\health-note.txt",
+            encoding="utf-8",
+        )
+        (self.health_dir / f"zd_health_report_{stamp}.json").write_text(
+            json.dumps(
+                {
+                    "device": {"controller_name": self._INSTANCE},
+                    "nested": [
+                        {
+                            "note": (
+                                r"C:\Users\Jane Doe\health\health.json "
+                                + self._INSTANCE
+                            )
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.ledger.append(
+            SERVICE_NOTE,
+            summary="serviced",
+            details={"note": f"service preview {self._INSTANCE}"},
+        )
+        self.service = DiagnosticBundleService(
+            base_dir=self.root / "bundles",
+            module_passport_service=self.passports,
+            health_report_dir=self.health_dir,
+            wear_ledger=self.ledger,
+            app_data_dir=self.root,
+            utc_now=self.clock,
+        )
+
+    def test_every_zip_member_is_sanitized_and_json_remains_valid(self) -> None:
+        target = self.root / "privacy.zip"
+        self.assertIsNotNone(self.service.generate_bundle_zip(target))
+
+        all_text: list[str] = []
+        with zipfile.ZipFile(target, "r") as zf:
+            names = zf.namelist()
+            self.assertTrue(
+                any(name.startswith("module_passports/archive/") for name in names)
+            )
+            for name in names:
+                body = zf.read(name).decode("utf-8")
+                all_text.extend((name, body))
+                self.assertNotIn("UNIT-SERIAL-123", name)
+                self.assertNotIn("UNIT-SERIAL-123", body)
+                self.assertNotIn("Jane Doe", body)
+                if name.endswith(".json"):
+                    json.loads(body)
+
+        combined = "\n".join(all_text)
+        self.assertIn("VID_413D&PID_2104", combined)
+        self.assertIn("left.bin", combined)
+        self.assertIn("trace.json", combined)
+        self.assertIn("health.json", combined)
+
+    def test_raw_member_is_sanitized_by_final_zip_choke(self) -> None:
+        target = self.root / "raw.zip"
+        raw = _BundleMember(
+            path="raw.json",
+            text=json.dumps(
+                {
+                    "nested": [
+                        {
+                            "value": (
+                                r"C:\Users\Jane Doe\raw\raw.txt "
+                                + self._INSTANCE
+                            )
+                        }
+                    ]
+                }
+            ),
+            class_key="health_report",
+        )
+        with patch.object(self.service, "_bundle_members", return_value=[raw]):
+            self.assertIsNotNone(self.service.generate_bundle_zip(target))
+
+        with zipfile.ZipFile(target, "r") as zf:
+            payload = json.loads(zf.read("raw.json").decode("utf-8"))
+        value = payload["nested"][0]["value"]
+        self.assertEqual(value, r"raw.txt HID\VID_413D&PID_2104")
+
+    def test_invalid_raw_json_fails_closed_before_zip_creation(self) -> None:
+        target = self.root / "invalid.zip"
+        raw = _BundleMember(
+            path="raw.json",
+            text="{not valid json",
+            class_key="health_report",
+        )
+        with patch.object(self.service, "_bundle_members", return_value=[raw]):
+            self.assertIsNone(self.service.generate_bundle_zip(target))
+        self.assertFalse(target.exists())
+
+    def test_absolute_raw_member_path_fails_closed_before_zip_creation(self) -> None:
+        target = self.root / "absolute-path.zip"
+        raw = _BundleMember(
+            path=r"C:\Users\Jane Doe\raw.json",
+            text="{}",
+            class_key="health_report",
+        )
+        with patch.object(self.service, "_bundle_members", return_value=[raw]):
+            self.assertIsNone(self.service.generate_bundle_zip(target))
+        self.assertFalse(target.exists())
+
+
 class BundleScrubsSpacedDisplayNameAcrossAllMembersTests(unittest.TestCase):
     """P4 (round-3): every copied bundle member is scrubbed on write, even for a
     SPACED display-name account (``C:\\Users\\Jane Doe\\...``) — the dangerous
@@ -1154,7 +1324,7 @@ class BundleScrubsSpacedDisplayNameAcrossAllMembersTests(unittest.TestCase):
     contain "Jane", ``C:\\Users``, or ``C:/Users``.
 
     Passes today — ``generate_bundle_zip`` scrubs every copied member on write
-    (health reports via ``_sanitize_path(read_text())``, passports via the
+    (health reports via the final member choke, passports via the recursively
     sanitized passport dict, the wear summary's note previews). This pins that
     contract against a future copy-without-scrub regression, across all members
     at once and for the spaced-username case the earlier per-member tests

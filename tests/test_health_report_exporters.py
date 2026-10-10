@@ -346,6 +346,38 @@ class ExportPathScrubbingTests(unittest.TestCase):
         data = to_json_dict(self._report_with_profile("Apex Layout"))
         self.assertEqual(data["device"]["profile_name"], "Apex Layout")
 
+    def test_markdown_and_json_recursively_redact_instance_ids(self) -> None:
+        instance_id = r"HID\VID_413D&PID_2104&MI_02\UNIT-SERIAL-123"
+        base = _fixture_report()
+        report = dataclasses.replace(
+            base,
+            device=dataclasses.replace(
+                base.device,
+                controller_name=instance_id,
+                profile_name=r"C:\Users\Jane Doe\profiles\apex.json",
+            ),
+            caveats=(
+                f"retest {instance_id}; "
+                r"see C:\Users\Jane Doe\notes\retest.txt",
+            ),
+        )
+
+        markdown = to_markdown(report)
+        json_text = to_json(report)
+        parsed = json.loads(json_text)
+
+        for artifact in (markdown, json_text):
+            self.assertNotIn("UNIT-SERIAL-123", artifact)
+            self.assertNotIn("Jane Doe", artifact)
+            self.assertIn("VID_413D&PID_2104", artifact)
+            self.assertIn("apex.json", artifact)
+            self.assertIn("retest.txt", artifact)
+        self.assertEqual(
+            parsed["device"]["controller_name"],
+            r"HID\VID_413D&PID_2104",
+        )
+        self.assertIsInstance(parsed["caveats"], list)
+
 
 if __name__ == "__main__":
     unittest.main()

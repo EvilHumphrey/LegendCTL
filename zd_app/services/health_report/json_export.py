@@ -34,7 +34,7 @@ from zd_app.services.health_report.models import (
     TriggerRange,
     TriggerRangeReport,
 )
-from zd_app.services.path_scrub import scrub_value
+from zd_app.services.path_scrub import sanitize_shareable_json
 
 
 SCHEMA_VERSION = 2
@@ -49,7 +49,7 @@ def to_json(report: HealthReport, *, indent: int | None = 2) -> str:
 def to_json_dict(report: HealthReport) -> dict[str, Any]:
     """Return the dict shape used by :func:`to_json`. Useful for tests."""
 
-    return {
+    payload = {
         "schema_version": SCHEMA_VERSION,
         "app_version": report.app_version,
         "app_build_commit": report.app_build_commit,
@@ -59,15 +59,9 @@ def to_json_dict(report: HealthReport) -> dict[str, Any]:
         "measurement_boundary": MEASUREMENT_BOUNDARY_SUMMARY,
         "overall_status": report.overall_status.value,
         "device": {
-            # profile_name is operator-freeform and can be an absolute path;
-            # controller_name is device-supplied. Scrub both so a home path
-            # never ships in the standalone JSON export. ``... or original``
-            # preserves None / "" exactly (scrub_value coerces falsy to "").
-            "controller_name": scrub_value(report.device.controller_name)
-            or report.device.controller_name,
+            "controller_name": report.device.controller_name,
             "configured_polling_hz": report.device.configured_polling_hz,
-            "profile_name": scrub_value(report.device.profile_name)
-            or report.device.profile_name,
+            "profile_name": report.device.profile_name,
         },
         "tests": {
             "stick_rest_noise": _stick_rest_dict(report.stick_rest_noise),
@@ -76,6 +70,10 @@ def to_json_dict(report: HealthReport) -> dict[str, Any]:
         },
         "caveats": list(report.caveats),
     }
+    sanitized = sanitize_shareable_json(payload)
+    if not isinstance(sanitized, dict):  # defensive schema assertion
+        raise TypeError("sanitized Health Report must remain a mapping")
+    return sanitized
 
 
 def _stick_rest_dict(report: StickRestNoiseReport) -> dict[str, Any]:

@@ -169,13 +169,19 @@ path, so it is untouched).
 from __future__ import annotations
 
 import logging
+import math
 import re
+from collections.abc import Mapping
+from typing import Any
 
 
 __all__ = [
     "APP_DATA_PLACEHOLDER",
     "HOME_PLACEHOLDER",
     "PathScrubbingFormatter",
+    "redact_inline_instance_ids",
+    "sanitize_shareable_json",
+    "sanitize_shareable_text",
     "scrub_paths",
     "scrub_value",
 ]
@@ -710,6 +716,119 @@ def scrub_value(value: object) -> str:
     if not text:
         return ""
     return scrub_paths(text)
+
+
+_INSTANCE_ID_INLINE_RE = re.compile(
+    r"(?:[A-Za-z0-9_]+\\)?VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4}"
+    # ``&MI_xx`` is a known interface qualifier, not arbitrary adjacent text.
+    # Requiring ``\\`` or ``#`` before the per-unit segment keeps ordinary
+    # ``VID_xxxx&PID_xxxx&status=failed`` text intact. Once an instance segment
+    # begins, consume every printable token character except the separators
+    # used by our Markdown/CSV renderers (whitespace, comma, pipe, backtick).
+    # Device-instance punctuation such as !, @, parentheses and semicolon is
+    # legal and must not terminate redaction early.
+    r"(?:&MI_[0-9A-Fa-f]{2})?"
+    r"(?:[\\#][^,\s|`]+)?",
+    re.IGNORECASE,
+)
+
+
+def redact_inline_instance_ids(text: str) -> str:
+    """Truncate any inline Windows PnP / HID instance ID to its VID&PID prefix.
+
+    The instance-ID tail (``7&2f3a1c2b&0&0000``) is a per-unit hardware
+    fingerprint — a stable pseudo-identifier for one PC and one USB port. The
+    VID/PID prefix names only the product model, shared by every unit, so it is
+    safe in anything a user is invited to share.
+
+    Why this lives here rather than in a report module: ``scrub_paths`` alone
+    does NOT remove it. A HID device-interface path
+    (``\\\\?\\HID#VID_413D&PID_2104&MI_02#7&<port-hash>&0&0000#{guid}``) is
+    structurally a path, so the scrubber strips the ``\\\\?\\`` prefix and
+    returns the "basename" — which is the entire identifier, tail included.
+    Sinks that need share-safety must apply this as well as ``scrub_paths``.
+
+    Idempotent: re-applying it to an already-truncated ``VID_xxxx&PID_xxxx``
+    leaves it unchanged, so sinks that redact again downstream are safe.
+    """
+
+    if not text:
+        return text
+    return _INSTANCE_ID_INLINE_RE.sub(_truncate_instance_id, text)
+
+
+def sanitize_shareable_text(value: object) -> str:
+    """Apply the complete privacy boundary for user-shareable text.
+
+    Path scrubbing and device-instance redaction are separate operations: a
+    HID interface path can reduce to a basename that still contains its
+    per-unit instance tail. Shareable artifacts must therefore apply both.
+    Only filesystem paths and Windows PnP/HID instance IDs are
+    affected; ordinary text, useful basenames, and model-level VID/PID remain.
+    """
+
+    if value is None:
+        return ""
+    text = str(value)
+    if not text:
+        return ""
+
+    # Treat instance IDs as boundaries while path-scrubbing the surrounding
+    # spans. Without this split, free text containing ``<absolute path> <HID
+    # instance>`` can be interpreted as one spaced Windows path: the path
+    # scrubber then keeps only the instance tail as its "basename", losing both
+    # useful safe values. Splitting avoids that ambiguity without broadening
+    # either redaction rule.
+    segments: list[str] = []
+    cursor = 0
+    for match in _INSTANCE_ID_INLINE_RE.finditer(text):
+        segments.append(scrub_paths(text[cursor:match.start()]))
+        segments.append(_truncate_instance_id(match))
+        cursor = match.end()
+    segments.append(scrub_paths(text[cursor:]))
+    return "".join(segments)
+
+
+def sanitize_shareable_json(value: Any) -> Any:
+    """Recursively sanitize string values in a JSON-like structure.
+
+    JSON scalar types retain their types. String mapping keys are sanitized as
+    well because a copied JSON member can carry attacker-controlled field
+    names. A collision after sanitization fails closed instead of silently
+    overwriting one field. Unsupported objects are never stringified.
+    """
+
+    if isinstance(value, str):
+        return sanitize_shareable_text(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("shareable JSON numbers must be finite")
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, Mapping):
+        sanitized: dict[str, Any] = {}
+        for key, child in value.items():
+            if not isinstance(key, str):
+                raise TypeError("shareable JSON mapping keys must be strings")
+            safe_key = sanitize_shareable_text(key)
+            if safe_key in sanitized:
+                raise ValueError("shareable JSON key collision after sanitization")
+            sanitized[safe_key] = sanitize_shareable_json(child)
+        return sanitized
+    if isinstance(value, (list, tuple)):
+        return [sanitize_shareable_json(child) for child in value]
+    raise TypeError(f"unsupported shareable JSON value: {type(value).__name__}")
+
+
+_INSTANCE_ID_HEAD_RE = re.compile(
+    r"(?:[A-Za-z0-9_]+\\)?VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4}",
+    re.IGNORECASE,
+)
+
+
+def _truncate_instance_id(match: "re.Match[str]") -> str:
+    matched = match.group(0)
+    head = _INSTANCE_ID_HEAD_RE.match(matched)
+    return head.group(0) if head else matched
 
 
 class PathScrubbingFormatter(logging.Formatter):
