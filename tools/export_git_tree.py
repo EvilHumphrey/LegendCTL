@@ -25,7 +25,7 @@ class ExportError(RuntimeError):
 
 # Excluded, never copied or imported. These allowances apply only to untracked
 # files; a tracked file is always compared with its committed bytes.
-GENERATED_ROOTS = {".venv-zd", "build", "dist", "local-install", ".pytest_cache",
+GENERATED_ROOTS = {".venv-zd", "build", "dist", "local-install", "zd_data", ".pytest_cache",
                    ".mypy_cache", ".ruff_cache", ".release-wheelhouse"}
 
 

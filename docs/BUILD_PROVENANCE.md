@@ -28,7 +28,7 @@ attributes or `core.autocrlf`; the export always uses the raw committed bytes.
 Clean tracked files are accepted even if their names match an ignore pattern.
 
 The only untracked/ignored allowances are `.venv-zd`, `build`, `dist`,
-`local-install`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`,
+`local-install`, `zd_data`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`,
 `.release-wheelhouse`, and ordinary `.pyc` files under `__pycache__` directories.
 An importable `.py`/`.pyd` outside those excluded generated roots is rejected;
 `__pycache__` is inspected and may contain only ordinary bytecode/cache
@@ -39,6 +39,14 @@ and relocate it before building. None of these excluded bytes enters the source
 export. The existing release venv is separately trusted executable tooling;
 the lock marker is not a claim that an adversarial local account cannot tamper
 with installed tools.
+
+`zd_data` is the application's ignored runtime-data directory. Tests and render
+fixtures may leave logs/crash notices there before a build. Its untracked
+contents, including nested user data or importable code, are neither inspected
+nor copied into the raw Git export; the builder never cleans up that data. Its
+root must still be free of links and junctions, and any tracked file under that name
+is still checked against its committed bytes before export. This exemption does
+not allow adjacent untracked application code elsewhere in the checkout.
 
 The selected full commit ID is exported via raw Git tree/blob reads. Blob IDs
 are verified. Replace refs, inherited Git overrides, smudge/clean filters,

@@ -41,7 +41,7 @@ class RepositoryFixture(unittest.TestCase):
         git(self.repo, "config", "user.name", "Fixture")
         git(self.repo, "config", "user.email", "fixture@example.invalid")
         git(self.repo, "config", "core.autocrlf", "false")
-        self.write(".gitignore", ".venv-zd/\nbuild/\ndist/\n__pycache__/\n*.pyd\n")
+        self.write(".gitignore", ".venv-zd/\nbuild/\ndist/\nzd_data/\n__pycache__/\n*.pyd\n")
         self.write("main.py", "VALUE = 'committed'\n")
         self.write("zd_app/version.py", '__version__ = "1.2.3"\n__build_commit__ = ""\n__build_date__ = ""\n')
         self.commit()
@@ -60,6 +60,70 @@ class RepositoryFixture(unittest.TestCase):
 
 @unittest.skipUnless(exporter, "raw export helper not present on this revision")
 class RawSourceTests(RepositoryFixture):
+    def test_generated_runtime_data_is_never_read_or_exported(self):
+        runtime = self.repo / "zd_data"
+        self.write("zd_data/logs/zd_wrapper.log", "fixture runtime log")
+        self.write("zd_data/crashes/_README.txt", "fixture crash notice")
+        self.write("zd_data/crashes/_faulthandler.log", "fixture crash log")
+        self.write("zd_data/nested/user-data.json", '{"fixture": true}')
+        self.write("zd_data/nested/injected.py", 'raise AssertionError("must never run")')
+        (runtime / "empty").mkdir()
+        source = self.root / "source"
+        source.mkdir()
+        original_read = Path.read_bytes
+        original_iterdir = Path.iterdir
+
+        def without_runtime_read(path, *args, **kwargs):
+            if path == runtime or runtime in path.parents:
+                raise AssertionError("Generated runtime content must not be read")
+            return original_read(path, *args, **kwargs)
+
+        def without_runtime_walk(path):
+            if path == runtime or runtime in path.parents:
+                raise AssertionError("Generated runtime content must not be traversed")
+            return original_iterdir(path)
+
+        with patch.object(Path, "read_bytes", without_runtime_read), \
+             patch.object(Path, "iterdir", without_runtime_walk):
+            self.assertEqual(exporter.assert_clean_tree(self.repo), self.commit_id)
+            with exporter.PathGuard() as guard:
+                manifest = exporter.export_tree(self.repo, self.commit_id, source, guard)
+                exporter.verify_snapshot(source, manifest)
+        self.assertFalse((source / "zd_data").exists())
+        self.assertFalse(any(name.startswith("zd_data/") for name in manifest))
+        self.assertEqual((runtime / "nested/injected.py").read_text(), 'raise AssertionError("must never run")')
+        self.write("injected.py", "outside generated root")
+        with self.assertRaisesRegex(exporter.ExportError, "Unsafe untracked/ignored"):
+            exporter.assert_clean_tree(self.repo)
+
+    def test_tracked_runtime_file_still_requires_commit_identical_bytes(self):
+        self.write("zd_data/committed-fixture.json", '{"fixture": true}')
+        git(self.repo, "add", "-f", "zd_data/committed-fixture.json")
+        git(self.repo, "commit", "-qm", "tracked runtime-named fixture")
+        self.assertEqual(exporter.assert_clean_tree(self.repo), git(self.repo, "rev-parse", "HEAD"))
+        self.write("zd_data/committed-fixture.json", '{"changed": true}')
+        with self.assertRaisesRegex(exporter.ExportError, "Dirty tracked"):
+            exporter.assert_clean_tree(self.repo)
+
+    @unittest.skipUnless(os.name == "nt", "Windows generated-root junction boundary")
+    def test_runtime_data_root_junction_is_rejected_without_touching_target(self):
+        target = self.root / "outside-runtime"
+        target.mkdir()
+        sentinel = target / "keep.py"
+        sentinel.write_text("fixture sentinel")
+        junction = self.repo / "zd_data"
+        completed = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+            "New-Item -ItemType Junction -Path $env:PROVENANCE_LINK -Target $env:PROVENANCE_TARGET | Out-Null"],
+            env={**os.environ, "PROVENANCE_LINK": str(junction), "PROVENANCE_TARGET": str(target)}, capture_output=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        try:
+            with self.assertRaisesRegex(exporter.ExportError, "Reparse"):
+                exporter.assert_clean_tree(self.repo)
+            self.assertEqual(sentinel.read_text(), "fixture sentinel")
+            self.assertEqual(list(target.iterdir()), [sentinel])
+        finally:
+            junction.rmdir()  # unlink only this task-owned junction
+
     def test_orchestrator_binds_source_label_trust_record_and_artifact_receipt(self):
         real_run = subprocess.run
         original_version = (self.repo / "zd_app/version.py").read_bytes()
