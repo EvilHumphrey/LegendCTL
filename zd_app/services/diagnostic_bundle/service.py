@@ -1095,7 +1095,10 @@ class DiagnosticBundleService:
                     # own metadata so the entry order matches the rendered
                     # order in the Markdown.
                     safe_id = _safe_filename_segment(self._sanitize_path(passport.module_id))
-                    stamp = _safe_filename_segment(passport.assigned_at_utc)
+                    # Stored timestamps are string-validated, not necessarily
+                    # dates. Scrub before filename normalization erases path
+                    # separators and makes sensitive components unrecognizable.
+                    stamp = _safe_filename_segment(self._sanitize_path(passport.assigned_at_utc))
                     members.append(
                         _BundleMember(
                             path=(

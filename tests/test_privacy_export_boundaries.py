@@ -11,6 +11,7 @@ import zipfile
 from zd_app.models import DeviceState
 from zd_app.services.diagnostic_bundle.service import DiagnosticBundleService, _BundleMember
 from zd_app.services.diagnostics_service import DiagnosticsService
+from zd_app.services.module_passport import ModulePassportService
 from zd_app.storage._import_guards import MAX_IMPORT_BYTES
 
 
@@ -156,3 +157,64 @@ class ClipboardBoundaryTests(unittest.TestCase):
         self.assertIn("trace.json", copied)
         self.assertNotIn("UNIT-PRIVATE", copied)
         self.assertNotIn("privacy-test", copied)
+
+
+class ReviewedPrivacyBypassTests(unittest.TestCase):
+    setUp = ExportBoundaryTests.setUp
+    report = ExportBoundaryTests.report
+
+    def test_qualified_instance_tails_removed_from_copied_markdown_and_nested_json(self):
+        identifiers = [
+            r"\\?\HID#VID_413D&PID_2104&IG_00#PRIVATEHASH#{1234}",
+            r"HID\VID_413D&PID_2104&MI_00&Col01\PRIVATEHASH",
+            r"USB\VID_413D&PID_2104&REV_0100\PRIVATEHASH",
+            r"\\?\hid#vid_413d&pid_2104&mi_00&col01#PRIVATEHASH",
+        ]
+        for identifier in identifiers:
+            with self.subTest(identifier=identifier):
+                self.report(payload=json.dumps({"nested": [{"device": identifier}]}))
+                (self.reports / "health.md").write_text(identifier, encoding="utf-8")
+                target = self.root / "qualified.zip"
+                self.assertEqual(self.service.generate_bundle_zip(target), target)
+                with zipfile.ZipFile(target) as archive:
+                    for member in ("health_reports/health.md", "health_reports/health.json"):
+                        with self.subTest(member=member):
+                            text = archive.read(member).decode()
+                            self.assertNotIn("PRIVATEHASH", text)
+                            self.assertIn("vid_413d&pid_2104", text.lower())
+                    parsed = json.loads(archive.read("health_reports/health.json"))
+                    self.assertIn("vid_413d&pid_2104", parsed["nested"][0]["device"].lower())
+
+    def test_qualifier_recognition_keeps_adjacent_ordinary_status(self):
+        from zd_app.services.path_scrub import sanitize_shareable_text
+
+        for text in ("VID_413D&PID_2104&status=failed", "VID_413D&PID_2104&status_failed", "ordinary module name"):
+            self.assertEqual(sanitize_shareable_text(text), text)
+
+    def test_archive_timestamp_scrubbed_before_filename_derivation(self):
+        passports = ModulePassportService(base_dir=self.root / "passports")
+        passports.archive_dir.mkdir(parents=True, exist_ok=True)
+        source = passports.archive_dir / "archived.json"
+        self.service = DiagnosticBundleService(
+            base_dir=self.root / "bundles", module_passport_service=passports
+        )
+        for stamp, expected in (
+            (r"C:\Users\PRIVATEACCOUNT\capture\run.json", "left_stock_run.json_000.json"),
+            ("2026-05-26T18:00:00Z", "left_stock_2026-05-26T18_00_00Z_000.json"),
+        ):
+            with self.subTest(stamp=stamp):
+                raw = json.dumps({"side": "left", "module_id": "stock", "assigned_at_utc": stamp, "notes": ""})
+                source.write_text(raw, encoding="utf-8")
+                manifest = self.service.preview_bundle_manifest()
+                with self.subTest(boundary="preview"):
+                    self.assertNotIn("PRIVATEACCOUNT", repr(manifest))
+                    self.assertIn("module_passports/archive/" + expected, manifest.member_paths)
+                target = self.root / "passport.zip"
+                self.assertEqual(self.service.generate_bundle_zip(target), target)
+                with zipfile.ZipFile(target) as archive:
+                    self.assertEqual(tuple(archive.namelist()), manifest.member_paths)
+                    for name in archive.namelist():
+                        with self.subTest(boundary="zip", member=name):
+                            self.assertNotIn("PRIVATEACCOUNT", name)
+                            self.assertNotIn("PRIVATEACCOUNT", archive.read(name).decode())
+                self.assertEqual(source.read_text(encoding="utf-8"), raw)

@@ -720,15 +720,16 @@ def scrub_value(value: object) -> str:
 
 _INSTANCE_ID_INLINE_RE = re.compile(
     r"(?:[A-Za-z0-9_]+\\)?VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4}"
-    # ``&MI_xx`` is a known interface qualifier, not arbitrary adjacent text.
+    # Interface qualifiers include MI, IG, Col and REV, and can be combined.
+    # Recognize qualifier chains only with a following instance separator/tail;
+    # do not maintain an incomplete allowlist of hardware qualifier spellings.
     # Requiring ``\\`` or ``#`` before the per-unit segment keeps ordinary
     # ``VID_xxxx&PID_xxxx&status=failed`` text intact. Once an instance segment
     # begins, consume every printable token character except the separators
     # used by our Markdown/CSV renderers (whitespace, comma, pipe, backtick).
     # Device-instance punctuation such as !, @, parentheses and semicolon is
     # legal and must not terminate redaction early.
-    r"(?:&MI_[0-9A-Fa-f]{2})?"
-    r"(?:[\\#][^,\s|`]+)?",
+    r"(?:(?:&[0-9A-Za-z_]+)*[\\#][^,\s|`]+|&MI_[0-9A-Fa-f]{2})?",
     re.IGNORECASE,
 )
 
