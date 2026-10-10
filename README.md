@@ -313,6 +313,13 @@ offline. `build_release.ps1` refuses an unproven venv and does not resolve or
 install packages itself. See [the release dependency lock](docs/release-dependency-lock.md)
 for the refresh procedure and the separate Inno Setup/Chocolatey residual.
 
+Build from a clean committed checkout. The builder exports the selected commit
+into an isolated source directory and records source and artifact hashes in
+`SOURCE_PROVENANCE.json`. The output directory must not already exist; use
+`-ArtifactDestination <new-directory>` to preserve an earlier build. Building
+does not install the app or update shortcuts. See [local build provenance](docs/BUILD_PROVENANCE.md)
+for accepted generated files, retained diagnostics and verification limits.
+
 Output: `dist/ZDUltimateLegend-v<version>/ZD Ultimate Legend.exe` plus a
 distributable ZIP. If [Inno Setup 6](https://jrsoftware.org/isdl.php) is installed
 (`C:\Program Files (x86)\Inno Setup 6\ISCC.exe`), an installer `.exe` is produced
