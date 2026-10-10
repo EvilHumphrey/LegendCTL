@@ -725,11 +725,13 @@ _INSTANCE_ID_INLINE_RE = re.compile(
     # do not maintain an incomplete allowlist of hardware qualifier spellings.
     # Requiring ``\\`` or ``#`` before the per-unit segment keeps ordinary
     # ``VID_xxxx&PID_xxxx&status=failed`` text intact. Once an instance segment
-    # begins, consume every printable token character except the separators
-    # used by our Markdown/CSV renderers (whitespace, comma, pipe, backtick).
-    # Device-instance punctuation such as !, @, parentheses and semicolon is
-    # legal and must not terminate redaction early.
-    r"(?:(?:&[0-9A-Za-z_]+)*[\\#][^,\s|`]+|&MI_[0-9A-Fa-f]{2})?",
+    # begins, consume the full legal Windows ID character range: 0x21..0x7f
+    # excluding comma (IRP_MN_QUERY_ID). Pipe, backtick and other punctuation
+    # can belong to a per-unit ID; treating them as Markdown delimiters leaks
+    # the remaining tail. Sanitize before formatting where possible. For
+    # copied formatted text, privacy wins over preserving ambiguous markup.
+    # https://learn.microsoft.com/windows-hardware/drivers/kernel/irp-mn-query-id
+    r"(?:(?:&[0-9A-Za-z_]+)*[\\#][\x21-\x2b\x2d-\x7f]+|&MI_[0-9A-Fa-f]{2})?",
     re.IGNORECASE,
 )
 

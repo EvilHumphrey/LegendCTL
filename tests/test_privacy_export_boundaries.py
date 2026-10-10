@@ -2,6 +2,7 @@
 
 import json
 import os
+import dataclasses
 from pathlib import Path
 import tempfile
 import unittest
@@ -218,3 +219,69 @@ class ReviewedPrivacyBypassTests(unittest.TestCase):
                             self.assertNotIn("PRIVATEACCOUNT", name)
                             self.assertNotIn("PRIVATEACCOUNT", archive.read(name).decode())
                 self.assertEqual(source.read_text(encoding="utf-8"), raw)
+
+
+class IdentifierCharacterBoundaryTests(unittest.TestCase):
+    setUp = ExportBoundaryTests.setUp
+    report = ExportBoundaryTests.report
+
+    def test_every_legal_windows_identifier_character_is_consumed_in_tail(self):
+        from zd_app.services.path_scrub import sanitize_shareable_text
+
+        # IRP_MN_QUERY_ID: legal characters are 0x21..0x7f except comma.
+        for codepoint in range(0x21, 0x80):
+            if codepoint == 0x2c:
+                continue
+            with self.subTest(codepoint=codepoint):
+                identifier = "HID\\VID_413D&PID_2104\\UNIT" + chr(codepoint) + "PRIVATE"
+                self.assertEqual(sanitize_shareable_text(identifier), r"HID\VID_413D&PID_2104")
+
+    def test_pipe_and_backtick_do_not_leak_through_actual_export_boundaries(self):
+        from tests.test_health_report_exporters import _fixture_report
+        from zd_app.services.health_report.json_export import to_json
+        from zd_app.services.health_report.markdown_export import to_markdown
+
+        fixture = _fixture_report()
+        for delimiter in ("|", "`"):
+            with self.subTest(delimiter=delimiter):
+                identifier = "HID\\VID_413D&PID_2104&IG_00\\UNIT" + delimiter + "PRIVATE"
+                self.report(payload=json.dumps({"nested": [{"id": identifier}]}))
+                # Already-formatted imported Markdown gets the same privacy
+                # priority; a punctuation character is not proof of a boundary.
+                (self.reports / "health.md").write_text("`" + identifier + "`", encoding="utf-8")
+                target = self.root / "punctuation.zip"
+                self.assertEqual(self.service.generate_bundle_zip(target), target)
+                with zipfile.ZipFile(target) as archive:
+                    for name in ("health_reports/health.md", "health_reports/health.json"):
+                        with self.subTest(boundary=name):
+                            text = archive.read(name).decode()
+                            self.assertNotIn("PRIVATE", text)
+                            self.assertIn("VID_413D&PID_2104", text)
+                report = dataclasses.replace(fixture, device=dataclasses.replace(fixture.device, controller_name=identifier))
+                for text in (to_json(report), to_markdown(report)):
+                    with self.subTest(boundary="standalone", text=text[:20]):
+                        self.assertNotIn("PRIVATE", text)
+                        self.assertIn("VID_413D&PID_2104", text)
+
+    def test_backtick_filename_tail_is_removed_in_zip_and_preview(self):
+        self.report("VID_413D&PID_2104#UNIT`PRIVATE", payload="{}")
+        target = self.root / "filename.zip"
+        self.assertEqual(self.service.generate_bundle_zip(target), target)
+        with zipfile.ZipFile(target) as archive:
+            with self.subTest(boundary="zip"):
+                self.assertNotIn("PRIVATE", repr(archive.namelist()))
+                self.assertIn("health_reports/VID_413D&PID_2104.md", archive.namelist())
+            with self.subTest(boundary="preview"):
+                paths = self.service.preview_bundle_manifest().member_paths
+                self.assertNotIn("PRIVATE", repr(paths))
+                self.assertEqual(tuple(archive.namelist()), paths)
+
+    def test_real_boundaries_and_unrelated_prose_remain_intact(self):
+        from zd_app.services.path_scrub import sanitize_shareable_text
+
+        for separator in (" ", "\t", "\n", ",", "\u0080"):
+            with self.subTest(separator=separator):
+                text = r"HID\VID_413D&PID_2104\UNIT" + separator + "ordinary status"
+                self.assertEqual(sanitize_shareable_text(text), r"HID\VID_413D&PID_2104" + separator + "ordinary status")
+        for text in ("ordinary | prose ` code", "VID_413D&PID_2104", "VID_413D&PID_2104&status=failed"):
+            self.assertEqual(sanitize_shareable_text(text), text)
