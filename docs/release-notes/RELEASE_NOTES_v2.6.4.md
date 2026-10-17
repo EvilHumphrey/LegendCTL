@@ -1,10 +1,9 @@
-# LegendCTL v2.6.4 — release candidate
+# LegendCTL v2.6.4
 
-This candidate includes the unpublished v2.6.3 maintenance changes and a restore
-footer correction. It collects controller-state, restore-consent, import, diagnostics,
-and build-provenance fixes since v2.6.2. Final installer lifecycle, hardware smoke,
-and release-artifact qualification remain pending. These notes do not announce a
-published release.
+This release fixes controller setting readback and profile saves, makes step-size
+edits explicit, keeps the footer status current after a restore, and strengthens
+restore consent, imports and release packaging. A v2.6.3 build was prepared but
+never published; all of its changes are included here.
 
 ## Controller state and write results
 
@@ -80,9 +79,32 @@ and does not identify which physical control produced it.
 - Gated post-publication Winget automation checks installer hashes and build
   provenance before submitting a catalog update. This workflow does not publish
   a LegendCTL release, and its presence does not establish that submission is
-  enabled or that the catalog already carries this candidate.
+  enabled or that the catalog already carries this version.
 
-The release process still requires qualification of the exact installer and
-portable ZIP that would be published, including verification of both artifact
-attestations. Earlier source checks or rehearsal builds do not establish those
-results for this candidate.
+## Release verification
+
+The tagged Windows build passed its full automated suite (3,588 tests; 37 skipped),
+21 installer policy cases and nine installer lifecycle cases. The installer and
+portable ZIP were reconciled against the tagged build, and both GitHub artifact
+attestations were verified against the release workflow and commit.
+
+The installed v2.6.4 build was checked with a USB-connected ZD Ultimate Legend:
+a one-step step-size change was applied and read back, then Restore Points
+returned the controller to a freshly captured baseline, with all 12 readable
+restore groups matched on read-back. The footer showed the restore in progress,
+then its result, and kept showing that result after the banner expired and after
+changing screens.
+
+The broader controller checks ran on the installed v2.6.3 build. On top of it,
+v2.6.4 changes only Restore Points: how it reports progress and outcome in the
+footer and status bar, and how it discards a restore and stale cached settings
+if the controller changes during it. No controller read/write, protocol or
+settings-service code changed. The v2.6.3 checks covered deadzone, step-size and
+polling-rate profile saves without a manual Read, plus profile-only Apply, full
+Apply, Cancel and Restore Points. In both sessions, a fresh snapshot taken after
+the final restore matched the original settings, and the tester then confirmed
+normal inputs. These checks do not measure the actual USB polling frequency or
+verify unreadable paddle bindings.
+
+LegendCTL is a standalone, unofficial configurator for the ZD Ultimate Legend — no official ZD app
+required, local, no telemetry, no drivers, and honest about what it can and can't verify.
