@@ -1289,6 +1289,7 @@
   "restore_points.result.header.partially_restored": "Partially restored",
   "restore_points.result.header.mismatch_after_restore": "Mismatch after restore",
   "restore_points.result.header.restore_failed": "Restore failed",
+  "restore_points.result.footer": "Restore: {status} ({matched}/{attempted} matched)",
   "restore_points.result.counts.attempted": "Attempted: {n}",
   "restore_points.result.counts.wrote_succeeded": "Wrote successfully: {n}",
   "restore_points.result.counts.write_failed": "Write failed: {n}",
