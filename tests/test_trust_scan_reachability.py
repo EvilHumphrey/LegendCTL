@@ -25,6 +25,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
@@ -847,9 +848,15 @@ class ClosureIntegrityFailsClosedTests(unittest.TestCase):
     @staticmethod
     def _denying(method: str, denied: Path):
         original = getattr(Path, method)
+        # Compared by real path, not by spelling: the release gate resolves its
+        # repo root first, so on a runner whose temp dir is an 8.3 short name
+        # (``RUNNER~1``) the walk asks about a long-name spelling of ``denied``
+        # and an equality test never fires. ``os.path.realpath`` is not the
+        # patched ``Path`` method, so this cannot recurse.
+        denied_real = os.path.normcase(os.path.realpath(denied))
 
         def guarded(self, *args, **kwargs):
-            if self == denied:
+            if os.path.normcase(os.path.realpath(self)) == denied_real:
                 raise PermissionError(13, "denied for the test")
             return original(self, *args, **kwargs)
 
