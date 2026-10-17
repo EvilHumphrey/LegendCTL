@@ -7,6 +7,16 @@ published release.
 
 ## Controller state and write results
 
+- Controller reconnects replace the loading screen with freshly read controls
+  and the supported sensitivity-curve editor. Disconnected settings are hidden,
+  and unread deadzones cannot be applied.
+- Manual deadzone, step-size, and polling-rate changes update the values used
+  by Controller and saved profiles after read-back. Saving waits for pending
+  writes and confirmation, so an older cached value cannot silently replace a
+  confirmed change. Failed or unavailable reads remain explicit.
+- Step size is now a numeric draft with an Apply Step Size button. Typing a
+  partial number or using the plus/minus buttons does not write to the
+  controller. Saving an unapplied draft asks you to apply it first.
 - Asynchronous operations retain the identity of the controller they target,
   including across disconnect/reconnect boundaries. Pending-consent and busy
   guards prevent competing writes, and Last Applied records remain tied to the

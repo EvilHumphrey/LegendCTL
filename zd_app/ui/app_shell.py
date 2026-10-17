@@ -3474,6 +3474,7 @@ class AppShell:
         return bool(
             self._unconfirmed_manual_fields
             or self._device_setting_pending_verify
+            or self._deadzone_pending_verify is not None
             or self._slider_throttle.peek_pending()
         )
 
@@ -4653,10 +4654,10 @@ class AppShell:
             modal=True,
             no_close=False,
             no_resize=True,
-            width=520,
-            height=240,
+            width=580,
+            height=280,
         ):
-            dpg.add_text(self._apply_device_confirm_body(profile), wrap=480)
+            dpg.add_text(self._apply_device_confirm_body(profile), wrap=540)
             dpg.add_spacer(height=10)
             with dpg.group(horizontal=True):
                 dpg.add_button(
@@ -6856,6 +6857,9 @@ class AppShell:
                 pending_verify.presence_key,
                 pending_verify.presence_generation,
             ):
+                self._discard_stale_controller_operation_after_write(
+                    pending_verify.presence_key, pending_verify.presence_generation,
+                )
                 self._diag_deadzone_status_key = "sent_unverified"
                 return
             self._diag_deadzone_status_key = "verifying"
@@ -7073,13 +7077,9 @@ class AppShell:
             self._discard_stale_controller_operation_after_write(presence_key, presence_generation)
             return result
         success = _settings_outcome_is_success(result.outcome)
-        self._controller_deadzone_written = deadzones
-        self._controller_deadzone_readback = None
-        self._unconfirmed_manual_fields.add("deadzones")
         # A write outcome is not a new read. Retire the old deadzone values so
         # rebuilding the page or saving a snapshot cannot revive the baseline.
-        if self.last_controller_snapshot is not None:
-            self._set_last_controller_snapshot(replace(self.last_controller_snapshot, deadzones=None))
+        self._store_controller_deadzone_readback(deadzones, None, "verifying", hydrate=False)
         if success:
             self._controller_deadzone_status_key = "verifying"
             self._update_apply_status(_make_log_entry("apply.deadzone.verifying"), None)
@@ -7092,6 +7092,29 @@ class AppShell:
             self._record_settings_apply_result(False, message, no_restore_point=no_restore_point)
         self.refresh_shell()
         return result
+
+    def _store_controller_deadzone_readback(
+        self,
+        written: StickDeadzones,
+        observed: StickDeadzones | None,
+        status: str,
+        *,
+        hydrate: bool = True,
+    ) -> None:
+        """Share only observed deadzones across both manual writer surfaces."""
+        if observed is None:
+            self._unconfirmed_manual_fields.add("deadzones")
+        else:
+            self._unconfirmed_manual_fields.discard("deadzones")
+        self._controller_deadzone_written = written
+        self._controller_deadzone_readback = observed
+        self._controller_deadzone_status_key = status
+        if self.last_controller_snapshot is not None:
+            self._set_last_controller_snapshot(replace(self.last_controller_snapshot, deadzones=observed))
+        if hydrate:
+            self._hydrate_deadzones(observed, [])
+        if self._dpg_context_ready:
+            controller.refresh_state(self)
 
     def _schedule_controller_deadzone_readback(
         self,
@@ -7115,14 +7138,10 @@ class AppShell:
                 self._discard_stale_controller_operation_after_write(presence_key, presence_generation)
                 return
             observed = readback if isinstance(readback, StickDeadzones) else None
-            if observed is not None:
-                self._unconfirmed_manual_fields.discard("deadzones")
             status = _deadzone_verify_status_key(observed, written)
-            self._controller_deadzone_status_key = "unverified" if status == "sent_unverified" else status
-            self._controller_deadzone_readback = observed
-            if self.last_controller_snapshot is not None:
-                self._set_last_controller_snapshot(replace(self.last_controller_snapshot, deadzones=observed))
-            self._hydrate_deadzones(observed, [])
+            self._store_controller_deadzone_readback(
+                written, observed, "unverified" if status == "sent_unverified" else status,
+            )
             logger.info("Controller deadzone readback: requested=%s observed=%s status=%s", written, observed, status)
             self._record_settings_apply_result(
                 status == "verified",
@@ -7166,6 +7185,8 @@ class AppShell:
             # callbacks so we never clobber the controller with a default.
             logger.debug("Ignoring diagnostics deadzone callback before hydration.")
             return None
+        presence_key = self._controller_presence_key()
+        presence_generation = self._controller_presence_generation
         # Trigger model #4 — capture before a manual Device write. A failed
         # capture stops before the throttle or service write and posts the
         # disclosed-continue gate.
@@ -7181,6 +7202,9 @@ class AppShell:
             )
             if not allowed:
                 return None
+        if not self._controller_presence_token_is_current(presence_key, presence_generation):
+            self._discard_stale_refresh_result(presence_key, presence_generation)
+            return None
         if not self._slider_throttle.should_write_now(
             "deadzones",
             deadzones,
@@ -7216,7 +7240,16 @@ class AppShell:
         sent-unverified status.
         """
 
+        presence_key = self._controller_presence_key()
+        presence_generation = self._controller_presence_generation
+        # Retire the old read and receipt even if the attempted write fails.
+        # Keep the live slider draft intact while a drag is still in progress.
+        self._store_controller_deadzone_readback(deadzones, None, "verifying", hydrate=False)
         result = self.settings_service.set_all_deadzones(deadzones)
+        if not self._controller_presence_token_is_current(presence_key, presence_generation):
+            self._discard_stale_controller_operation_after_write(presence_key, presence_generation)
+            self._diag_deadzone_status_key = "sent_unverified"
+            return result
         success = _settings_outcome_is_success(result.outcome)
         if success:
             message = _make_log_entry("apply.deadzone.success")
@@ -7230,7 +7263,9 @@ class AppShell:
                 # value is verified exactly once.
                 self._deadzone_pending_verify = None
                 self._diag_deadzone_status_key = "verifying"
-                self._schedule_deadzone_readback_verify(deadzones)
+                self._schedule_deadzone_readback_verify(
+                    deadzones, _presence_key=presence_key, _presence_generation=presence_generation,
+                )
             else:
                 # Leading-edge write: arm a deferred read-back verify for this
                 # value. If no further write supersedes it within the
@@ -7240,8 +7275,8 @@ class AppShell:
                 # above, so the settled value is still verified exactly once.
                 self._deadzone_pending_verify = _PendingDeadzoneVerify(
                     written=deadzones,
-                    presence_key=self._controller_presence_key(),
-                    presence_generation=self._controller_presence_generation,
+                    presence_key=presence_key,
+                    presence_generation=presence_generation,
                 )
                 self._diag_deadzone_status_key = "sending"
         else:
@@ -7250,6 +7285,9 @@ class AppShell:
             self._deadzone_pending_verify = None
             message = _make_result_log_entry("apply.deadzone.failed", result)
             self._diag_deadzone_status_key = "failed"
+            self._controller_deadzone_status_key = "write_failed"
+            if self._dpg_context_ready:
+                controller.refresh_state(self)
         self._record_settings_apply_result(
             success,
             message,
@@ -7293,6 +7331,7 @@ class AppShell:
             verify_presence_key,
             verify_presence_generation,
         ):
+            self._discard_stale_controller_operation_after_write(verify_presence_key, verify_presence_generation)
             self._diag_deadzone_status_key = "sent_unverified"
             return
 
@@ -7318,6 +7357,7 @@ class AppShell:
 
         def on_done(result):
             if isinstance(result, _ControllerOperationDiscard):
+                self._discard_stale_controller_operation_after_write(verify_presence_key, verify_presence_generation)
                 self._diag_deadzone_status_key = "sent_unverified"
                 return
             if not self._controller_presence_token_is_current(
@@ -7327,17 +7367,22 @@ class AppShell:
                 # The write landed before this confirm read. A controller swap
                 # makes either a match or mismatch non-attributable, so retain
                 # only the honest "sent, could not verify" statement.
+                self._discard_stale_controller_operation_after_write(verify_presence_key, verify_presence_generation)
                 self._diag_deadzone_status_key = "sent_unverified"
                 return
-            self._diag_deadzone_status_key = _deadzone_verify_status_key(
-                result, written
+            observed = result if isinstance(result, StickDeadzones) else None
+            status = _deadzone_verify_status_key(observed, written)
+            self._diag_deadzone_status_key = status
+            self._store_controller_deadzone_readback(
+                written, observed, "unverified" if status == "sent_unverified" else status,
             )
+            self.refresh_shell()
 
         if not self._run_hid_job(job, on_done):
             # Defensive: a refused job (another HID flow already in flight)
             # would otherwise leave the status pinned at "verifying". The write
             # already landed, so degrade to the advisory, not a failure.
-            self._diag_deadzone_status_key = "sent_unverified"
+            on_done(None)
 
     def apply_left_sensitivity_curve(self):
         return self._apply_sensitivity_curve(

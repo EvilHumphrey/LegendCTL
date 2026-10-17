@@ -5,6 +5,13 @@
 Candidate maintenance release collecting fixes since v2.6.2. Final installer,
 hardware, and release-artifact qualification remains pending.
 
+- Controller reconnects hydrate the correct controls from fresh readback;
+  disconnected settings are hidden and unread deadzones cannot be applied.
+- Manual deadzone, step-size and polling-rate readback updates saved-profile
+  values without requiring a separate Read. Saving waits for pending changes
+  and confirmation instead of saving an older cached value.
+- Step-size number entry and plus/minus controls edit a draft. Only Apply Step
+  Size writes it; profile saving refuses an unapplied draft.
 - Controller operations retain device identity across asynchronous work and
   disconnect/reconnect boundaries. Pending-consent and busy guards prevent
   competing writes; Last Applied state remains tied to the intended device.

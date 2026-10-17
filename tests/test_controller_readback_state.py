@@ -37,6 +37,7 @@ class ControllerReadbackStateTests(unittest.TestCase):
         self.shell.current_screen = "controller"
         self.shell.refresh_shell = lambda: None
         self.shell._dpg_context_ready = True
+        self.shell._diag_deadzone_hydrated = True
         self.shell.last_controller_snapshot = empty_snapshot(
             deadzones=StickDeadzones(0, 0, 0, 0),
             step_size=146, polling_rate=PollingRate.HZ_4000,
@@ -305,6 +306,204 @@ class ControllerReadbackStateTests(unittest.TestCase):
         self.build()
         self.assertEqual(dpg.get_value("deadzone_left_center_slider"), 1)
         self.assertIn(t("apply.deadzone.verified"), dpg.get_value("controller_deadzone_status"))
+
+    def test_live_deadzone_blocks_save_until_single_write_is_confirmed(self) -> None:
+        self.build()
+        target = StickDeadzones(1, 2, 3, 4)
+        self.service.get_deadzones.return_value = target
+        self.shell._controller_deadzone_status_key = "verified"
+        self.shell._controller_deadzone_written = StickDeadzones(0, 0, 0, 0)
+        self.shell._controller_deadzone_readback = StickDeadzones(0, 0, 0, 0)
+        self.shell.apply_diagnostics_deadzone(target)
+        self.assertIsNone(self.shell.last_controller_snapshot.deadzones)
+        self.assertEqual(self.shell._controller_deadzone_written, target)
+        self.assertIsNone(self.shell._controller_deadzone_readback)
+        self.assertEqual(self.shell._controller_deadzone_status_key, "verifying")
+        self.shell.save_current_as_named_wrapper_profile("Pending", include_device=True)
+        self.shell.wrapper_profile_store.save.assert_not_called()
+        self.service.get_deadzones.assert_not_called()
+        self.settle()
+        self.assertEqual(self.shell.last_controller_snapshot.deadzones, target)
+        self.build()
+        self.assertEqual(dpg.get_value("deadzone_left_center_slider"), 1)
+        self.assertIn(t("apply.deadzone.verified"), dpg.get_value("controller_deadzone_status"))
+        self.shell.save_current_as_named_wrapper_profile("Confirmed", include_device=True)
+        self.assertEqual(self.shell.wrapper_profile_store.save.call_args.args[0].snapshot.deadzones, target)
+        self.service.set_all_deadzones.assert_called_once_with(target)
+        self.service.get_deadzones.assert_called_once_with()
+        self.service.get_all_settings.assert_not_called()
+
+    def test_live_deadzone_mismatch_publishes_actual_values_without_retry(self) -> None:
+        self.build()
+        actual = StickDeadzones(1, 2, 3, 4)
+        self.service.get_deadzones.return_value = actual
+        requested = StickDeadzones(9, 8, 7, 6)
+        self.shell.apply_diagnostics_deadzone(requested)
+        self.settle()
+        self.assertEqual(self.shell.last_controller_snapshot.deadzones, actual)
+        self.assertEqual(self.shell._diag_deadzone_status_key, "mismatch")
+        self.assertEqual(dpg.get_value("deadzone_left_center_slider"), 1)
+        self.build()
+        self.assertIn(t("apply.deadzone.mismatch"), dpg.get_value("controller_deadzone_status"))
+        self.shell.save_current_as_named_wrapper_profile("Actual", include_device=True)
+        self.assertEqual(self.shell.wrapper_profile_store.save.call_args.args[0].snapshot.deadzones, actual)
+        self.service.set_all_deadzones.assert_called_once_with(requested)
+        self.service.get_deadzones.assert_called_once_with()
+
+    def test_live_deadzone_unreadable_or_failed_read_keeps_save_blocked(self) -> None:
+        for readback in (None, TimeoutError("fixture timeout")):
+            with self.subTest(readback=readback):
+                self.shell._slider_throttle.clear_all()
+                self.shell.last_controller_snapshot = empty_snapshot(deadzones=StickDeadzones(0, 0, 0, 0))
+                self.build()
+                self.service.set_all_deadzones.reset_mock()
+                self.service.get_deadzones.reset_mock()
+                self.service.get_deadzones.side_effect = readback if isinstance(readback, Exception) else None
+                self.service.get_deadzones.return_value = readback
+                self.shell.apply_diagnostics_deadzone(StickDeadzones(1, 0, 0, 0))
+                self.settle()
+                self.assertIsNone(self.shell.last_controller_snapshot.deadzones)
+                self.assertEqual(self.shell._diag_deadzone_status_key, "sent_unverified")
+                self.build()
+                self.assertFalse(dpg.get_item_configuration("controller_deadzone_editor")["show"])
+                self.assertIn(t("apply.deadzone.unverified"), dpg.get_value("controller_deadzone_status"))
+                self.shell.save_current_as_named_wrapper_profile("Unreadable", include_device=True)
+                self.shell.wrapper_profile_store.save.assert_not_called()
+                self.service.set_all_deadzones.assert_called_once()
+                self.service.get_deadzones.assert_called_once_with()
+
+    def test_live_deadzone_failed_write_retires_baseline_without_read_or_retry(self) -> None:
+        self.build()
+        self.service.set_all_deadzones.return_value = SimpleNamespace(
+            outcome=SetDeadzoneOutcome.WRITE_FAILED, error_code=None,
+        )
+        self.shell.apply_diagnostics_deadzone(StickDeadzones(1, 0, 0, 0))
+        self.settle()
+        self.assertIsNone(self.shell.last_controller_snapshot.deadzones)
+        self.assertEqual(self.shell._diag_deadzone_status_key, "failed")
+        self.assertEqual(self.shell._controller_deadzone_status_key, "write_failed")
+        self.shell.save_current_as_named_wrapper_profile("Failed", include_device=True)
+        self.shell.wrapper_profile_store.save.assert_not_called()
+        self.service.set_all_deadzones.assert_called_once()
+        self.service.get_deadzones.assert_not_called()
+
+    def test_live_deadzone_drag_saves_only_confirmed_trailing_value(self) -> None:
+        self.build()
+        leading, trailing = StickDeadzones(1, 0, 0, 0), StickDeadzones(2, 3, 4, 5)
+        self.service.get_deadzones.return_value = trailing
+        with patch("zd_app.ui.app_shell.time.monotonic", return_value=10):
+            self.shell.apply_diagnostics_deadzone(leading)
+            self.shell.apply_diagnostics_deadzone(trailing)
+        self.shell.save_current_as_named_wrapper_profile("Dragging", include_device=True)
+        self.shell.wrapper_profile_store.save.assert_not_called()
+        self.settle()
+        self.settle()
+        self.assertEqual([call.args[0] for call in self.service.set_all_deadzones.call_args_list], [leading, trailing])
+        self.service.get_deadzones.assert_called_once_with()
+        self.build()
+        self.assertEqual(dpg.get_value("deadzone_right_outer_slider"), 5)
+        self.shell.save_current_as_named_wrapper_profile("Settled", include_device=True)
+        self.assertEqual(self.shell.wrapper_profile_store.save.call_args.args[0].snapshot.deadzones, trailing)
+
+    def test_live_deadzone_read_during_settlement_does_not_enable_save(self) -> None:
+        self.build()
+        self.shell.apply_diagnostics_deadzone(StickDeadzones(1, 0, 0, 0))
+        self.shell._refresh_read_on_done((empty_snapshot(deadzones=StickDeadzones(0, 0, 0, 0)), None), include_device=True)
+        self.shell.save_current_as_named_wrapper_profile("Pending", include_device=True)
+        self.shell.wrapper_profile_store.save.assert_not_called()
+
+    def test_live_deadzone_checkpoint_change_refuses_old_controller_write(self) -> None:
+        self.build()
+        def checkpoint(**_kwargs):
+            self.shell.device_service.state.stable_identifier = "replacement-controller"
+            return True, False
+        with patch.object(self.shell, "_manual_device_write_gate", side_effect=checkpoint):
+            self.shell.apply_diagnostics_deadzone(StickDeadzones(1, 0, 0, 0))
+        self.service.set_all_deadzones.assert_not_called()
+        self.assertIsNone(self.shell.last_controller_snapshot)
+
+    def test_live_deadzone_checkpoint_reconnect_refuses_same_identifier_new_generation(self) -> None:
+        self.build()
+        self.shell._observe_controller_presence()
+        def checkpoint(**_kwargs):
+            self.shell.device_service.state.connection_state = "no_device"
+            self.shell._observe_controller_presence()
+            self.shell.device_service.state.connection_state = "connected"
+            self.shell._observe_controller_presence()
+            return True, False
+        with patch.object(self.shell, "_manual_device_write_gate", side_effect=checkpoint):
+            self.shell.apply_diagnostics_deadzone(StickDeadzones(1, 0, 0, 0))
+        self.service.set_all_deadzones.assert_not_called()
+        self.assertIsNone(self.shell.last_controller_snapshot)
+
+    def test_live_deadzone_swap_before_quiet_window_never_reads_replacement(self) -> None:
+        self.build()
+        self.shell.apply_diagnostics_deadzone(StickDeadzones(1, 0, 0, 0))
+        self.shell.device_service.state.stable_identifier = "replacement-controller"
+        self.settle()
+        self.service.set_all_deadzones.assert_called_once()
+        self.service.get_deadzones.assert_not_called()
+        self.assertIsNone(self.shell.last_controller_snapshot)
+
+    def test_live_deadzone_reconnect_during_read_rejects_same_identifier_result(self) -> None:
+        self.build()
+        self.shell._observe_controller_presence()
+        target = StickDeadzones(1, 0, 0, 0)
+        def read():
+            self.shell.device_service.state.connection_state = "no_device"
+            self.shell._observe_controller_presence()
+            self.shell.device_service.state.connection_state = "connected"
+            self.shell._observe_controller_presence()
+            return target
+        self.service.get_deadzones.side_effect = read
+        self.shell.apply_diagnostics_deadzone(target)
+        self.settle()
+        self.service.get_deadzones.assert_called_once_with()
+        self.assertIsNone(self.shell.last_controller_snapshot)
+        self.assertIsNone(self.shell._controller_deadzone_readback)
+
+    def test_live_deadzone_swap_during_write_discards_old_controller_state(self) -> None:
+        self.build()
+        result = self.service.set_all_deadzones.return_value
+        def write(_value):
+            self.shell.device_service.state.stable_identifier = "replacement-controller"
+            return result
+        self.service.set_all_deadzones.side_effect = write
+        self.shell.apply_diagnostics_deadzone(StickDeadzones(1, 0, 0, 0))
+        self.assertIsNone(self.shell.last_controller_snapshot)
+        self.assertIsNone(self.shell._deadzone_pending_verify)
+        self.service.get_deadzones.assert_not_called()
+
+    def test_live_deadzone_stale_read_or_completion_never_publishes_to_replacement(self) -> None:
+        for swap_before_read in (True, False):
+            with self.subTest(swap_before_read=swap_before_read):
+                self.shell.device_service.state.stable_identifier = "fixture-controller"
+                self.shell.last_controller_snapshot = empty_snapshot(deadzones=StickDeadzones(0, 0, 0, 0))
+                self.shell._diag_deadzone_hydrated = True
+                self.shell._slider_throttle.clear_all()
+                self.build()
+                jobs = []
+                self.shell._hid_executor = lambda job, deliver: jobs.append((job, deliver))
+                target = StickDeadzones(1, 0, 0, 0)
+                self.service.get_deadzones.reset_mock()
+                self.service.get_deadzones.return_value = target
+                self.shell.apply_diagnostics_deadzone(target)
+                self.settle()
+                self.assertTrue(self.shell.hid_busy)
+                self.shell.save_current_as_named_wrapper_profile("Pending", include_device=True)
+                self.shell.wrapper_profile_store.save.assert_not_called()
+                job, deliver = jobs.pop()
+                if swap_before_read:
+                    self.shell.device_service.state.stable_identifier = "replacement-controller"
+                with patch("zd_app.ui.app_shell.time.sleep"):
+                    readback = job()
+                self.shell.device_service.state.stable_identifier = "replacement-controller"
+                deliver(readback)
+                self.shell._drain_hid_job_completions()
+                self.assertIsNone(self.shell.last_controller_snapshot)
+                self.assertIsNone(self.shell._controller_deadzone_readback)
+                if swap_before_read:
+                    self.service.get_deadzones.assert_not_called()
 
     def test_mismatch_displays_read_value_and_never_retries_write(self) -> None:
         self.build()
