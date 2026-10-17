@@ -1289,6 +1289,7 @@
   "restore_points.result.header.partially_restored": "부분 복원됨",
   "restore_points.result.header.mismatch_after_restore": "복원 후 불일치",
   "restore_points.result.header.restore_failed": "복원 실패",
+  "restore_points.result.footer": "복원: {status} ({matched}/{attempted}개 일치)",
   "restore_points.result.counts.attempted": "시도: {n}",
   "restore_points.result.counts.wrote_succeeded": "쓰기 성공: {n}",
   "restore_points.result.counts.write_failed": "쓰기 실패: {n}",
