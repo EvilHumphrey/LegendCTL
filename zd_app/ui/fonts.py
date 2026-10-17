@@ -57,9 +57,8 @@ def _add_font_with_ranges(
         # Korean range hint it rasterizes at real advances. The
         # ``_needs_explicit_cjk_range`` gate (skip on dpg>=2) assumes 2.x
         # auto-loads CJK, which holds only on ImGui-1.92+ dynamic-atlas builds;
-        # forcing the range makes Korean render deterministically on every
-        # dpg 2.x. The zh-CN path is deliberately left on the gate (proven on
-        # the release-pinned dpg; forcing it too is tracked as later hardening).
+        # the Korean and zh-CN paths therefore force their declared ranges so
+        # neither depends on version-specific CJK auto-load behavior.
         if force_ranges or _needs_explicit_cjk_range():
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -80,6 +79,7 @@ def _add_font_with_cjk(path: Path, size: int, label: str) -> Optional[int]:
         label,
         lambda: dpg.mvFontRangeHint_Chinese_Full,
         lambda: dpg.mvFontRangeHint_Korean,
+        force_ranges=True,
     )
 
 

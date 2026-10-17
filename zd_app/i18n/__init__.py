@@ -185,13 +185,51 @@ def _load(locale: str) -> dict[str, str]:
         _loaded[DEFAULT_LOCALE] = {}
         return {}
     try:
-        _loaded[locale] = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("Failed to load locale %s: %s", locale, exc)
-        _loaded[locale] = {}
+        data = {}
+    _loaded[locale] = _string_table(data, locale)
     if locale == DEFAULT_LOCALE:
         _rebuild_reverse_en()
     return _loaded[locale]
+
+
+def _string_table(data: object, locale: str) -> dict[str, str]:
+    """Coerce a parsed locale file to the key->string table the app assumes.
+
+    A locale file is a JSON object of string values everywhere else in this
+    module, and nothing downstream re-checks it: ``_rebuild_reverse_en`` calls
+    ``.items()`` on the English table the moment it is cached, and ``t()`` calls
+    ``.format()`` on whatever it finds. So a root of ``[]`` / ``"x"`` / ``3`` /
+    ``null`` crashed the load instead of taking the malformed-locale fallback
+    two lines above, and a non-string value crashed later, at the call site.
+    Both degrade here through the same warning path.
+
+    A bad root yields an empty table; individual bad values are dropped rather
+    than discarding the whole file, because one stray value should cost those
+    keys their translation, not leave the entire UI unlabelled.
+    """
+
+    if not isinstance(data, dict):
+        logger.warning(
+            "Locale %s is not a JSON object (%s); ignoring it",
+            locale,
+            type(data).__name__,
+        )
+        return {}
+    table = {
+        key: value
+        for key, value in data.items()
+        if isinstance(key, str) and isinstance(value, str)
+    }
+    if len(table) != len(data):
+        logger.warning(
+            "Locale %s: dropped %d entr(ies) that are not string values",
+            locale,
+            len(data) - len(table),
+        )
+    return table
 
 
 def _other_locale_maps_for_ambiguity() -> tuple[tuple[str, dict[str, str]], ...]:
@@ -212,8 +250,30 @@ def _other_locale_maps_for_ambiguity() -> tuple[tuple[str, dict[str, str]], ...]
         except (OSError, json.JSONDecodeError):
             continue
         if isinstance(data, dict):
-            sibling_maps.append((locale, data))
+            # Same normalisation as ``_load``: the ambiguity check builds a set
+            # of sibling values, and an unhashable value would raise there.
+            sibling_maps.append((locale, _string_table(data, locale)))
     return tuple(sibling_maps)
+
+
+def _reviewed_key_shipped_untranslated(
+    value: str,
+    keys: list[str],
+    sibling_maps: tuple[tuple[str, dict[str, str]], ...],
+) -> bool:
+    """Return True if a reviewed key's sibling-locale value is still the raw
+    English literal -- a silently-untranslated key hiding behind the
+    ``_REVIEWED_AMBIGUOUS`` allowlist (e.g. a ko value that was never given a
+    real translation and still reads "Home"). The allowlist only vouches for
+    keys that were reviewed AND actually translated; an untranslated reviewed
+    key was never reviewed in that state, so it must re-arm the warning
+    rather than ride the allowlist silently."""
+
+    return any(
+        sibling_map.get(key) == value
+        for key in keys
+        for _locale, sibling_map in sibling_maps
+    )
 
 
 def _rebuild_reverse_en() -> None:
@@ -240,15 +300,24 @@ def _rebuild_reverse_en() -> None:
         if len(keys) <= 1:
             continue
         reviewed_keys = _REVIEWED_AMBIGUOUS.get(value)
-        if reviewed_keys is not None and set(keys) <= reviewed_keys:
-            # Exactly the reviewed context-different keys — intentional, not a
+        reviewed_and_covered = reviewed_keys is not None and set(keys) <= reviewed_keys
+        untranslated = reviewed_and_covered and _reviewed_key_shipped_untranslated(
+            value, keys, sibling_maps
+        )
+        if reviewed_and_covered and not untranslated:
+            # Exactly the reviewed context-different keys, and every sibling
+            # locale actually translated each of them — intentional, not a
             # trap. A NEW sibling key (set(keys) not a subset of the reviewed
-            # set) falls through so the distinct-translation check below can
+            # set), or a reviewed key that silently ships the raw English
+            # literal in some locale, falls through so the checks below can
             # re-arm the warning.
             continue
-        if any(
-            len({sibling_map[key] for key in keys if key in sibling_map}) > 1
-            for _locale, sibling_map in sibling_maps
+        if (
+            untranslated
+            or any(
+                len({sibling_map[key] for key in keys if key in sibling_map}) > 1
+                for _locale, sibling_map in sibling_maps
+            )
         ):
             _ambiguous_en[value] = tuple(keys)
     if _ambiguous_en:

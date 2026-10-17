@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 _CONTENT_MAX_WIDTH = 720
 
 
+# Tag of the in-app bundled-license modal. Named because three places need it
+# (the seam's teardown list, the create, the Close button) and because the
+# sibling screen modules all address their modals through a module constant.
+LICENSE_MODAL = "about_license_modal"
+
+
 # Repo + issue-tracker URLs. Buttons render only when their URL is non-None.
 # LICENSE_URL stays None: the Licenses button opens the in-app license modal,
 # not a URL.
@@ -180,44 +186,96 @@ def _open_issue_url() -> None:
 
 
 def _open_license_view(shell) -> None:
-    if dpg.does_item_exist("about_license_modal"):
-        dpg.delete_item("about_license_modal")
-    mono_font = font_for("mono", get_locale())
-    with dpg.window(
-        tag="about_license_modal",
-        label=t("about.license_modal.title"),
-        modal=True,
-        width=720,
-        height=600,
-        no_resize=True,
-    ):
-        dpg.add_text(
-            t("about.license_modal.section_intro"),
-            wrap=660,
-            color=shell.COLORS["muted"],
-            tag="about_license_intro",
+    """Open the bundled-license modal (About -> Licenses).
+
+    Modal-swap hop (2026-07-27): this used to build the window inline, right
+    after ``delete_item(LICENSE_MODAL)`` — a teardown and a create in ONE
+    render pass. Under the benched DPG modal law (2026-06-11,
+    ``tools/diag_dpg_modal_thread_visibility.py``) the fresh modal then exists
+    but never becomes interactive: the Close button is dead, no exception is
+    raised and nothing is logged. Routing through ``shell._defer_modal_swap``
+    puts a rendered frame between teardown and create, which is what cures it.
+
+    Reachable by the plainest path there is. The window omits ``no_close``,
+    which DearPyGui passes straight through as ``no_close=False`` (there is no
+    "unset" sentinel), so the titlebar X is present — and the X only HIDES a
+    window, it never deletes it. Licenses -> X -> Licenses again is therefore
+    delete+create in one pass, and the resulting modal has a dead Close button
+    whose only remaining exit is the X that hides it again.
+
+    The ``getattr`` guard mirrors
+    :func:`zd_app.ui.screens.modules._open_zip_preview`: the mocked suite hands
+    screens lightweight fake shells that carry no seam, and the inline branch
+    preserves the synchronous contract those paths rely on.
+
+    Coalescing policy — plain drop-first, deliberately no payload parking.
+    This site takes no per-request argument: every click asks for the same
+    modal, built from module-level ``LICENSE_DEPS`` and the on-disk license
+    files, so a request dropped inside the pending window is indistinguishable
+    from the one that opens. (Contrast the Modules assign/notes modals, which
+    park a side on the screen state because a dropped request there would open
+    the wrong module's modal.)
+
+    Screen-scoped: the Licenses button lives on About, so a request made a
+    frame before the user clicks a nav item must not land on top of the
+    destination. Without ``owner_screen`` the seam has no owner to compare
+    against and ``switch_screen`` cannot cancel it.
+    """
+
+    def _open() -> None:
+        # Resolved at create time, alongside the widgets it binds: the font
+        # registry is DPG state, and there is nothing to gain from reading it
+        # a frame early.
+        mono_font = font_for("mono", get_locale())
+        with dpg.window(
+            tag=LICENSE_MODAL,
+            label=t("about.license_modal.title"),
+            modal=True,
+            width=720,
+            height=600,
+            no_resize=True,
+        ):
+            dpg.add_text(
+                t("about.license_modal.section_intro"),
+                wrap=660,
+                color=shell.COLORS["muted"],
+                tag="about_license_intro",
+            )
+            dpg.add_spacer(height=8)
+            for idx, (slug, spdx, header_key) in enumerate(LICENSE_DEPS):
+                section_tag = f"about_license_section_{slug.replace('-', '_')}"
+                with dpg.collapsing_header(
+                    label=t(header_key),
+                    default_open=(idx == 0),
+                    tag=section_tag,
+                ):
+                    dpg.add_text(
+                        f"{t('about.license_modal.spdx_label')} {spdx}",
+                        color=shell.COLORS["muted"],
+                    )
+                    dpg.add_spacer(height=4)
+                    license_text = _read_license(slug)
+                    license_widget = dpg.add_text(license_text, wrap=660)
+                    if mono_font is not None:
+                        dpg.bind_item_font(license_widget, mono_font)
+            dpg.add_spacer(height=8)
+            dpg.add_button(
+                label=t("about.license_modal.close"),
+                width=110,
+                tag="about_license_close_btn",
+                callback=lambda: dpg.delete_item(LICENSE_MODAL),
+            )
+
+    modal_swap = getattr(shell, "_defer_modal_swap", None)
+    if callable(modal_swap):
+        modal_swap(
+            _open,
+            delete_tags=(LICENSE_MODAL,),
+            key="about_license_view",
+            owner_screen="about",
         )
-        dpg.add_spacer(height=8)
-        for idx, (slug, spdx, header_key) in enumerate(LICENSE_DEPS):
-            section_tag = f"about_license_section_{slug.replace('-', '_')}"
-            with dpg.collapsing_header(
-                label=t(header_key),
-                default_open=(idx == 0),
-                tag=section_tag,
-            ):
-                dpg.add_text(
-                    f"{t('about.license_modal.spdx_label')} {spdx}",
-                    color=shell.COLORS["muted"],
-                )
-                dpg.add_spacer(height=4)
-                license_text = _read_license(slug)
-                license_widget = dpg.add_text(license_text, wrap=660)
-                if mono_font is not None:
-                    dpg.bind_item_font(license_widget, mono_font)
-        dpg.add_spacer(height=8)
-        dpg.add_button(
-            label=t("about.license_modal.close"),
-            width=110,
-            tag="about_license_close_btn",
-            callback=lambda: dpg.delete_item("about_license_modal"),
-        )
+        return
+
+    if dpg.does_item_exist(LICENSE_MODAL):
+        dpg.delete_item(LICENSE_MODAL)
+    _open()

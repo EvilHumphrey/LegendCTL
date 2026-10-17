@@ -586,8 +586,9 @@ class DiagnosticBundleService:
             "- IP addresses or network info (the wrapper has none to begin with)\n"
             "- User home path beyond the "
             f"`{APP_DATA_PLACEHOLDER}` placeholder above\n"
-            "- Other Windows processes or system telemetry "
-            "(the wrapper does not collect any)"
+            "- Other Windows processes or system telemetry (the wrapper checks "
+            "the running-process list once at startup to detect an active VM, "
+            "and keeps nothing from it)"
         )
 
     # ------------------------------------------------------------------

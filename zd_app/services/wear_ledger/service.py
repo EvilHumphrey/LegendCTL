@@ -273,7 +273,11 @@ class WearLedgerService:
                             continue
                         try:
                             event = WearLedgerEvent.from_dict(payload)
-                        except (ValueError, TypeError):
+                        except (ValueError, TypeError, AttributeError):
+                            # AttributeError: a JSONL line that parses to a
+                            # non-object root (``5`` / ``"x"`` / ``[]`` / ``null``)
+                            # reaches ``.get`` in the codec. Skip that line like
+                            # any other corrupted one rather than aborting the read.
                             continue
                         if type_filter is not None and event.event_type not in type_filter:
                             continue

@@ -271,17 +271,27 @@ class WrapperProfile:
     def from_dict(cls, payload: dict[str, Any]) -> "WrapperProfile":
         from zd_app.storage.snapshot_codec import snapshot_from_dict
 
-        if payload.get("schema_version") != 1:
-            raise ValueError(
-                f"Unsupported wrapper-profile schema_version: {payload.get('schema_version')!r}"
+        # Normalize a non-object root the same way Profile.from_dict does. A
+        # tampered file whose root is a list reaches .get() and raises
+        # AttributeError, which neither WrapperProfileStore.load nor
+        # list_profiles catches -- so the profile list would crash instead of
+        # skipping the bad file, which is the whole point of its skipped[]
+        # return. Both callers already catch ValueError, so converting here
+        # fixes both sinks at once rather than at each call site.
+        try:
+            if payload.get("schema_version") != 1:
+                raise ValueError(
+                    f"Unsupported wrapper-profile schema_version: {payload.get('schema_version')!r}"
+                )
+            return cls(
+                name=payload["name"],
+                description=payload.get("description", ""),
+                created_at=payload["created_at"],
+                last_modified_at=payload["last_modified_at"],
+                snapshot=snapshot_from_dict(payload["snapshot"]),
             )
-        return cls(
-            name=payload["name"],
-            description=payload.get("description", ""),
-            created_at=payload["created_at"],
-            last_modified_at=payload["last_modified_at"],
-            snapshot=snapshot_from_dict(payload["snapshot"]),
-        )
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise ValueError(f"Invalid wrapper-profile payload: {exc}") from exc
 
 
 @dataclass

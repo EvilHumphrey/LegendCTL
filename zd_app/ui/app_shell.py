@@ -1200,6 +1200,11 @@ class AppShell:
         # proof surfaces before accepting. Keep that session in a distinct
         # pending state so those reads stay open while controller writes do not.
         self._consent_pending_verify = False
+        # Safe Import modals the consent re-offer hid, so the gate's exits can
+        # put them back. Recorded explicitly rather than "re-show anything
+        # hidden": the preview's own titlebar X also hides it, and a stateless
+        # restore would resurrect a preview the user dismissed themselves.
+        self._consent_reoffer_hidden_tags: tuple[str, ...] = ()
         set_locale(self.settings.language)
         self._locale_router = LocaleRouter()
         self._locale_router.subscribe(self._on_locale_changed)
@@ -1315,7 +1320,10 @@ class AppShell:
         # _setup_theme, bound per series by the controller screen). None until
         # theme setup runs — render paths that skip it just draw default colors.
         self._sensitivity_plot_themes: dict[str, int] | None = None
-        self._save_as_modal_open = False
+        # Topic the support-guide modal should render. Written on every
+        # open_support_guide request and read by the deferred create, which is
+        # what makes that seam last-request-wins instead of drop-first.
+        self._support_guide_topic: str | None = None
         # Safe Import preview state. _safe_import_result holds the classified
         # ImportResult across the multi-step preview; _safe_import_selected is
         # the set of RiskCategory the user has checked (Device unchecked by
@@ -1490,10 +1498,24 @@ class AppShell:
         # drag debounces to a single log emitted when the drag stops.
         self._geometry_log_pending = None
         self._geometry_log_countdown = 0
-        # In-flight _defer_modal_swap coalescing keys: a re-fired callback
-        # whose swap is still pending is dropped instead of double-queued
-        # (a second create of the same modal in one pass is the poison).
+        # Modal-swap arbitration. Exactly one modal transition may own the
+        # create slot at a time (see _defer_modal_swap): the generation
+        # counter is the ownership token, _pending_modal_swap_keys holds the
+        # owner's coalescing key (a re-fired callback with the SAME key is
+        # dropped instead of double-queued), and _modal_swap_owner_screen
+        # records the screen a screen-scoped transition belongs to so
+        # navigating away cancels its create instead of opening it over the
+        # destination. _modal_swap_teardown_done latches once the owner's
+        # teardown has actually run: from that moment the owner's create is
+        # the only thing that can undo the teardown, so a later request may
+        # no longer supersede it. Every field is only touched under
+        # _modal_swap_lock.
         self._pending_modal_swap_keys: set[str] = set()
+        self._modal_swap_lock = threading.Lock()
+        self._modal_swap_generation = 0
+        self._modal_swap_pending = False
+        self._modal_swap_teardown_done = False
+        self._modal_swap_owner_screen: str | None = None
 
     @property
     def button_actions(self) -> list[str]:
@@ -1586,6 +1608,10 @@ class AppShell:
             self._tick()
             dpg.render_dearpygui_frame()
         self._defer_ui_armed = False
+        # Nothing will drain the queue again, so a transition still holding
+        # the modal create slot would hold it forever. Free it: a re-armed
+        # shell (the suite builds several per process) must start clean.
+        self._release_modal_swap_slot()
 
         self.device_service.stop_presence_primer()
         # Stop the live-diagnostics XInput poll worker if it was ever started
@@ -2409,7 +2435,7 @@ class AppShell:
             False,
             t("first_run.pending_write_blocked"),
         )
-        self._show_first_run_acknowledgment_modal_if_needed()
+        self._reoffer_first_run_gate()
         return False
 
     def _hid_write_available_or_refuse(self) -> bool:
@@ -2425,6 +2451,87 @@ class AppShell:
             self._hid_available_or_refuse()
             and self._consent_pending_write_allowed_or_refuse()
         )
+
+    def _reoffer_first_run_gate(self) -> None:
+        """Re-offer the consent gate from a refused write, through the seam.
+
+        Registry ``DEFECT`` entry for ``_show_first_run_acknowledgment_modal_if_needed``:
+        this caller reaches the gate from write entry points that are only
+        reachable while another modal is PROVABLY still up -- the Safe Import
+        confirm modal owns the button that reaches ``safe_import_apply``. The
+        benched modal law covers a predecessor merely left up, so building the
+        gate into that pass produced a window that never renders. The startup
+        caller is unaffected (fresh context, nothing to race) and stays inline.
+
+        The standing modals are HIDDEN rather than deleted so the user's
+        category selections and typed name survive: they consented to a gate,
+        not to losing a half-finished import. Which ones were hidden is
+        recorded, because only the gate's own exits can put them back and each
+        exit wants something different -- see :meth:`_settle_consent_reoffer`.
+
+        Unarmed (no render loop: headless and synchronous paths, the suite's
+        mocked shells) there is no rendered frame for the seam to put between
+        a teardown and the create, so the hop protects nothing. Calling the
+        builder directly keeps the plain synchronous contract, and the builder
+        returns before touching Dear PyGui when no context is up. Going through
+        the unarmed seam instead runs its teardown inline, and that calls
+        ``dpg.does_item_exist`` / ``get_item_configuration`` with no live
+        context, which is a native access violation that takes the whole test
+        process down.
+        """
+
+        if not self._defer_ui_armed:
+            self._show_first_run_acknowledgment_modal_if_needed()
+            return
+
+        hidden: tuple[str, ...] = ()
+        if self._dpg_context_ready:
+            hidden = tuple(
+                tag
+                for tag in (safe_import.CONFIRM_MODAL, safe_import.PREVIEW_MODAL)
+                if dpg.does_item_exist(tag)
+                and dpg.get_item_configuration(tag).get("show", True)
+            )
+        self._consent_reoffer_hidden_tags = hidden
+        self._defer_modal_swap(
+            self._show_first_run_acknowledgment_modal_if_needed,
+            delete_tags=("first_run_ack_modal",),
+            hide_tags=hidden,
+            key="first_run_consent_reoffer",
+        )
+
+    def _settle_consent_reoffer(self, *, reshow: bool) -> None:
+        """Put back (or clear away) whatever the consent re-offer hid.
+
+        ``reshow=True`` is the accept path: the user stays in the app, so the
+        import they were part-way through comes back. It rides the seam because
+        the gate is deleted in the calling pass and a show in that same pass is
+        the poison shape again.
+
+        ``reshow=False`` is the ``How to verify this`` path: the user has
+        navigated to the trust surface, so a hidden modal left behind would be
+        stranded with no route back on screen.
+
+        Decline needs neither -- it exits the app -- but it still clears the
+        record, so no path leaves stale state behind.
+        """
+
+        tags = self._consent_reoffer_hidden_tags
+        self._consent_reoffer_hidden_tags = ()
+        if not tags or not self._dpg_context_ready:
+            return
+        if not reshow:
+            for tag in tags:
+                if dpg.does_item_exist(tag):
+                    dpg.delete_item(tag)
+            return
+
+        def _reshow() -> None:
+            for tag in tags:
+                if dpg.does_item_exist(tag):
+                    dpg.configure_item(tag, show=True)
+
+        self._defer_modal_swap(_reshow, key="first_run_consent_restore")
 
     def _set_hid_flow_buttons_enabled(self, enabled: bool) -> None:
         if not self._dpg_context_ready:
@@ -2509,6 +2616,47 @@ class AppShell:
             except Exception:
                 logger.exception("Deferred UI call failed")
 
+    def _release_modal_swap_slot(self, generation: int | None = None) -> bool:
+        """Free the modal create slot; return True if this call freed it.
+
+        ``generation`` scopes the release to one transition: a closure
+        left over from a superseded transition passes its own token and
+        gets False, so it can never release the slot its successor now
+        owns. ``None`` releases whatever holds the slot (navigation
+        cancellation, render-loop teardown).
+
+        Every release bumps the generation, which is what invalidates the
+        released transition's still-queued closures.
+        """
+
+        with self._modal_swap_lock:
+            if not self._modal_swap_pending:
+                return False
+            if generation is not None and generation != self._modal_swap_generation:
+                return False
+            self._pending_modal_swap_keys.clear()
+            self._modal_swap_pending = False
+            self._modal_swap_teardown_done = False
+            self._modal_swap_owner_screen = None
+            self._modal_swap_generation += 1
+            return True
+
+    def _cancel_screen_owned_modal_swap(self) -> None:
+        """Cancel a pending swap owned by the screen being navigated away from.
+
+        Called from :meth:`switch_screen`. A screen-scoped transition
+        captured that screen's state when it was requested; letting its
+        create run after navigation would open the modal over the
+        destination screen and let its Save write back into the screen
+        the user just left.
+        """
+
+        with self._modal_swap_lock:
+            owner = self._modal_swap_owner_screen
+            if not self._modal_swap_pending or owner is None:
+                return
+        self._release_modal_swap_slot()
+
     def _defer_modal_swap(
         self,
         open_fn: Callable[[], None],
@@ -2516,6 +2664,7 @@ class AppShell:
         delete_tags: tuple[str, ...] = (),
         hide_tags: tuple[str, ...] = (),
         key: str | None = None,
+        owner_screen: str | None = None,
     ) -> None:
         """Tear down modals, let a frame render, then run modal-opening ``open_fn``.
 
@@ -2533,41 +2682,180 @@ class AppShell:
         their widget state survives (the preview keeps its typed profile
         name while the apply-confirm modal is up). ``open_fn``'s own
         defensive ``_delete_if_exists`` calls become no-ops by create
-        time, making it a pure create — the only shape DPG renders.
+        time, making it a pure create — the only shape DPG renders. A hop
+        must therefore name in ``delete_tags`` every tag its ``open_fn``
+        constructs, or that defensive delete runs INSIDE the create pass
+        and re-creates the same-pass pair this seam exists to break.
 
-        ``key`` coalesces re-entrant requests: while a swap with the same
-        key is pending, further requests are dropped. A double-fired
-        callback would otherwise delete and recreate the target modal in
-        one pass — exactly the poison this seam exists to avoid.
+        **Arbitration — one transition owns the create slot.** Pacing
+        alone is not enough: per-key coalescing lets two DIFFERENT sites
+        (Notes and Export, Save As and a support guide, a user click and
+        an async job completion) each pass their own key, drain their
+        teardowns together and then create two modals in one pass — the
+        forbidden shape, reached without any impossibly fast clicking.
+        So a request takes the slot from the moment it is accepted until
+        its create pass begins, and while it is held:
+
+        * **same ``key`` → dropped.** A re-fired callback would delete and
+          recreate the target modal; payload-carrying sites park their
+          payload on state and re-read it at create time, so the pending
+          transition already produces the right modal.
+        * **different ``key`` (or unkeyed), owner's teardown not yet run
+          → supersedes.** Last request wins, matching the per-site payload
+          policy. The superseded transition's queued closures see a stale
+          generation token and abort, so its create never runs: no pass
+          ever holds two creates, and a superseded modal cannot land on
+          top of its successor. Nothing is lost, because a transition
+          whose teardown has not run has had no effect on screen yet.
+        * **different ``key``, owner's teardown ALREADY run → dropped.**
+          Supersession is refused once the teardown's side effects exist.
+          A teardown can hide a modal whose only route back on screen is
+          its own transition's create (Save + Apply hides the Safe Import
+          preview; Cancel deletes the confirm and re-shows the preview),
+          so abandoning the create after the teardown strands the flow:
+          the preview stays hidden with no confirm and no way back. The
+          alternative — an undo callback per transition — is worse, not
+          better: re-showing the predecessor would put a showing modal
+          back under the newcomer's create, which is exactly the poison
+          this seam exists to break. The cost is one rendered frame in
+          which last-request-wins does not hold; the dropped request is
+          logged.
+
+        Requests made after the create pass begins are ordinary new
+        transitions — that is the deliberate modal-to-modal hop (a button
+        inside modal A opening modal B), and those hops name A in their
+        own ``delete_tags``.
+
+        **Scope limit — creation is serialised; landed modals are not
+        tracked.** The slot covers a transition only from request to
+        create. Once the create has run, the modal it built is invisible
+        to the arbiter: nothing records that it is standing, and nothing
+        stops an unrelated later transition from creating a second modal
+        while it is still up. The reachable shape is an asynchronous
+        arrival — a threaded apply fails and its failure/Retry modal is
+        requested while a modal the user opened meanwhile (Save As is not
+        in ``_HID_FLOW_BUTTON_TAGS``, so it stays enabled during a job) is
+        showing, and the failure modal's ``delete_tags`` name only its own
+        tag. That create then lands in a pass with another modal left up,
+        which is the poison condition, and the seam does not currently
+        prevent it. What holds it back today is per-site discipline: a
+        hop's ``delete_tags`` naming every modal it can follow. Closing
+        the class properly needs landed-modal occupancy plus a priority
+        order for safety modals, which is a design change, not a tweak
+        here. Do not read this arbiter as covering it.
+
+        ``owner_screen`` scopes a transition to the screen that requested
+        it. Modules and Wear Ledger modals capture screen state, so their
+        create is abandoned if the user navigated away while the swap was
+        pending; footer-global hops (Save As) pass nothing. Navigation
+        cancels regardless of teardown state, unlike supersession: every
+        screen-scoped hop's teardown only deletes its own modal, so the
+        cancelled create leaves nothing stranded behind on a screen the
+        user has left.
+
+        Work that MUST happen because something was already committed
+        (a written profile, a status result, a refreshed footer) does not
+        belong inside ``open_fn`` — see
+        :meth:`_commit_safe_import_apply_result`. Only the modal
+        construction may be cancellable.
+
+        No request can wedge the slot shut. It is released on exactly one
+        of: the create pass starting (before ``open_fn`` runs, so an
+        ``open_fn`` that raises cannot hold it), a teardown raising, a
+        failure to queue the create, supersession by a later request,
+        navigation cancelling a screen-scoped transition, or the render
+        loop disarming.
         """
 
-        if key is not None:
-            if key in self._pending_modal_swap_keys:
-                return
-            self._pending_modal_swap_keys.add(key)
-
-        def run_open() -> None:
+        if not self._defer_ui_armed:
+            # Unarmed there is no drain and no frame, so the whole swap
+            # completes before this call returns: nothing to arbitrate,
+            # and the arbiter must stay out of the way of the synchronous
+            # contract (a nested inline open must still work). Only the
+            # re-entrant same-key drop applies.
+            if key is not None:
+                if key in self._pending_modal_swap_keys:
+                    return
+                self._pending_modal_swap_keys.add(key)
             try:
+                self._run_modal_swap_teardown(delete_tags, hide_tags)
                 open_fn()
             finally:
-                self._pending_modal_swap_keys.discard(key)
+                if key is not None:
+                    self._pending_modal_swap_keys.discard(key)
+            return
+
+        # Resolved before the lock: the arbiter never calls out while holding
+        # it, so it can stay a plain non-reentrant Lock.
+        owner = None if owner_screen is None else self._canonical_screen_id(owner_screen)
+        # One critical section decides drop-vs-supersede AND takes the slot, so
+        # two threads racing here cannot both conclude they may supersede.
+        with self._modal_swap_lock:
+            if key is not None and key in self._pending_modal_swap_keys:
+                return
+            if self._modal_swap_pending and self._modal_swap_teardown_done:
+                too_late = True
+            else:
+                too_late = False
+                self._modal_swap_generation += 1
+                generation = self._modal_swap_generation
+                self._modal_swap_pending = True
+                self._modal_swap_teardown_done = False
+                self._modal_swap_owner_screen = owner
+                self._pending_modal_swap_keys = set() if key is None else {key}
+        if too_late:
+            # Post-teardown: the owner's create is the only thing that can
+            # undo what its teardown did, so it must be allowed to finish.
+            logger.info(
+                "Modal swap request %s dropped: a transition is mid-teardown",
+                key or "<unkeyed>",
+            )
+            return
+
+        def run_open() -> None:
+            # Release BEFORE opening: the pending window closes when the
+            # create starts, and a raising open_fn must not keep the slot.
+            if not self._release_modal_swap_slot(generation):
+                return  # superseded or cancelled between the two passes
+            if owner is not None and owner != self._canonical_screen_id(
+                self.current_screen
+            ):
+                return
+            open_fn()
 
         def teardown_then_defer_open() -> None:
+            with self._modal_swap_lock:
+                stale = generation != self._modal_swap_generation
+                if not stale:
+                    # Latched inside the same critical section as the
+                    # staleness check: a request that took the lock before
+                    # this point superseded us (and we return below), and one
+                    # that takes it after is refused. There is no interleaving
+                    # in which the teardown runs and a newcomer still wins.
+                    self._modal_swap_teardown_done = True
+            if stale:
+                return
             try:
-                for tag in delete_tags:
-                    if dpg.does_item_exist(tag):
-                        dpg.delete_item(tag)
-                for tag in hide_tags:
-                    if dpg.does_item_exist(tag):
-                        dpg.configure_item(tag, show=False)
+                self._run_modal_swap_teardown(delete_tags, hide_tags)
+                self._defer_ui_call(run_open)
             except BaseException:
-                # Don't let a teardown failure wedge the coalescing key:
-                # the hop must stay reachable after the contained error.
-                self._pending_modal_swap_keys.discard(key)
+                # Don't let a teardown failure wedge the slot: the hop
+                # must stay reachable after the contained error.
+                self._release_modal_swap_slot(generation)
                 raise
-            self._defer_ui_call(run_open)
 
         self._defer_ui_call(teardown_then_defer_open)
+
+    @staticmethod
+    def _run_modal_swap_teardown(
+        delete_tags: tuple[str, ...], hide_tags: tuple[str, ...]
+    ) -> None:
+        for tag in delete_tags:
+            if dpg.does_item_exist(tag):
+                dpg.delete_item(tag)
+        for tag in hide_tags:
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, show=False)
 
     def _tick_hid_job_staleness(self) -> None:
         """Surface a threaded job stuck past HID_JOB_STALL_WARN_S.
@@ -3540,13 +3828,15 @@ class AppShell:
         self._refresh_footer_profile_combo(selected_name=name)
         if self._dpg_context_ready and dpg.does_item_exist("wrapper_profile_name_input"):
             dpg.set_value("wrapper_profile_name_input", "")
-        if (
-            self._dpg_context_ready
-            and self._save_as_modal_open
-            and dpg.does_item_exist("wrapper_profile_save_as_modal")
+        # Dismiss the Save As modal on a successful save. The item's own
+        # existence is the whole test: a companion "is it open" flag could
+        # only ever be stale — Cancel deletes the window and the titlebar X
+        # merely hides it, and neither routes back through the save path —
+        # so the flag could only suppress a correct cleanup, never enable one.
+        if self._dpg_context_ready and dpg.does_item_exist(
+            "wrapper_profile_save_as_modal"
         ):
             dpg.delete_item("wrapper_profile_save_as_modal")
-            self._save_as_modal_open = False
         self.rebuild_current_screen()
 
     def apply_selected_wrapper_profile(self) -> None:
@@ -5001,18 +5291,27 @@ class AppShell:
                 logger.exception("first-run ack: settings save failed")
             if dpg.does_item_exist("first_run_ack_modal"):
                 dpg.delete_item("first_run_ack_modal")
+            # Consented and staying in the app: bring back whatever the
+            # re-offer hid, so a half-finished Safe Import is not lost.
+            self._settle_consent_reoffer(reshow=True)
 
         def _decline() -> None:
             # Not accepted: leave first_run_acknowledged unset so the gate
             # shows again on a future launch, and do not proceed into the app.
             if dpg.does_item_exist("first_run_ack_modal"):
                 dpg.delete_item("first_run_ack_modal")
+            # The app is exiting, so nothing needs restoring — but clear the
+            # record rather than leaving stale state behind.
+            self._consent_reoffer_hidden_tags = ()
             self._request_app_exit()
 
         def _verify() -> None:
             self._consent_pending_verify = True
             if dpg.does_item_exist("first_run_ack_modal"):
                 dpg.delete_item("first_run_ack_modal")
+            # Navigating away to the trust surface: a hidden Safe Import modal
+            # left behind would be stranded with no route back on screen.
+            self._settle_consent_reoffer(reshow=False)
             trust_front_door.open_trust_surface(self, "trust_matrix")
 
         if dpg.does_item_exist("first_run_ack_modal"):
@@ -5544,48 +5843,59 @@ class AppShell:
             self._record_settings_apply_result(False, t("apply.profile.save.step_size_draft"))
             self.refresh_shell()
             return
-        if dpg.does_item_exist("wrapper_profile_save_as_modal"):
-            dpg.delete_item("wrapper_profile_save_as_modal")
-        self._save_as_modal_open = True
-        with dpg.window(
-            tag="wrapper_profile_save_as_modal",
-            label=t("footer.save_as_modal.title"),
-            modal=True,
-            no_close=False,
-            no_resize=True,
-            width=460,
-            height=210,
-        ):
-            dpg.add_input_text(
-                tag="wrapper_profile_name_input",
-                label=t("footer.save_as_modal.name_input"),
-                width=260,
-            )
-            dpg.add_spacer(height=8)
-            dpg.add_checkbox(
-                tag=SAVE_AS_INCLUDE_DEVICE_CHECKBOX,
-                label=t("footer.save_as_modal.include_device"),
-                default_value=False,
-            )
-            dpg.add_text(
-                t("footer.save_as_modal.include_device_hint"),
-                color=self.COLORS["muted"],
-                wrap=420,
-            )
-            dpg.add_spacer(height=8)
-            with dpg.group(horizontal=True):
-                dpg.add_button(
-                    label=t("footer.save_as_modal.save"),
-                    tag="wrapper_profile_save_button",
-                    enabled=not self._manual_profile_save_pending(),
-                    width=100,
-                    callback=lambda: self.save_current_as_wrapper_profile(),
+
+        def open_fn() -> None:
+            with dpg.window(
+                tag="wrapper_profile_save_as_modal",
+                label=t("footer.save_as_modal.title"),
+                modal=True,
+                no_close=False,
+                no_resize=True,
+                width=460,
+                height=210,
+            ):
+                dpg.add_input_text(
+                    tag="wrapper_profile_name_input",
+                    label=t("footer.save_as_modal.name_input"),
+                    width=260,
                 )
-                dpg.add_button(
-                    label=t("actions.cancel"),
-                    width=100,
-                    callback=lambda: dpg.delete_item("wrapper_profile_save_as_modal"),
+                dpg.add_spacer(height=8)
+                dpg.add_checkbox(
+                    tag=SAVE_AS_INCLUDE_DEVICE_CHECKBOX,
+                    label=t("footer.save_as_modal.include_device"),
+                    default_value=False,
                 )
+                dpg.add_text(
+                    t("footer.save_as_modal.include_device_hint"),
+                    color=self.COLORS["muted"],
+                    wrap=420,
+                )
+                dpg.add_spacer(height=8)
+                with dpg.group(horizontal=True):
+                    dpg.add_button(
+                        label=t("footer.save_as_modal.save"),
+                        tag="wrapper_profile_save_button",
+                        enabled=not self._manual_profile_save_pending(),
+                        width=100,
+                        callback=lambda: self.save_current_as_wrapper_profile(),
+                    )
+                    dpg.add_button(
+                        label=t("actions.cancel"),
+                        width=100,
+                        callback=lambda: dpg.delete_item("wrapper_profile_save_as_modal"),
+                    )
+
+        # The titlebar X only HIDES a no_close=False window, so "Save As →
+        # dismiss → Save As" is a delete+create in one pass unless it goes
+        # through the seam. Drop-first coalescing is the correct policy here:
+        # Save As carries no per-request payload — every request opens the same
+        # blank form — so a request dropped while an identical one is pending
+        # loses nothing. (Payload-carrying sites need an explicit policy.)
+        self._defer_modal_swap(
+            open_fn,
+            delete_tags=("wrapper_profile_save_as_modal",),
+            key="wrapper_profile_save_as",
+        )
 
     def _delete_wrapper_profile_confirmed(self, name: str) -> None:
         if self._dpg_context_ready and dpg.does_item_exist("wrapper_profile_delete_popup"):
@@ -6128,6 +6438,11 @@ class AppShell:
         return bool(dpg.get_item_children("content_region", 1))
 
     def switch_screen(self, screen: str) -> None:
+        # A screen-scoped modal swap requested just before this navigation
+        # captured the OLD screen's state; its create would open over the
+        # destination and its Save would write back into the screen the user
+        # left. Cancel it before the screen id changes.
+        self._cancel_screen_owned_modal_swap()
         self.current_screen = self._canonical_screen_id(screen)
         self._refresh_nav_selection()
         self.rebuild_current_screen()
@@ -8560,34 +8875,62 @@ class AppShell:
         return True
 
     def open_support_guide(self, topic: str) -> None:
-        guide = support_reference.get_guide(topic)
-        if dpg.does_item_exist("support_guide_modal"):
-            dpg.delete_item("support_guide_modal")
+        # Resolve here, at REQUEST time, purely as validation: an unrecognized
+        # topic is a wiring bug and must raise out of the caller's own stack.
+        # Inside the deferred create the drain would only log it and silently
+        # open nothing. Validating first also means a bad request can never
+        # overwrite a good pending one below.
+        support_reference.get_guide(topic)
+        # Payload policy: LAST REQUEST WINS. Unlike Save As this site carries a
+        # payload — three Diagnostics buttons open three different guides — and
+        # the seam's key coalescing is drop-first, so keying alone would show
+        # the OLDER guide when a second button is clicked inside the pending
+        # window. Per-topic keys are not the fix: independent keys let two
+        # opens share a pass, which is the modal-law poison the seam exists to
+        # avoid. One key serializes the opens, and the create resolves the
+        # topic stored LAST, so a rapid second click replaces rather than
+        # loses the request.
+        self._support_guide_topic = topic
 
-        guide_title = support_reference.localized_title(guide)
-        with dpg.window(
-            tag="support_guide_modal",
-            label=guide_title,
-            modal=True,
-            width=720,
-            height=520,
-            no_resize=True,
-        ):
-            screen_title(guide_title)
-            dpg.add_text(support_reference.localized_summary(guide), wrap=660)
-            dpg.add_spacer(height=8)
-            with dpg.child_window(height=340, border=True):
-                for bullet in support_reference.localized_bullets(guide):
-                    dpg.add_text(f"- {bullet}", wrap=640)
-                    dpg.add_spacer(height=4)
-            dpg.add_spacer(height=8)
-            dpg.add_text(
-                support_reference.localized_evidence_note(guide),
-                color=self.COLORS["muted"],
-                wrap=660,
-            )
-            dpg.add_spacer(height=8)
-            dpg.add_button(label=t("support.guide.close"), width=120, callback=lambda: dpg.delete_item("support_guide_modal"))
+        def open_fn() -> None:
+            guide = support_reference.get_guide(self._support_guide_topic)
+            guide_title = support_reference.localized_title(guide)
+            with dpg.window(
+                tag="support_guide_modal",
+                label=guide_title,
+                modal=True,
+                width=720,
+                height=520,
+                no_resize=True,
+            ):
+                screen_title(guide_title)
+                dpg.add_text(support_reference.localized_summary(guide), wrap=660)
+                dpg.add_spacer(height=8)
+                with dpg.child_window(height=340, border=True):
+                    for bullet in support_reference.localized_bullets(guide):
+                        dpg.add_text(f"- {bullet}", wrap=640)
+                        dpg.add_spacer(height=4)
+                dpg.add_spacer(height=8)
+                dpg.add_text(
+                    support_reference.localized_evidence_note(guide),
+                    color=self.COLORS["muted"],
+                    wrap=660,
+                )
+                dpg.add_spacer(height=8)
+                dpg.add_button(label=t("support.guide.close"), width=120, callback=lambda: dpg.delete_item("support_guide_modal"))
+
+        # The guide window has no on_close and no explicit no_close, so the
+        # default titlebar X hides rather than deletes it: guide → X → another
+        # guide is a delete+create in one pass on the inline shape.
+        # Screen-scoped: the three entry buttons live on Diagnostics, so a
+        # guide requested a frame before the user navigates away must not
+        # land on top of the destination screen.
+        self._defer_modal_swap(
+            open_fn,
+            delete_tags=("support_guide_modal",),
+            key="support_guide",
+            owner_screen="diagnostics",
+        )
 
     def log_diagnostic_action(self, message: str) -> None:
         self.diagnostics_service.log_event(message)

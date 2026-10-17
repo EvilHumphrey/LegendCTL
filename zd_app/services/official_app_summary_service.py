@@ -203,9 +203,28 @@ class OfficialAppSummaryService:
             return None
 
         try:
-            return json.loads(output)
+            parsed = json.loads(output)
         except json.JSONDecodeError:
             return None
+        if not isinstance(parsed, dict):
+            # The probe is contracted to emit a JSON object. A parseable
+            # non-object root (``[]`` / ``"x"`` / ``3`` / ``null``) would
+            # AttributeError on ``payload.get`` in read_summary, and only one of
+            # the three callers wraps that call. Degrade to "no summary", the
+            # same result an unparseable probe already produces.
+            return None
+        # An object root is not enough: ``read_summary`` iterates ``names`` and
+        # hands ``window_title`` straight to the dataclass. ``{"names": null}``
+        # and ``{"names": 3}`` raise TypeError one level deeper, and a string or
+        # a dict would be iterated character- or key-wise into nonsense. The
+        # member shapes are part of the contract, so they are enforced here with
+        # the root, where all three callers are covered at once.
+        if "names" in parsed and not isinstance(parsed["names"], list):
+            return None
+        window_title = parsed.get("window_title")
+        if window_title is not None and not isinstance(window_title, str):
+            return None
+        return parsed
 
     @staticmethod
     def _parse_profile_index(value: str) -> int | None:

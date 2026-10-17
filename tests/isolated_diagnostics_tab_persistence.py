@@ -6,8 +6,9 @@ as ``isolated_diagnostics_frontdoor_scroll``. One DPG context per process: a
 second create/destroy cycle in the same process hits the known teardown
 segfault.
 
-Why this exists: the ``diagnostics_tab_bar`` callback's ``app_data`` is the
-selected tab's INTEGER item id under real Dear PyGui, but the mocked suite
+Why this exists: the ``diagnostics_tab_bar`` callback's ``app_data`` was the
+selected tab's INTEGER item id under real Dear PyGui 2.2 (2.3.1 delivers the
+alias; see ``test_real_user_tab_selection_persists_across_rebuild``), but the mocked suite
 injected the ``diag_tab_*`` alias STRING. ``_diag_tab_tag_to_id`` matched only
 the string form, so ``str(<int id>)`` fell through to the ``status`` default:
 EVERY real tab selection silently reset ``diagnostics_active_tab`` to
@@ -121,6 +122,117 @@ class IsolatedDiagnosticsTabPersistenceTest(unittest.TestCase):
         finally:
             dpg.destroy_context()
 
+    def test_presence_rebuild_after_focus_consumed_holds_guidance(self) -> None:
+        """Does the CONFIRMED guard bypass actually flash?
+
+        The front door sets Guidance plus a ONE-SHOT focus attribute; the
+        Diagnostics builder reads that attribute to hide Status/Actions for the
+        landing frame, then *consumes* it
+        (``diagnostics.py`` ``_consume_trust_front_door_focus``). After
+        consumption the attribute is ``None``, so any later rebuild of the same
+        screen constructs Status/Actions VISIBLE and selects Guidance only by a
+        same-pass ``set_value`` — exactly the ordering the hide-guard exists to
+        avoid. A presence transition (controller connect/disconnect) reaches
+        that rebuild via ``_request_presence_rebuild``; a right-rail resize
+        threshold crossing reaches ``rebuild_current_screen`` the same way.
+
+        Static source proves the bypass; it cannot prove what DPG *paints* for
+        that frame, so this is a probe, not a regression lock on a known bug.
+        Two distinct failures are in scope and both are sampled per frame:
+
+        1. a one-frame Status flash (cosmetic, but on the trust surface), and
+        2. persisted-state corruption — if DPG selects the first visible tab on
+           the first rendered frame, the REAL tab_bar callback fires with
+           Status's INTEGER id and ``_remember_active_tab`` rewrites
+           ``diagnostics_active_tab`` to ``status``. That is the v2.6.1
+           consent-gate bug class returning through a different door, and it
+           outlives the frame.
+
+        ``test_trust_surface_selection_survives_rebuild`` cannot see either: it
+        drains and renders 15 frames, then checks only the settled result, so a
+        one-frame transient is invisible to it. Mocks cannot see it at all — no
+        real frames, no integer callback ids (documented DPG law).
+        """
+
+        dpg.create_context()
+        try:
+            shell = self._boot_shell()
+            trust_front_door.open_trust_surface(shell, "trust_matrix")
+            self._render_drain(shell, 15)
+
+            # Preconditions: landed on Guidance, and the one-shot focus
+            # attribute is SPENT — so the hide-Status/Actions guard cannot fire
+            # again on the rebuild below. This is the bypassed state.
+            self.assertEqual(_tab_alias(), "diag_tab_guidance")
+            self.assertEqual(shell.diagnostics_active_tab, "guidance")
+            self.assertIsNone(
+                getattr(shell, trust_front_door.TRUST_FRONT_DOOR_FOCUS_ATTR, None),
+                "front-door focus attribute was not consumed by the landing "
+                "build — this probe would test the GUARDED path, not the "
+                "bypassed one it exists to characterize",
+            )
+
+            tab_bar_id_before = dpg.get_alias_id("diagnostics_tab_bar")
+
+            # The production presence transition: _request_presence_rebuild
+            # defers rebuild_current_screen + rail refresh. Drain ONCE to run
+            # it — the tab bar is deleted and recreated here.
+            shell._request_presence_rebuild()
+            shell._drain_deferred_ui_calls()
+
+            # Anti-vacuity: _drain_deferred_ui_calls deliberately CONTAINS and
+            # logs a raising deferred call, so a rebuild that blew up would
+            # leave the old tab bar standing and make every assertion below
+            # pass while testing nothing. A recreated item gets a fresh id.
+            self.assertNotEqual(
+                dpg.get_alias_id("diagnostics_tab_bar"),
+                tab_bar_id_before,
+                "presence rebuild did not recreate the tab bar — the deferred "
+                "call likely raised and was contained by the drain, which "
+                "would make the per-frame assertions below vacuous",
+            )
+
+            # Sample EVERY rendered frame, and do NOT drain between them: the
+            # flash, if any, lives in the frames the settled check skips.
+            observed = [("frame-0-sync", _tab_alias(), shell.diagnostics_active_tab)]
+            for frame in range(1, 11):
+                dpg.render_dearpygui_frame()
+                observed.append(
+                    (f"frame-{frame}", _tab_alias(), shell.diagnostics_active_tab)
+                )
+
+            offenders = [
+                entry
+                for entry in observed
+                if entry[1] != "diag_tab_guidance" or entry[2] != "guidance"
+            ]
+            self.assertEqual(
+                offenders,
+                [],
+                "Diagnostics left Guidance during the presence rebuild that "
+                "follows a consumed front-door landing.\n"
+                f"  offending frames: {offenders}\n"
+                f"  full trace (frame, visible tab, persisted tab): {observed}",
+            )
+
+            # The guard hides the tabs PRECEDING the active one for the
+            # construction frame, so it must also put them back — otherwise
+            # "hide Status forever" would satisfy every assertion above. The
+            # reveal is enqueued DURING the rebuild's own drain pass, so it
+            # runs on the NEXT pass; drain again to reach it.
+            self._render_drain(shell, 5)
+            for tab_tag in ("diag_tab_status", "diag_tab_actions"):
+                self.assertTrue(
+                    dpg.is_item_shown(tab_tag),
+                    f"{tab_tag} was hidden for the landing frame but never "
+                    "revealed — the deferred reveal did not run, which would "
+                    "leave the user with a permanently truncated tab bar",
+                )
+            self.assertEqual(_tab_alias(), "diag_tab_guidance")
+            self.assertEqual(shell.diagnostics_active_tab, "guidance")
+        finally:
+            dpg.destroy_context()
+
     def test_real_user_tab_selection_persists_across_rebuild(self) -> None:
         """A real selection of a non-default tab must survive a rebuild.
 
@@ -142,7 +254,26 @@ class IsolatedDiagnosticsTabPersistenceTest(unittest.TestCase):
             self.assertEqual(
                 shell.diagnostics_active_tab,
                 "actions",
-                "real integer-app_data selection was not persisted",
+                "the selection was not persisted",
+            )
+
+            # The integer shape. Dear PyGui 2.2 handed this callback the
+            # selected tab's INTEGER item id (the v2.6.1 CU-smoke bug). The
+            # 2.3.1 install (2026-08-07) hands it the alias string, even after
+            # set_value(<int id>) (probed 2026-10-17), so no step in this module
+            # reached the integer path any more: all three tests passed with
+            # _diag_tab_tag_text reduced to a bare str(). Re-deliver the same
+            # selection through the bar's REAL configured callback with the
+            # tab's REAL integer id, so the alias resolution stays guarded
+            # whichever shape the installed DPG delivers.
+            callback = dpg.get_item_configuration("diagnostics_tab_bar")["callback"]
+            callback("diagnostics_tab_bar", dpg.get_alias_id("diag_tab_actions"), None)
+            self.assertEqual(
+                shell.diagnostics_active_tab,
+                "actions",
+                "real integer-app_data selection was not persisted — the "
+                "callback stringified DPG's integer item id and fell through "
+                "to the 'status' default",
             )
 
             shell.rebuild_current_screen()

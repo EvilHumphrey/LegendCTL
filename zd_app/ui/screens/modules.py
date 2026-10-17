@@ -233,6 +233,16 @@ class ModulesScreenState:
     status_kind: str = "info"
     pending_module_id: str = ""
     pending_notes: str = ""
+    # Payload of the most recent Assign / Notes modal REQUEST. Those two
+    # modals are created a rendered frame after the click that asks for them
+    # (the modal-swap seam — see _open_assign_modal), so the create half reads
+    # the payload back off here instead of closing over what the click
+    # captured. That is what makes a second click inside the pending window
+    # open the modal it actually asked for.
+    pending_assign_side: Optional[str] = None
+    pending_assign_is_swap: bool = False
+    pending_notes_side: Optional[str] = None
+    pending_notes_passport: Optional[ModulePassport] = None
     # Archived browser: which side's archives we're viewing, and (for the
     # archived-detail view) which archived entry — addressed by its index
     # within the archived list, plus the filename so we can re-find it
@@ -1843,60 +1853,123 @@ def _on_wizard_discard(shell) -> None:
 
 
 def _open_assign_modal(shell, side: str, *, is_swap: bool) -> None:
+    """Open the first-time-assign / swap modal for one side.
+
+    Modal-swap hop (2026-07-27): this used to build the window inline, right
+    after ``delete_item(TAG_ASSIGN_MODAL)`` — a teardown and a create in ONE
+    render pass. Under the benched DPG modal law (2026-06-11,
+    ``tools/diag_dpg_modal_thread_visibility.py``) the fresh modal then exists
+    but never becomes interactive: Save and Cancel are dead, no exception,
+    nothing logged. ``no_close=False`` makes that reachable by the plainest
+    path there is — the titlebar X only HIDES the window, so open Assign,
+    dismiss with the X, open Assign again. Routing through
+    ``shell._defer_modal_swap`` puts a rendered frame between teardown and
+    create, which is what cures the law. The ``getattr`` guard mirrors
+    :func:`_open_zip_preview`: the mocked suite hands screens lightweight fake
+    shells that have no seam, and the inline branch preserves the synchronous
+    contract those paths rely on.
+
+    Coalescing policy — **last request wins**. The seam is drop-first: while a
+    swap with the same key is pending, later requests return immediately. With
+    the payload captured in the closure that would mean clicking Swap on the
+    right card one frame after Assign on the left silently opens the LEFT
+    assign modal. So ``side``/``is_swap`` are parked on the screen state at
+    request time and re-read at create time; the last click inside the window
+    is the one that opens. One logical key for the site, deliberately not one
+    key per payload — independent keys would let two of these be requested at
+    once, which is the poison the seam exists to avoid.
+
+    ``owner_screen`` scopes the request to Modules. The create half captures
+    the screen state, so a request made a frame before the user navigates away
+    must be abandoned rather than opened over the destination screen with a
+    Save button still wired to this screen's passport side.
+    """
+
     state = _ensure_state(shell)
+    # Request-time, not create-time: nothing built below reads the draft
+    # fields, and a request whose create is superseded must still have
+    # cleared the previous draft.
     state.pending_module_id = ""
     state.pending_notes = ""
+    state.pending_assign_side = side
+    state.pending_assign_is_swap = is_swap
+
+    def _open() -> None:
+        open_side = state.pending_assign_side or side
+        open_is_swap = state.pending_assign_is_swap
+        side_label = t(f"modules.side.{open_side}")
+        title_key = (
+            "modules.assign.title_swap" if open_is_swap else "modules.assign.title_assign"
+        )
+        body_key = (
+            "modules.assign.body_swap" if open_is_swap else "modules.assign.body_assign"
+        )
+        try:
+            with dpg.window(
+                tag=TAG_ASSIGN_MODAL,
+                label=t(title_key, side=side_label),
+                modal=True,
+                no_close=False,
+                no_resize=True,
+                width=560,
+                height=380,
+            ):
+                dpg.add_text(t(body_key), wrap=520)
+                dpg.add_spacer(height=8)
+                dpg.add_text(t("modules.assign.module_id_label"))
+                dpg.add_input_text(
+                    tag=TAG_ASSIGN_INPUT_ID,
+                    width=520,
+                    hint=t("modules.assign.module_id_hint"),
+                )
+                dpg.add_spacer(height=8)
+                dpg.add_text(t("modules.assign.notes_label"))
+                dpg.add_input_text(
+                    tag=TAG_ASSIGN_INPUT_NOTES,
+                    multiline=True,
+                    width=520,
+                    height=120,
+                    hint=t("modules.assign.notes_hint"),
+                )
+                dpg.add_spacer(height=8)
+                with dpg.group(horizontal=True):
+                    dpg.add_button(
+                        label=t("modules.assign.save"),
+                        tag=TAG_ASSIGN_SAVE,
+                        width=160,
+                        callback=lambda *_a, s=open_side: _on_save_assign(shell, s),
+                    )
+                    dpg.add_button(
+                        label=t("modules.assign.cancel"),
+                        tag=TAG_ASSIGN_CANCEL,
+                        width=120,
+                        callback=lambda *_a: _close_assign_modal(),
+                    )
+        except SystemError:
+            return
+
+    modal_swap = getattr(shell, "_defer_modal_swap", None)
+    if callable(modal_swap):
+        try:
+            modal_swap(
+                _open,
+                delete_tags=(TAG_ASSIGN_MODAL,),
+                key="modules_assign_modal",
+                owner_screen="modules",
+            )
+        except SystemError:
+            # Unarmed the seam runs the teardown inline, so a missing DPG
+            # context raises out of the same does_item_exist this function
+            # used to guard directly. Keep returning rather than propagating.
+            return
+        return
+
     try:
         if dpg.does_item_exist(TAG_ASSIGN_MODAL):
             dpg.delete_item(TAG_ASSIGN_MODAL)
     except SystemError:
         return
-    side_label = t(f"modules.side.{side}")
-    title_key = "modules.assign.title_swap" if is_swap else "modules.assign.title_assign"
-    body_key = "modules.assign.body_swap" if is_swap else "modules.assign.body_assign"
-    try:
-        with dpg.window(
-            tag=TAG_ASSIGN_MODAL,
-            label=t(title_key, side=side_label),
-            modal=True,
-            no_close=False,
-            no_resize=True,
-            width=560,
-            height=380,
-        ):
-            dpg.add_text(t(body_key), wrap=520)
-            dpg.add_spacer(height=8)
-            dpg.add_text(t("modules.assign.module_id_label"))
-            dpg.add_input_text(
-                tag=TAG_ASSIGN_INPUT_ID,
-                width=520,
-                hint=t("modules.assign.module_id_hint"),
-            )
-            dpg.add_spacer(height=8)
-            dpg.add_text(t("modules.assign.notes_label"))
-            dpg.add_input_text(
-                tag=TAG_ASSIGN_INPUT_NOTES,
-                multiline=True,
-                width=520,
-                height=120,
-                hint=t("modules.assign.notes_hint"),
-            )
-            dpg.add_spacer(height=8)
-            with dpg.group(horizontal=True):
-                dpg.add_button(
-                    label=t("modules.assign.save"),
-                    tag=TAG_ASSIGN_SAVE,
-                    width=160,
-                    callback=lambda *_a, s=side: _on_save_assign(shell, s),
-                )
-                dpg.add_button(
-                    label=t("modules.assign.cancel"),
-                    tag=TAG_ASSIGN_CANCEL,
-                    width=120,
-                    callback=lambda *_a: _close_assign_modal(),
-                )
-    except SystemError:
-        return
+    _open()
 
 
 def _close_assign_modal() -> None:
@@ -1965,6 +2038,31 @@ def _save_assign(
 
 
 def _open_notes_modal(shell, side: str) -> None:
+    """Open the notes editor for one side's passport.
+
+    Modal-swap hop (2026-07-27): same cure and same reachability as
+    :func:`_open_assign_modal` — the inline ``delete_item`` -> ``dpg.window``
+    pair meant Save/Cancel were dead after a titlebar-X dismiss and reopen.
+
+    Split of work across the seam: the service lookup and the two failure
+    branches stay at REQUEST time, so an unavailable service or a missing
+    passport still reports synchronously and never queues a modal. Only the
+    window construction is deferred.
+
+    Coalescing policy — **last request wins**, for the same reason as the
+    assign modal: the seam drops duplicates, so Edit Notes on the right card a
+    frame after the left would otherwise open the LEFT passport's notes under
+    the right card's title. The resolved passport (title, body text) and the
+    side the Save callback writes back to are parked on the screen state at
+    request time and re-read at create time. The passport is snapshotted
+    rather than re-fetched in the create half so the deferred path cannot
+    develop a failure mode the synchronous path does not have.
+
+    ``owner_screen`` scopes the request to Modules: navigating away while the
+    swap is pending must abandon the create, not open a notes editor over the
+    destination whose Save still writes this screen's passport.
+    """
+
     state = _ensure_state(shell)
     service = _service(shell)
     if service is None:
@@ -1979,47 +2077,70 @@ def _open_notes_modal(shell, side: str) -> None:
         shell.rebuild_current_screen()
         return
     state.pending_notes = passport.notes
+    state.pending_notes_side = side
+    state.pending_notes_passport = passport
+
+    def _open() -> None:
+        target = state.pending_notes_passport or passport
+        open_side = state.pending_notes_side or side
+        try:
+            with dpg.window(
+                tag=TAG_NOTES_MODAL,
+                label=t("modules.notes.title", module_id=target.module_id),
+                modal=True,
+                no_close=False,
+                no_resize=True,
+                width=560,
+                height=340,
+            ):
+                dpg.add_text(t("modules.notes.body"), wrap=520)
+                dpg.add_spacer(height=8)
+                dpg.add_input_text(
+                    tag=TAG_NOTES_INPUT,
+                    multiline=True,
+                    width=520,
+                    height=180,
+                    hint=t("modules.notes.hint"),
+                    default_value=target.notes,
+                )
+                dpg.add_spacer(height=8)
+                with dpg.group(horizontal=True):
+                    dpg.add_button(
+                        label=t("modules.notes.save"),
+                        tag=TAG_NOTES_SAVE,
+                        width=160,
+                        callback=lambda *_a, s=open_side: _on_save_notes(shell, s),
+                    )
+                    dpg.add_button(
+                        label=t("modules.notes.cancel"),
+                        tag=TAG_NOTES_CANCEL,
+                        width=120,
+                        callback=lambda *_a: _close_notes_modal(),
+                    )
+        except SystemError:
+            return
+
+    modal_swap = getattr(shell, "_defer_modal_swap", None)
+    if callable(modal_swap):
+        try:
+            modal_swap(
+                _open,
+                delete_tags=(TAG_NOTES_MODAL,),
+                key="modules_notes_modal",
+                owner_screen="modules",
+            )
+        except SystemError:
+            # See _open_assign_modal: unarmed, the inline teardown inside the
+            # seam is where a missing DPG context now surfaces.
+            return
+        return
+
     try:
         if dpg.does_item_exist(TAG_NOTES_MODAL):
             dpg.delete_item(TAG_NOTES_MODAL)
     except SystemError:
         return
-    try:
-        with dpg.window(
-            tag=TAG_NOTES_MODAL,
-            label=t("modules.notes.title", module_id=passport.module_id),
-            modal=True,
-            no_close=False,
-            no_resize=True,
-            width=560,
-            height=340,
-        ):
-            dpg.add_text(t("modules.notes.body"), wrap=520)
-            dpg.add_spacer(height=8)
-            dpg.add_input_text(
-                tag=TAG_NOTES_INPUT,
-                multiline=True,
-                width=520,
-                height=180,
-                hint=t("modules.notes.hint"),
-                default_value=passport.notes,
-            )
-            dpg.add_spacer(height=8)
-            with dpg.group(horizontal=True):
-                dpg.add_button(
-                    label=t("modules.notes.save"),
-                    tag=TAG_NOTES_SAVE,
-                    width=160,
-                    callback=lambda *_a, s=side: _on_save_notes(shell, s),
-                )
-                dpg.add_button(
-                    label=t("modules.notes.cancel"),
-                    tag=TAG_NOTES_CANCEL,
-                    width=120,
-                    callback=lambda *_a: _close_notes_modal(),
-                )
-    except SystemError:
-        return
+    _open()
 
 
 def _close_notes_modal() -> None:
@@ -2135,6 +2256,22 @@ def _refresh_wizard_widgets(orchestrator: CharacterizationOrchestrator) -> None:
 
 
 def _open_export_modal(shell) -> None:
+    """Open the Diagnostic Bundle export options modal.
+
+    Modal-swap hop (2026-07-27): same cure and same titlebar-X reachability as
+    :func:`_open_assign_modal`. This is also the modal :func:`_open_zip_preview`
+    hands off FROM, so leaving it inline meant the first modal of that chain
+    could already be dead before Generate ZIP was ever clickable.
+
+    The bundle-service lookup and its unavailable branch stay at REQUEST time
+    so the failure path remains synchronous. Nothing else needs splitting:
+    this site carries no per-request payload — the three form widgets read the
+    export preferences off the screen state, which is where
+    :func:`_read_export_form` writes them back — so the seam's plain
+    drop-first coalescing is the right policy and a duplicate request opens
+    the same modal it would have anyway.
+    """
+
     state = _ensure_state(shell)
     bundle = _bundle_service(shell)
     if bundle is None:
@@ -2142,72 +2279,91 @@ def _open_export_modal(shell) -> None:
         state.status_kind = "warn"
         shell.rebuild_current_screen()
         return
+
+    def _open() -> None:
+        try:
+            with dpg.window(
+                tag=TAG_EXPORT_MODAL,
+                label=t("modules.export.modal_title"),
+                modal=True,
+                no_close=False,
+                no_resize=True,
+                width=600,
+                height=420,
+            ):
+                dpg.add_text(t("modules.export.modal_body"), wrap=560)
+                dpg.add_spacer(height=8)
+                dpg.add_checkbox(
+                    tag=TAG_EXPORT_INCLUDE_ARCHIVED,
+                    label=t("modules.export.include_archived"),
+                    default_value=bool(state.export_include_archived),
+                )
+                dpg.add_spacer(height=6)
+                dpg.add_text(t("modules.export.health_limit_label"))
+                dpg.add_combo(
+                    tag=TAG_EXPORT_HEALTH_LIMIT,
+                    items=list(_HEALTH_REPORT_LIMIT_CHOICES),
+                    default_value=str(int(state.export_health_limit)),
+                    width=120,
+                )
+                dpg.add_spacer(height=6)
+                dpg.add_text(t("modules.export.wear_window_label"))
+                dpg.add_combo(
+                    tag=TAG_EXPORT_WEAR_WINDOW,
+                    items=list(_WEAR_WINDOW_CHOICES),
+                    default_value=str(int(state.export_wear_window_days)),
+                    width=120,
+                )
+                dpg.add_spacer(height=10)
+                dpg.add_text(
+                    t("modules.export.claim_boundary_footer"),
+                    color=shell.COLORS["muted"],
+                    wrap=560,
+                )
+                dpg.add_spacer(height=10)
+                with dpg.group(horizontal=True):
+                    dpg.add_button(
+                        label=t("modules.export.generate_md_button"),
+                        tag=TAG_EXPORT_GENERATE_MD,
+                        width=200,
+                        callback=lambda *_a: _on_generate_markdown(shell),
+                    )
+                    dpg.add_button(
+                        label=t("modules.export.generate_zip_button"),
+                        tag=TAG_EXPORT_GENERATE_ZIP,
+                        width=200,
+                        callback=lambda *_a: _on_generate_zip(shell),
+                    )
+                    dpg.add_button(
+                        label=t("modules.export.cancel_button"),
+                        tag=TAG_EXPORT_CANCEL,
+                        width=120,
+                        callback=lambda *_a: _close_export_modal(),
+                    )
+        except SystemError:
+            return
+
+    modal_swap = getattr(shell, "_defer_modal_swap", None)
+    if callable(modal_swap):
+        try:
+            modal_swap(
+                _open,
+                delete_tags=(TAG_EXPORT_MODAL,),
+                key="modules_export_modal",
+                owner_screen="modules",
+            )
+        except SystemError:
+            # See _open_assign_modal: unarmed, the inline teardown inside the
+            # seam is where a missing DPG context now surfaces.
+            return
+        return
+
     try:
         if dpg.does_item_exist(TAG_EXPORT_MODAL):
             dpg.delete_item(TAG_EXPORT_MODAL)
     except SystemError:
         return
-    try:
-        with dpg.window(
-            tag=TAG_EXPORT_MODAL,
-            label=t("modules.export.modal_title"),
-            modal=True,
-            no_close=False,
-            no_resize=True,
-            width=600,
-            height=420,
-        ):
-            dpg.add_text(t("modules.export.modal_body"), wrap=560)
-            dpg.add_spacer(height=8)
-            dpg.add_checkbox(
-                tag=TAG_EXPORT_INCLUDE_ARCHIVED,
-                label=t("modules.export.include_archived"),
-                default_value=bool(state.export_include_archived),
-            )
-            dpg.add_spacer(height=6)
-            dpg.add_text(t("modules.export.health_limit_label"))
-            dpg.add_combo(
-                tag=TAG_EXPORT_HEALTH_LIMIT,
-                items=list(_HEALTH_REPORT_LIMIT_CHOICES),
-                default_value=str(int(state.export_health_limit)),
-                width=120,
-            )
-            dpg.add_spacer(height=6)
-            dpg.add_text(t("modules.export.wear_window_label"))
-            dpg.add_combo(
-                tag=TAG_EXPORT_WEAR_WINDOW,
-                items=list(_WEAR_WINDOW_CHOICES),
-                default_value=str(int(state.export_wear_window_days)),
-                width=120,
-            )
-            dpg.add_spacer(height=10)
-            dpg.add_text(
-                t("modules.export.claim_boundary_footer"),
-                color=shell.COLORS["muted"],
-                wrap=560,
-            )
-            dpg.add_spacer(height=10)
-            with dpg.group(horizontal=True):
-                dpg.add_button(
-                    label=t("modules.export.generate_md_button"),
-                    tag=TAG_EXPORT_GENERATE_MD,
-                    width=200,
-                    callback=lambda *_a: _on_generate_markdown(shell),
-                )
-                dpg.add_button(
-                    label=t("modules.export.generate_zip_button"),
-                    tag=TAG_EXPORT_GENERATE_ZIP,
-                    width=200,
-                    callback=lambda *_a: _on_generate_zip(shell),
-                )
-                dpg.add_button(
-                    label=t("modules.export.cancel_button"),
-                    tag=TAG_EXPORT_CANCEL,
-                    width=120,
-                    callback=lambda *_a: _close_export_modal(),
-                )
-    except SystemError:
-        return
+    _open()
 
 
 def _close_export_modal() -> None:
@@ -2316,6 +2472,7 @@ def _open_zip_preview(
                 diagnostic_bundle_preview.PREVIEW_MODAL_TAG,
             ),
             key="modules_export_zip_preview",
+            owner_screen="modules",
         )
     else:
         _close_export_modal()

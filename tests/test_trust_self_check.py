@@ -162,7 +162,12 @@ class TrustSelfCheckEvidenceTests(unittest.TestCase):
             "Driver/virtual-device scan did not run: no footprint claim is made for this run.",
         )
 
-    def test_normal_tree_clean_rows_use_parsed_python_count(self) -> None:
+    def test_normal_tree_clean_rows_count_the_scope_they_name(self) -> None:
+        # The sentences name "zd_app + main_zd.py" and "zd_app", so they report
+        # the named-scope count. The scan itself also opens the first-party
+        # modules those files import from outside the package tree; that wider
+        # set is ``python_file_count`` and is deliberately not the number
+        # rendered beside a narrower scope.
         result = trust_self_check.build_trust_self_check(now=_NOW)
 
         self.assertTrue(result.scan_integrity.readable)
@@ -174,11 +179,17 @@ class TrustSelfCheckEvidenceTests(unittest.TestCase):
             result.scan_integrity.python_file_count,
         )
         self.assertIn(
-            f"({result.scan_integrity.python_file_count} Python files)",
+            f"({result.scan_integrity.named_scope_python_file_count} Python files)",
             _row(result, "network").evidence,
         )
+        # The driver sentence names zd_app alone, so its number excludes the
+        # entry module that sits beside the package as well as the closure.
+        self.assertEqual(
+            result.scan_integrity.named_scope_package_file_count,
+            result.scan_integrity.named_scope_python_file_count - 1,
+        )
         self.assertIn(
-            f"across {result.scan_integrity.python_file_count} package file(s)",
+            f"across {result.scan_integrity.named_scope_package_file_count} package file(s)",
             _row(result, "drivers").evidence,
         )
 
@@ -390,7 +401,7 @@ Copyable evidence for this run. Observed for THIS process THIS session - not a s
 | Claim | Evidence | Boundary |
 | --- | --- | --- |
 | No network: this build imports no networking modules. | Static scan of zd_app + main_zd.py \(2 Python files\) found 0 imports of socket/http/urllib/requests/ssl. No webbrowser.open handoff was found in zd_app. | Observed for THIS process THIS session - not a system-wide audit. |
-| No drivers / virtual devices: this shipped app footprint contains no driver or virtual-device package artifacts. | Static scan of zd_app found 0 driver/virtual-device artifacts across 2 package file\(s\). | Observed for THIS process THIS session - not a system-wide audit. This is an app-footprint check, not a whole-PC or game-compatibility clearance. |
+| No drivers / virtual devices: this shipped app footprint contains no driver or virtual-device package artifacts. | Static scan of zd_app found 0 driver/virtual-device artifacts across 1 package file\(s\). | Observed for THIS process THIS session - not a system-wide audit. This is an app-footprint check, not a whole-PC or game-compatibility clearance. |
 | No background service / autostart: this app installs no service and registers nothing to start with Windows; closing the window stops this process. | Design property of this build - the app ships no service or autostart installer \(see the import/packaging gates\). This session: source run \(not frozen\); process id 4242; executable path \(scrubbed\): %USERPROFILE%\\LegendCTL\\python.exe. Windows services, scheduled tasks, and Run keys are not inspected. | Observed for THIS process THIS session - not a system-wide audit. |
 | Local data location + scrub posture: app data stays local and displayed paths are scrubbed to placeholders. | Default data directory \(scrubbed\): %APPDATA%\\ZDUltimateLegend. Copy/export text uses path scrubbing and Markdown escaping before it is shareable. | Observed for THIS process THIS session - not a system-wide audit. |
 | Build identity: report what this process can observe. | Version 2.3.1; build commit abc123; build date 2026-07-01; run mode source run \(not frozen\). | Observed for THIS process THIS session - not a system-wide audit. |
@@ -447,7 +458,7 @@ No network: this build imports no networking modules.
   Observed for THIS process THIS session - not a system-wide audit.
 
 No drivers / virtual devices: this shipped app footprint contains no driver or virtual-device package artifacts.
-  Static scan of zd_app found 0 driver/virtual-device artifacts across 2 package file(s).
+  Static scan of zd_app found 0 driver/virtual-device artifacts across 1 package file(s).
   Observed for THIS process THIS session - not a system-wide audit. This is an app-footprint check, not a whole-PC or game-compatibility clearance.
 
 No background service / autostart: this app installs no service and registers nothing to start with Windows; closing the window stops this process.

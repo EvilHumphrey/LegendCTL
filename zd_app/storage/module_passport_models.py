@@ -90,6 +90,19 @@ def sanitize_module_notes(text: str) -> str:
     package. CRLF/CR normalise to LF, C0 controls strip, trailing whitespace
     per line trims, runs of >=3 newlines collapse to 2, then global trim,
     then cap.
+
+    **Deliberate divergence from that twin: no ``scrub_paths`` here.** The
+    wear-ledger note scrubs at rest because its raw ``events.jsonl`` is itself
+    a bundle member. A module note is not: every export path re-scrubs it
+    (``diagnostic_bundle/service.py`` sanitises ``module_id`` and ``notes``
+    for the JSON member, the report.md body, archived passports, and the
+    archive member filename). Scrubbing here would instead destroy local data
+    fidelity -- a user who deliberately records "calibration files live in
+    D:\\rigs\\left" would find their own note silently truncated the next time
+    they merely re-saved it, with no export leak closed in exchange.
+    Reviewed and kept this way during the 2026-07-26 security sweep; if the
+    policy ever becomes redact-at-rest, it needs a migration and a
+    round-trip test, not a one-line addition here.
     """
 
     if not text:

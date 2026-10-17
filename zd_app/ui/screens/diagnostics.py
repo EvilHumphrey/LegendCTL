@@ -200,24 +200,125 @@ def build(shell, parent: str) -> None:
         # without persistence it would snap back to "status" every tick. The
         # developer panels collapse into one Developer tab that only mounts
         # when the Developer toggle is on.
+        active_tab_id = getattr(shell, "diagnostics_active_tab", "status")
+        # Real dpg 2.2 selects the first VISIBLE tab on the first rendered
+        # frame, even after a same-pass set_value — so any build that lands on
+        # a non-first tab paints ONE frame of the wrong tab before settling.
+        # Keeping the tabs that PRECEDE the active one hidden for that frame
+        # makes the active tab the first visible one; the deferred reveal below
+        # restores the stable tab order on the next pass.
+        #
+        # This guard originally keyed off the trust-front-door focus attribute,
+        # so it only covered the front-door LANDING build. That attribute is
+        # one-shot and consumed at the bottom of this function, which left
+        # every LATER rebuild of the same screen unguarded — a presence
+        # transition (`_request_presence_rebuild`) or a right-rail resize
+        # threshold crossing deletes and recreates this tab bar with the
+        # attribute already spent. The real-render probe measured the result on
+        # the trust surface: frame 0 Guidance, frame 1 **Status**, frame 2+
+        # Guidance (measured after the v2.6.2 release —
+        # `tests/isolated_diagnostics_tab_persistence.py`). Keying off tab
+        # ORDER instead covers every build path and subsumes the front-door
+        # case, so the attribute no longer gates the guard at all.
+        preceding_tab_tags = _preceding_tab_tags(
+            active_tab_id, _mounted_tab_ids(shell)
+        )
         with dpg.tab_bar(
             tag="diagnostics_tab_bar",
             callback=lambda _s, selected_tab, _u: _remember_active_tab(shell, selected_tab),
         ):
-            with dpg.tab(label=t("diagnostics.tab.status"), tag="diag_tab_status"):
+            with dpg.tab(
+                label=t("diagnostics.tab.status"),
+                tag="diag_tab_status",
+                show="diag_tab_status" not in preceding_tab_tags,
+            ):
                 _build_status_tab(shell, state)
-            with dpg.tab(label=t("diagnostics.tab.actions"), tag="diag_tab_actions"):
+            with dpg.tab(
+                label=t("diagnostics.tab.actions"),
+                tag="diag_tab_actions",
+                show="diag_tab_actions" not in preceding_tab_tags,
+            ):
                 _build_actions_tab(shell)
-            with dpg.tab(label=t("diagnostics.tab.guidance"), tag="diag_tab_guidance"):
+            with dpg.tab(
+                label=t("diagnostics.tab.guidance"),
+                tag="diag_tab_guidance",
+                show="diag_tab_guidance" not in preceding_tab_tags,
+            ):
                 _build_guidance_tab(shell)
             if getattr(shell.settings, "developer_panels_visible", False):
                 with dpg.tab(label=t("diagnostics.tab.developer"), tag="diag_tab_developer"):
                     _build_developer_tab(shell)
 
-        active_tab_tag = _diag_tab_id_to_tag(getattr(shell, "diagnostics_active_tab", "status"))
+        active_tab_tag = _diag_tab_id_to_tag(active_tab_id)
         if dpg.does_item_exist(active_tab_tag):
             dpg.set_value("diagnostics_tab_bar", active_tab_tag)
+        if preceding_tab_tags:
+            # Bind the reveal to THIS build's integer item ids, not to the
+            # reusable aliases. If another rebuild replaces the tab bar before
+            # this call drains, the old ids no longer exist and the reveal
+            # no-ops — whereas an alias-keyed reveal would resolve to the NEW
+            # bar and un-hide its preceding tabs before its first rendered
+            # frame, reinstating the very flash this guard prevents.
+            hidden_tab_ids = tuple(
+                dpg.get_alias_id(tab_tag)
+                for tab_tag in preceding_tab_tags
+                if dpg.does_item_exist(tab_tag)
+            )
+
+            def reveal_preceding_tabs() -> None:
+                for tab_id in hidden_tab_ids:
+                    if dpg.does_item_exist(tab_id):
+                        dpg.show_item(tab_id)
+
+            defer = getattr(shell, "_defer_ui_call", None)
+            if callable(defer):
+                defer(reveal_preceding_tabs)
+            else:
+                reveal_preceding_tabs()
         _consume_trust_front_door_focus(shell)
+
+
+def _mounted_tab_ids(shell) -> tuple[str, ...]:
+    """The tab ids this build will actually create, in order.
+
+    The Developer tab only mounts when the Developer toggle is on, so it must
+    not be counted as "present" when computing which tabs precede the active
+    one — see :func:`_preceding_tab_tags`.
+    """
+
+    developer_mounted = bool(
+        getattr(shell.settings, "developer_panels_visible", False)
+    )
+    return tuple(
+        tab_id
+        for tab_id in DIAGNOSTICS_TAB_IDS
+        if tab_id != "developer" or developer_mounted
+    )
+
+
+def _preceding_tab_tags(
+    active_tab_id: str, mounted_tab_ids: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Tags of the mounted tabs that come BEFORE the active one.
+
+    Those are hidden for the construction frame so the active tab is the first
+    visible one (the first-visible-tab law — see :func:`build`).
+
+    Returns empty when the active tab is not among the mounted ids. That is the
+    real case where the user was last on Developer and then turned the Developer
+    toggle off: the tab no longer exists, so there is nothing to protect, and
+    treating every mounted tab as "preceding" would hide the ENTIRE bar for a
+    frame — a blank tab bar, which is worse than the flash being guarded
+    against. Falling back to no guard restores plain (pre-guard) behaviour for
+    that one build, and DPG simply selects the first tab.
+    """
+
+    if active_tab_id not in mounted_tab_ids:
+        return ()
+    return tuple(
+        f"diag_tab_{tab_id}"
+        for tab_id in mounted_tab_ids[: mounted_tab_ids.index(active_tab_id)]
+    )
 
 
 def _remember_active_tab(shell, selected_tab) -> None:
