@@ -19,7 +19,7 @@ One rendered frame between teardown and create cures it, which is what
 
 Support Guide differs from Save As in one way that matters: it carries a
 payload. Three Diagnostics buttons open three different guides
-(``screens/diagnostics.py:494-496``), and same-key coalescing is DROP-FIRST,
+(the support-guide buttons in ``screens/diagnostics.py``), and same-key coalescing is DROP-FIRST,
 so keying alone would display the OLDER guide if a second button were clicked
 inside the pending window. The site therefore stores the requested topic and
 resolves it in the deferred create -- ``test_second_topic_replaces_the_first_

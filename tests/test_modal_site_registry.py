@@ -328,7 +328,7 @@ MODAL_SITE_REGISTRY: tuple[RegistryEntry, ...] = (
             "of this entry: the inline shape is only poison when a stale item "
             "can still exist at create time, and here it cannot. Unlike every "
             "site migrated onto the seam, this modal carries an explicit "
-            "on_close (diagnostic_bundle_preview.py:78) routing to _cancel(), "
+            "on_close (in the preview's window kwargs) routing to _cancel(), "
             "which DELETES via close_preview_modal rather than leaving the "
             "titlebar X to merely hide it -- so the X-dismiss-then-reopen repro "
             "that reaches every other inline site does not reach this one. With "
@@ -446,8 +446,10 @@ MODAL_SITE_REGISTRY: tuple[RegistryEntry, ...] = (
             "slot-held cases) and by tests/test_safe_import_picker_return.py. "
             "The single-entry claim is pinned, not just stated: "
             "test_safe_import_front_door_has_one_entry fails if anything else "
-            "names open_file_select or open_safe_import -- called, passed as a "
-            "callback, imported, or as a getattr string."
+            "names open_file_select or open_safe_import in the ordinary ways -- "
+            "called, passed as a callback, imported, or as a literal getattr "
+            "string. A tripwire for ordinary wiring, not a proof; its "
+            "docstring lists what it misses."
         ),
         seam_via=(f"{SAFE_IMPORT}::open_file_select",),
     ),
@@ -613,10 +615,15 @@ def _references_to(name: str) -> list[str]:
 
     Unlike ``find_callers`` this counts any load of the name, call or not, so a
     bound method handed over as a callback is seen too. It also counts the name
-    as a string argument to a call (``getattr(shell, "name")``) and as an
-    imported name (``from ... import name as alias``), the two static ways to
-    reach it under another spelling. Sorted and de-duplicated by function.
-    Still a name match: a name assembled at runtime is out of its reach.
+    as a literal string argument to a call (``getattr(shell, "name")``) and as
+    an imported name (``from ... import name as alias``). Walks ``zd_app`` and
+    ``main_zd.py``. Sorted and de-duplicated by function.
+
+    A tripwire for ordinary wiring, not a proof. It misses indirection: the name
+    held in a constant or variable, looked up through ``vars()`` or a dict,
+    built in an f-string, or given as a keyword default. It can also over-report:
+    ``hasattr(shell, "name")`` or a log call whose argument is exactly the name
+    counts as a reference.
     """
 
     hits: set[str] = set()
@@ -645,7 +652,7 @@ def _references_to(name: str) -> list[str]:
                 hits.add(f"{relpath}::{'.'.join(scope) or '<module>'}")
             walk(child, relpath, scope)
 
-    for path in iter_source_files(PACKAGE_ROOT):
+    for path in [*iter_source_files(PACKAGE_ROOT), REPO_ROOT / "main_zd.py"]:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         walk(tree, path.relative_to(REPO_ROOT).as_posix(), [])
     return sorted(hits)

@@ -23,8 +23,8 @@ so -- with its per-field breakdown and Retry button -- cannot be seen. Nothing
 raises and nothing is logged.
 
 This is the repo's recurring shape: the same modal's other seam-riding caller,
-``_open_profile_apply_readback_details_modal``, was cured at
-``app_shell.py:4790-4794`` with the same tag in ``delete_tags``, and the Safe
+``_open_profile_apply_readback_details_modal``, was cured by
+routing through the seam with the same tag in ``delete_tags``, and the Safe
 Import sibling never got it.
 
 Like the precedents this file is modelled on

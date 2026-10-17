@@ -887,7 +887,9 @@ def find_callers(
     """``relpath::qualname`` of every function in ``root`` calling ``function_name``.
 
     Attribute and bare-name calls both count; this is a name match, not a
-    resolved-symbol match, so it over-reports rather than under-reports.
+    resolved-symbol match. It sees CALLS only: a bound method handed over as a
+    callback (``callback=shell.fn``), a ``getattr`` string or an aliased import
+    is not counted, so an empty result is not proof that nothing reaches it.
     """
 
     hits: list[str] = []

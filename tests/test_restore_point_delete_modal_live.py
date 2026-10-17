@@ -9,7 +9,7 @@ render pass. Under the benched DPG modal law (2026-06-11,
 never becomes interactive: the Confirm button is dead, no exception, nothing
 logged. The screen's own docstring said it mirrored
 ``AppShell.confirm_delete_named_wrapper_profile`` -- it mirrored the version
-that was later cured at ``app_shell.py:4807-4811`` and never carried across.
+that was later cured in that method and never carried across.
 That is this repo's recurring defect shape: a fix applied at one call site and
 not its sibling.
 
@@ -264,12 +264,12 @@ class RestorePointDeleteModalLiveTests(unittest.TestCase):
         """The second, separate way this modal could fail to appear.
 
         Delete is chosen from inside the row's ``More`` menu, which is a
-        ``dpg.popup`` -- the only one in the app. DPG defaults
+        ``dpg.popup`` -- the only one in a build that has it. DPG defaults
         ``no_open_over_existing_popup`` to True, which ImGui reads as
         NoOpenOverExistingPopup: the modal does not open AT ALL while a popup is
         up. Confirmed live 2026-08-01 on a build that carries the ``More``
-        row action (not every build does): clicking ``Delete`` in the popup left the popup standing and no
-        confirm modal appeared. A destructive action silently did nothing.
+        row action (not every build does): clicking ``Delete`` in the popup
+        left the popup standing and no confirm modal appeared. A destructive action silently did nothing.
 
         This is NOT the same-pass modal law, and the seam does not fix it: the
         seam was already in use and the modal still never opened. The symptoms

@@ -345,9 +345,9 @@ def known_hidden_paths_from_logs(
             except (ValueError, RecursionError):
                 # RecursionError is a RuntimeError, NOT a ValueError, so the
                 # old json.JSONDecodeError-only catch let a deeply-nested line
-                # in a local capture file escape all the way out through
-                # probe_hidden_transport() into a DPG callback. Reachable with
-                # no device write at all (a transport recheck reads these logs).
+                # in a local capture file escape this reader and crash whichever
+                # caller asked for the paths. Reading these logs needs no device
+                # write at all, so a corrupt capture file was enough.
                 continue
             path = payload.get("path")
             if not isinstance(path, str):
