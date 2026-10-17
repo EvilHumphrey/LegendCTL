@@ -56,6 +56,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from tests.r2_shell_test_helpers import make_shell
+from zd_app import i18n
 
 
 def _make_shell():
@@ -513,6 +514,69 @@ class ModalSwapTests(unittest.TestCase):
             any("save_as" in line for line in logs.output),
             f"the dropped request must name itself in the log: {logs.output}",
         )
+
+    def test_a_dropped_user_request_says_so_in_the_footer(self) -> None:
+        # The log line alone left the user with nothing on screen when the
+        # winning transition's own create bailed. A user-click request now
+        # gets a neutral footer line (success=None: not an error).
+        shell = _make_shell()
+        shell._defer_ui_armed = True
+        shell._update_apply_status = MagicMock()
+
+        with _SwapRecorder():
+            shell._defer_modal_swap(lambda: None, hide_tags=("preview",), key="confirm")
+            shell._drain_deferred_ui_calls()  # teardown pass
+            shell._defer_modal_swap(lambda: None, key="save_as", notify_if_dropped=True)
+
+        shell._update_apply_status.assert_called_once_with(
+            i18n.t("shell.modal_request_dropped"), None
+        )
+
+    def test_a_dropped_async_request_leaves_the_jobs_result_line_alone(self) -> None:
+        # A job's on_done writes its own result ("applied 3 of 5, 2 failed")
+        # and THEN requests its modal, in the same tick. If a user click holds
+        # the slot past its teardown, that request is dropped -- and a "try
+        # again" over the failure report would invite a repeat write. So an
+        # async request (the default) drops with the log line only.
+        shell = _make_shell()
+        shell._defer_ui_armed = True
+        shell._update_apply_status = MagicMock()
+
+        opened: list[str] = []
+        with _SwapRecorder():
+            shell._defer_modal_swap(
+                lambda: opened.append("save_as"), key="wrapper_profile_save_as"
+            )
+            shell._drain_deferred_ui_calls()  # the click's teardown ran
+            shell._defer_modal_swap(
+                lambda: opened.append("details"), key="profile_apply_details"
+            )
+            shell._drain_deferred_ui_calls()
+            shell._drain_deferred_ui_calls()
+
+        self.assertEqual(opened, ["save_as"])  # the async request WAS dropped
+        shell._update_apply_status.assert_not_called()
+
+    def test_coalesced_and_superseding_requests_say_nothing(self) -> None:
+        # Anti-noise for the test above: only the post-teardown drop loses the
+        # request. A same-key duplicate is already pending and will open; a
+        # pre-teardown newcomer supersedes and opens itself.
+        shell = _make_shell()
+        shell._defer_ui_armed = True
+        shell._update_apply_status = MagicMock()
+
+        with _SwapRecorder():
+            shell._defer_modal_swap(lambda: None, key="confirm")
+            shell._defer_modal_swap(
+                lambda: None, key="confirm", notify_if_dropped=True
+            )  # coalesced
+            shell._defer_modal_swap(
+                lambda: None, key="save_as", notify_if_dropped=True
+            )  # supersedes
+            shell._drain_deferred_ui_calls()
+            shell._drain_deferred_ui_calls()
+
+        shell._update_apply_status.assert_not_called()
 
     def test_a_request_before_the_teardown_pass_still_supersedes(self) -> None:
         # Anti-vacuity for the test above: the drop rule must be scoped to

@@ -685,6 +685,7 @@ def _open_note_modal(shell) -> None:
                 delete_tags=(TAG_NOTE_MODAL,),
                 key="wear_ledger_note_modal",
                 owner_screen="wear_ledger",
+                notify_if_dropped=True,
             )
         except SystemError:
             # Unarmed the seam runs the teardown inline, so a missing DPG

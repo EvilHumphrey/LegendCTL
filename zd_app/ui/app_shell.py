@@ -1866,7 +1866,9 @@ class AppShell:
                 dpg.add_button(
                     tag="footer_apply_readback_details_button",
                     label=t("apply.readback.details_action"),
-                    callback=lambda *_args: self._open_profile_apply_readback_details_modal(),
+                    callback=lambda *_args: self._open_profile_apply_readback_details_modal(
+                        user_request=True
+                    ),
                     show=self._has_profile_apply_readback_verification(),
                 )
                 dpg.add_spacer(width=SPACE_MD)
@@ -2665,6 +2667,7 @@ class AppShell:
         hide_tags: tuple[str, ...] = (),
         key: str | None = None,
         owner_screen: str | None = None,
+        notify_if_dropped: bool = False,
     ) -> None:
         """Tear down modals, let a frame render, then run modal-opening ``open_fn``.
 
@@ -2744,6 +2747,16 @@ class AppShell:
         order for safety modals, which is a design change, not a tweak
         here. Do not read this arbiter as covering it.
 
+        ``notify_if_dropped`` is for requests a user click made, where the
+        caller has not just written a result line of its own. When such a
+        request is dropped post-teardown, the footer says so (neutrally): the
+        winner's own window is usually the visible result, but its create can
+        bail (a stale presence token, a newer apply result), and then the click
+        had no visible effect at all. Async requests leave it False, because
+        the job that made them has just written its own result line in the
+        same tick, and a "try again" over a failure report would invite the
+        user to repeat a write they did not ask to repeat.
+
         ``owner_screen`` scopes a transition to the screen that requested
         it. Modules and Wear Ledger modals capture screen state, so their
         create is abandoned if the user navigated away while the swap was
@@ -2810,6 +2823,10 @@ class AppShell:
                 "Modal swap request %s dropped: a transition is mid-teardown",
                 key or "<unkeyed>",
             )
+            # Queueing the request instead would land its create beside the
+            # winner's, which is the shape this arbiter exists to prevent.
+            if notify_if_dropped:
+                self._update_apply_status(t("shell.modal_request_dropped"), None)
             return
 
         def run_open() -> None:
@@ -2845,6 +2862,29 @@ class AppShell:
                 raise
 
         self._defer_ui_call(teardown_then_defer_open)
+
+    def _modal_open_needs_seam(self, tag: str, key: str) -> bool:
+        """Whether an inline-built modal must take the seam this time.
+
+        The front-door rule (``safe_import.open_file_select`` is the first
+        user): a fresh open with nothing before it builds inline, and anything
+        that could share its pass goes through :meth:`_defer_modal_swap`. That
+        is a stale copy of the same window (the titlebar X only HIDES a
+        ``no_close=False`` window, so the next open would delete and create in
+        one pass), the same key already pending, or another transition holding
+        the create slot (typically a threaded job's outcome modal requested in
+        the tick that re-enabled the button). It narrows the landed-modal race
+        rather than closing it; see the scope limit on :meth:`_defer_modal_swap`.
+        """
+
+        if not self._dpg_context_ready:
+            # No context, no frames: nothing can share a pass, and calling
+            # dpg.does_item_exist with no context is a native access violation.
+            return False
+        if dpg.does_item_exist(tag):
+            return True
+        with self._modal_swap_lock:
+            return key in self._pending_modal_swap_keys or self._modal_swap_pending is True
 
     @staticmethod
     def _run_modal_swap_teardown(
@@ -3850,6 +3890,17 @@ class AppShell:
         if not self._zd_write_allowed_or_refuse():
             self.refresh_shell()
             return
+        # Both entries are disabled while a HID job runs (the footer Apply via
+        # _HID_FLOW_BUTTON_TAGS, the Controller > Profiles row Apply via the
+        # disabled settings editor). This is the backstop for a click that
+        # lands before the disable renders, or a future route in: opening the
+        # Device confirm (or re-offering consent) over a running job would let
+        # that job's outcome modal land while it stands, and the seam does not
+        # track landed modals. Busy is checked before consent, as in
+        # _hid_write_available_or_refuse.
+        if self._hid_job_in_flight:
+            self._refuse_hid_job()
+            return
         if not self._consent_pending_write_allowed_or_refuse():
             return
 
@@ -3943,12 +3994,26 @@ class AppShell:
         *,
         on_continue: Callable[[], None],
         on_cancel: Callable[[], None] | None = None,
+        owner_screen: str | None = None,
+        user_request: bool = False,
     ) -> None:
         """Ask before a normal apply proceeds without a restore point.
 
-        This is deliberately a render-thread-only modal. Job-side callers post
-        it through :meth:`_defer_modal_swap`; direct Device callbacks are
-        already render-side and call it as a simple pre-write gate.
+        Render-thread-only. Job-side callers post it through
+        :meth:`_defer_modal_swap`; direct Device callbacks call it as a
+        pre-write gate. Being render-side is not enough on its own: the modal
+        law is thread-independent, so this follows the front-door rule
+        (:meth:`_modal_open_needs_seam`). A fresh open builds inline; an open
+        while another transition holds the create slot (or its own key is
+        pending) takes the seam. This modal's titlebar X runs ``on_close``,
+        which deletes it, so no stale copy normally survives; the stale-copy
+        branch is defensive. A request the arbiter drops leaves the write
+        unstarted, the same outcome as Cancel; ``user_request`` (the manual
+        Device-write gate) also says so in the footer.
+
+        ``owner_screen``: the manual-write gate passes the screen its sliders
+        live on, because Continue re-reads them; the profile-apply job hop is
+        footer-global and passes nothing.
         """
 
         cancel = on_cancel or (lambda: None)
@@ -3958,6 +4023,23 @@ class AppShell:
             self.device_service.log_i18n_event("actions.cancel")
             cancel()
             return
+        swap_key = "apply_no_restore_point_confirm"
+        if self._modal_open_needs_seam(APPLY_NO_RESTORE_POINT_MODAL, swap_key):
+            self._defer_modal_swap(
+                lambda: self._open_no_restore_point_confirm_now(on_continue, cancel),
+                delete_tags=(APPLY_NO_RESTORE_POINT_MODAL,),
+                key=swap_key,
+                owner_screen=owner_screen,
+                notify_if_dropped=user_request,
+            )
+            return
+        self._open_no_restore_point_confirm_now(on_continue, cancel)
+
+    def _open_no_restore_point_confirm_now(
+        self,
+        on_continue: Callable[[], None],
+        cancel: Callable[[], None],
+    ) -> None:
         if dpg.does_item_exist(APPLY_NO_RESTORE_POINT_MODAL):
             dpg.delete_item(APPLY_NO_RESTORE_POINT_MODAL)
 
@@ -4480,7 +4562,11 @@ class AppShell:
             self._manual_no_restore_point_confirmed_for_field[scope_key] = time.monotonic()
             on_continue()
 
-        self._open_no_restore_point_confirm(on_continue=continue_without_restore_point)
+        self._open_no_restore_point_confirm(
+            on_continue=continue_without_restore_point,
+            owner_screen=self.current_screen,
+            user_request=True,
+        )
         return False, False
 
     def _manual_write_is_disclosed(self, field_key: str, *, now: float | None = None) -> bool:
@@ -4675,7 +4761,10 @@ class AppShell:
 
             self._defer_modal_swap(
                 open_no_restore_point_if_current,
-                delete_tags=(APPLY_DEVICE_CONFIRM_MODAL,),
+                # Name every tag the open_fn can build: a stale copy of the
+                # no-restore-point confirm (X-hidden earlier) is deleted here,
+                # in the teardown pass, not inside the create pass.
+                delete_tags=(APPLY_DEVICE_CONFIRM_MODAL, APPLY_NO_RESTORE_POINT_MODAL),
                 key="apply_profile_no_restore_point_confirm",
             )
 
@@ -4939,13 +5028,67 @@ class AppShell:
         return f"{intro}\n\n{bullets}\n\n{outro}"
 
     def _open_apply_device_confirm(self, name: str, profile: WrapperProfile) -> None:
+        """Confirm a profile Apply that carries Device (controller-global) fields.
+
+        Follows the front-door rule (:meth:`_modal_open_needs_seam`): a fresh
+        open builds inline; a reopen after the titlebar X (which only hides
+        this ``no_close=False`` window) or an open while another transition
+        holds the create slot takes the seam, so the delete and the create
+        never share a pass. Its entries are the footer Apply and the
+        Controller > Profiles row Apply (both disabled while a HID job runs),
+        through :meth:`apply_named_wrapper_profile`, which also refuses while
+        a job is in flight; the profile Apply is not screen-bound, so no
+        ``owner_screen``. The controller presence is bound at the click, and a
+        seamed create that finds the controller changed does not open.
+
+        This cures the same-pass hop only. Ownership of the whole Apply flow
+        (pre-write confirm, job, post-write result) is a separate, open design
+        question and is not settled here.
+        """
+
         if not self._dpg_context_ready:
             return
-        if dpg.does_item_exist(APPLY_DEVICE_CONFIRM_MODAL):
-            dpg.delete_item(APPLY_DEVICE_CONFIRM_MODAL)
-
         presence_key = self._controller_presence_key()
         presence_generation = self._controller_presence_generation
+        swap_key = "apply_device_confirm"
+        if self._modal_open_needs_seam(APPLY_DEVICE_CONFIRM_MODAL, swap_key):
+
+            def open_if_still_current() -> None:
+                # A seamed create lands a frame or two after the click. If the
+                # controller changed in between, the confirm's body would show
+                # the new unit's values under a confirm bound to the old one.
+                # Its buttons would refuse anyway; say why now instead.
+                if not self._controller_presence_token_is_current(
+                    presence_key, presence_generation
+                ):
+                    self._discard_stale_controller_operation(
+                        presence_key, presence_generation
+                    )
+                    return
+                self._open_apply_device_confirm_now(
+                    name, profile, presence_key, presence_generation
+                )
+
+            self._defer_modal_swap(
+                open_if_still_current,
+                delete_tags=(APPLY_DEVICE_CONFIRM_MODAL,),
+                key=swap_key,
+                notify_if_dropped=True,
+            )
+            return
+        self._open_apply_device_confirm_now(
+            name, profile, presence_key, presence_generation
+        )
+
+    def _open_apply_device_confirm_now(
+        self,
+        name: str,
+        profile: WrapperProfile,
+        presence_key: tuple[str, str, str],
+        presence_generation: int,
+    ) -> None:
+        if dpg.does_item_exist(APPLY_DEVICE_CONFIRM_MODAL):
+            dpg.delete_item(APPLY_DEVICE_CONFIRM_MODAL)
 
         with dpg.window(
             tag=APPLY_DEVICE_CONFIRM_MODAL,
@@ -5513,6 +5656,8 @@ class AppShell:
     def _open_profile_apply_readback_details_modal(
         self,
         apply_result: ApplyResult | None = None,
+        *,
+        user_request: bool = False,
     ) -> None:
         """Open profile Apply failures and read-back details through the modal seam."""
 
@@ -5530,6 +5675,9 @@ class AppShell:
             lambda: self._show_apply_failure_modal(apply_result),
             delete_tags=("apply_failure_modal",),
             key="profile_apply_details",
+            # The footer button is a click; the apply/retry completions have
+            # just written their own result line and must not be covered.
+            notify_if_dropped=user_request,
         )
 
     def _render_profile_apply_readback_details(self, verification) -> None:
@@ -5750,7 +5898,11 @@ class AppShell:
                     message,
                     no_restore_point=retry_result.no_restore_point,
                 )
-                self._show_apply_failure_modal(retry_result)
+                # Through the seam, like the first apply's failure modal: this
+                # completion drains in a tick where a user click may already
+                # hold the create slot, and an inline build here would stand
+                # when that transition's create lands.
+                self._open_profile_apply_readback_details_modal(retry_result)
             else:
                 message = _make_log_entry(
                     "apply.retry.success",
@@ -5827,6 +5979,7 @@ class AppShell:
             open_fn,
             delete_tags=("wrapper_profile_delete_popup",),
             key="wrapper_profile_delete",
+            notify_if_dropped=True,
         )
 
     def _step_size_draft_pending(self) -> bool:
@@ -5895,6 +6048,7 @@ class AppShell:
             open_fn,
             delete_tags=("wrapper_profile_save_as_modal",),
             key="wrapper_profile_save_as",
+            notify_if_dropped=True,
         )
 
     def _delete_wrapper_profile_confirmed(self, name: str) -> None:
@@ -8199,6 +8353,7 @@ class AppShell:
             open_preview_if_current,
             delete_tags=(safe_import.FILE_MODAL, safe_import.PREVIEW_MODAL),
             key="safe_import_open_preview",
+            notify_if_dropped=True,
         )
 
     def _fill_safe_import_current_values(self, result) -> None:
@@ -8274,6 +8429,7 @@ class AppShell:
             delete_tags=(safe_import.CONFIRM_MODAL,),
             hide_tags=(safe_import.PREVIEW_MODAL,),
             key="safe_import_open_confirm",
+            notify_if_dropped=True,
         )
 
     def safe_import_cancel_apply_confirm(self) -> None:
@@ -8295,6 +8451,7 @@ class AppShell:
             reshow_preview,
             delete_tags=(safe_import.CONFIRM_MODAL,),
             key="safe_import_cancel_confirm",
+            notify_if_dropped=True,
         )
 
     def _safe_import_unique_name_for_save(self, requested_name: object) -> str:
@@ -8738,7 +8895,14 @@ class AppShell:
             t("safe_import.apply.aborted_no_restore_point"),
         )
         self.rebuild_current_screen()
-        safe_import.open_result(self)
+        # The committed status and rebuild stay out here; only the modal
+        # create rides the seam, with the same key and teardown as the success
+        # path, since this also runs from a job completion.
+        self._defer_modal_swap(
+            lambda: safe_import.open_result(self),
+            delete_tags=(safe_import.RESULT_MODAL, "apply_failure_modal"),
+            key="safe_import_open_result",
+        )
 
     def _create_safe_import_restore_point(
         self,
@@ -8929,6 +9093,7 @@ class AppShell:
             open_fn,
             delete_tags=("support_guide_modal",),
             key="support_guide",
+            notify_if_dropped=True,
             owner_screen="diagnostics",
         )
 
@@ -8975,6 +9140,7 @@ class AppShell:
             open_fn,
             delete_tags=CLEAR_DIAGNOSTIC_LOGS_MODAL_SWAP_DELETE_TAGS,
             key="clear_diagnostic_logs_confirm",
+            notify_if_dropped=True,
         )
 
     def _clear_diagnostic_logs_confirmed(self) -> None:
@@ -9018,11 +9184,30 @@ class AppShell:
             self.refresh_shell()
             self.refresh_current_screen()
             return
-        diagnostic_bundle_preview.open_preview_modal(
-            self,
-            manifest,
-            on_export=lambda: self._export_rich_diagnostic_bundle_now(),
-        )
+        def open_preview() -> None:
+            diagnostic_bundle_preview.open_preview_modal(
+                self,
+                manifest,
+                on_export=lambda: self._export_rich_diagnostic_bundle_now(),
+            )
+
+        # Inline as before when nothing precedes it (its on_close deletes it,
+        # so a stale copy is not the normal case). The Export button stays
+        # enabled during HID jobs, so a click can land while a job's outcome
+        # modal holds the create slot; then it takes the seam.
+        swap_key = "diagnostics_bundle_preview"
+        if self._modal_open_needs_seam(
+            diagnostic_bundle_preview.PREVIEW_MODAL_TAG, swap_key
+        ):
+            self._defer_modal_swap(
+                open_preview,
+                delete_tags=(diagnostic_bundle_preview.PREVIEW_MODAL_TAG,),
+                key=swap_key,
+                owner_screen="diagnostics",
+                notify_if_dropped=True,
+            )
+            return
+        open_preview()
 
     def _export_rich_diagnostic_bundle_now(self) -> None:
         """Export the full DiagnosticBundleService ZIP from the Diagnostics screen.

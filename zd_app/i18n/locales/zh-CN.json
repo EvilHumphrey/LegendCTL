@@ -575,6 +575,7 @@
   "shell.battery": "电量",
   "shell.polling_rate.unknown": "轮询率未知",
   "shell.no_events": "暂无事件。",
+  "shell.modal_request_dropped": "另一个窗口正在同时打开，因此您请求的窗口未能打开。请重试。",
   "common.never": "从未",
   "common.unknown": "未知",
   "status.app_name": "LegendCTL",

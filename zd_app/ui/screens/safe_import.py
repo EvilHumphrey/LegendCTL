@@ -127,6 +127,7 @@ def open_file_select(shell) -> None:
             _open,
             delete_tags=(FILE_MODAL,),
             key=swap_key,
+            notify_if_dropped=True,
         )
         return
     _delete_if_exists(FILE_MODAL)
@@ -153,6 +154,9 @@ def open_browse(shell=None) -> None:
                 _restore_front_door,
                 delete_tags=(dialog,),
                 key="safe_import_browse_close",
+                # A user's pick or cancel. Dropped, the front door would stay
+                # hidden with nothing on screen to say why.
+                notify_if_dropped=True,
             )
             return
         _delete_if_exists(dialog)

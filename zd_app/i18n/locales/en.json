@@ -575,6 +575,7 @@
   "shell.battery": "Battery",
   "shell.polling_rate.unknown": "Polling Unknown",
   "shell.no_events": "No events yet.",
+  "shell.modal_request_dropped": "Another window was opening at the same moment, so the one you asked for didn't open. Try again.",
   "common.never": "Never",
   "common.unknown": "Unknown",
   "status.app_name": "LegendCTL",
