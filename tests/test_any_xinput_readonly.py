@@ -26,7 +26,7 @@ from unittest.mock import MagicMock, patch
 
 import dearpygui.dearpygui as dpg
 
-from tests.r2_shell_test_helpers import make_shell
+from tests.r2_shell_test_helpers import empty_snapshot, make_shell
 from tests.test_live_verify import _FakeXInputService, _live_snap
 from tests.test_restore_points_screen import _rp as _restore_point_fixture
 from zd_app import i18n
@@ -37,7 +37,13 @@ from zd_app.services.device_service import (
     instance_id_is_allowlisted_zd,
 )
 from zd_app.services.settings_service import StickDeadzones
-from zd_app.storage.restore_point_models import PreparedRestore, RestorePreview
+from zd_app.storage.restore_point_models import (
+    PreparedRestore,
+    RestoreFieldOutcome,
+    RestorePreview,
+    RestoreResult,
+    RestoreResultLabel,
+)
 from zd_app.ui.screens import controller as controller_screen
 from zd_app.ui.screens import live_verify
 from zd_app.ui.screens import restore_points as rp_screen
@@ -333,8 +339,14 @@ class RestoreExecutionGateTests(unittest.TestCase):
     def _shell(self, device_class: str):
         prepared = _prepared_restore()
         rp_service = MagicMock()
-        rp_service.restore.return_value = SimpleNamespace(
-            id=prepared.restore_point_id
+        rp_service.restore.return_value = RestoreResult(
+            label=RestoreResultLabel.VERIFIED,
+            attempted=1, wrote_succeeded=1, write_failed=0,
+            verified_matched=1, could_not_verify=0, mismatched=0,
+            fields=(RestoreFieldOutcome("step_size", True, None, True),),
+            before_restore_point_id=None,
+            completed_at="2026-10-17T00:00:00Z",
+            readback_snapshot=empty_snapshot(step_size=prepared.materialize().snapshot.step_size),
         )
         shell = _shell_with_class(
             device_class,
@@ -361,7 +373,10 @@ class RestoreExecutionGateTests(unittest.TestCase):
 
     def test_restore_executes_on_zd(self) -> None:
         shell, rp_service, prepared = self._shell("zd_ultimate_legend")
-        rp_screen._execute_restore(shell)
+        # The faithful readback now hydrates the shell; keep this gate-only
+        # test independent of a native DPG context or real widgets.
+        with patch("zd_app.ui.app_shell.dpg.does_item_exist", return_value=False):
+            rp_screen._execute_restore(shell)
         rp_service.restore.assert_called_once_with(
             prepared,
             acknowledge_write_only_paddles=False,

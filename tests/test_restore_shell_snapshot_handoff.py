@@ -20,6 +20,7 @@ from zd_app.services.settings_service import (
     PollingRate,
 )
 from zd_app.storage.restore_point_models import PreparedRestore, RestoreResult, RestoreResultLabel
+from zd_app.ui import app_shell as app_shell_module
 from zd_app.ui.app_shell import AppShell, threaded_hid_executor
 from zd_app.ui.screens import restore_points
 
@@ -29,8 +30,11 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
         set_locale("en")
         # Exercise real shell hydration/persistence with no native DPG calls,
         # filesystem writes, live device access, or official-app probes.
+        # Import-isolation tests can remove DPG from sys.modules while the
+        # shell retains its original module. Patch where the shell looks up
+        # these functions, not a newly imported dearpygui module object.
         for name in ("does_item_exist", "set_value", "configure_item", "delete_item"):
-            replacement = patch(f"dearpygui.dearpygui.{name}", return_value=False)
+            replacement = patch.object(app_shell_module.dpg, name, return_value=False)
             replacement.start()
             self.addCleanup(replacement.stop)
         self.old = empty_snapshot(step_size=10, polling_rate=PollingRate.HZ_1000)
@@ -108,7 +112,7 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
             shell.device_service, success, message,
         )
         shell.refresh_shell = lambda: AppShell.refresh_shell(shell)
-        exists = patch("dearpygui.dearpygui.does_item_exist", side_effect=lambda tag: tag in {
+        exists = patch.object(app_shell_module.dpg, "does_item_exist", side_effect=lambda tag: tag in {
             "footer_status_text", "settings_v2_status_text",
         })
         exists.start()
