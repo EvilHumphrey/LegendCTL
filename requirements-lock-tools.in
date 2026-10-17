@@ -2,6 +2,6 @@
 # Kept in its own lock so the refresher's resolver is version and hash checked.
 pip-tools==7.6.2
 
-# pip-tools imports pip internals. Pin the release that 7.6.1 explicitly supports
+# pip-tools imports pip internals. Pin the release that 7.6.2 explicitly supports
 # so a future pip release cannot break the lock refresh command at runtime.
 pip==26.2.1
