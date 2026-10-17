@@ -1,9 +1,19 @@
 # Changelog
 
-## v2.6.3 — Unreleased
+## v2.6.4 — Unreleased
 
-Candidate maintenance release collecting fixes since v2.6.2. Final installer,
-hardware, and release-artifact qualification remains pending.
+Includes the maintenance changes listed under the unpublished v2.6.3 candidate
+below. Qualification of the new installer, hardware behavior and release artifacts
+remains pending.
+
+- Restore Points replaces the footer's previous manual-setting message when a
+  restore begins and reports the actual restore outcome afterward. Refreshing or
+  changing screens no longer brings back the older message.
+
+## v2.6.3 — Unpublished candidate
+
+Superseded by the v2.6.4 candidate before publication. These maintenance changes
+since v2.6.2 are included in v2.6.4; v2.6.3 was not a published release.
 
 - Controller reconnects hydrate the correct controls from fresh readback;
   disconnected settings are hidden and unread deadzones cannot be applied.

@@ -2932,10 +2932,19 @@ class AppShell:
         self._last_apply_result = None
         self._last_apply_result_presence_key = None
         self._last_apply_result_presence_generation = None
+        # This accepted Restore supersedes the previous manual-write receipt.
+        # Replace the canonical fallback as well as the transient banner, so a
+        # later refresh/navigation cannot resurrect the previous action. This
+        # is pending, not a successful/failed write to record in DeviceService.
+        pending_restore = _make_log_entry("restore_points.in_progress.title")
+        self.device_service.last_apply_result = pending_restore
+        self._apply_status_message = None
+        self._apply_status_success = False
         self._apply_status_text = None
         self._apply_status_clear_after = None
         self._sync_profile_apply_readback_details_action()
         if self._dpg_context_ready:
+            self._update_apply_status(pending_restore, None)
             self._render_settings_snapshot_status()
             self.refresh_shell()
 
