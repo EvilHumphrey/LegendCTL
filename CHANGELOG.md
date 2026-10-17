@@ -1,18 +1,17 @@
 # Changelog
 
-## v2.6.4 — Unreleased
+## v2.6.4 — 2026-10-17
 
-Includes the maintenance changes listed under the unpublished v2.6.3 candidate
-below. Qualification of the new installer, hardware behavior and release artifacts
-remains pending.
+Includes the maintenance changes listed under the unpublished v2.6.3 build
+below. Release notes: [v2.6.4](docs/release-notes/RELEASE_NOTES_v2.6.4.md).
 
 - Restore Points replaces the footer's previous manual-setting message when a
   restore begins and reports the actual restore outcome afterward. Refreshing or
   changing screens no longer brings back the older message.
 
-## v2.6.3 — Unpublished candidate
+## v2.6.3 — Not published
 
-Superseded by the v2.6.4 candidate before publication. These maintenance changes
+Superseded by v2.6.4 before publication. These maintenance changes
 since v2.6.2 are included in v2.6.4; v2.6.3 was not a published release.
 
 - Controller reconnects hydrate the correct controls from fresh readback;
