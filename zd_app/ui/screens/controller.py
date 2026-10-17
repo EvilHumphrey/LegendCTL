@@ -381,6 +381,10 @@ def refresh_state(shell) -> None:
     busy = bool(getattr(shell, "hid_busy", False))
     dpg.configure_item("controller_unverified_device_banner", show=not supported and not absent)
     dpg.configure_item("controller_settings_editor", show=readable, enabled=not busy)
+    dpg.configure_item(
+        "controller_apply_step_size",
+        enabled=readable and snapshot.step_size is not None and not busy,
+    )
     if absent:
         hint = t("controller.disconnected")
     elif not supported:
@@ -509,15 +513,27 @@ def _render_trigger_side(shell, side: str) -> None:
 
 def _render_sticks_tab(shell) -> None:
     _render_loading_hint(shell)
-    dpg.add_slider_int(
+    # Text edits must not send partial numbers (146 -> 14 -> 147) to hardware.
+    # The input and +/- controls edit a draft; only Apply dispatches a write.
+    dpg.add_input_int(
         label=t("controller.sticks.step_size.label"),
         default_value=STEP_SIZE_VALUE_DEFAULT,
         min_value=STEP_SIZE_VALUE_MIN,
         max_value=STEP_SIZE_VALUE_MAX,
+        min_clamped=True,
+        max_clamped=True,
+        step=1,
+        step_fast=1,
         width=320,
         tag="step_size_slider",
         enabled=False,
-        callback=lambda _s, value: shell.apply_step_size(value),
+    )
+    dpg.add_button(
+        label=t("controller.sticks.step_size.apply"),
+        tag="controller_apply_step_size",
+        width=220,
+        enabled=False,
+        callback=lambda: shell.apply_step_size(dpg.get_value("step_size_slider")),
     )
     dpg.add_text(
         t("controller.sticks.step_size.unread"),

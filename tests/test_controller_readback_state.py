@@ -53,6 +53,83 @@ class ControllerReadbackStateTests(unittest.TestCase):
         with patch("zd_app.ui.app_shell.time.monotonic", return_value=now):
             self.shell._flush_slider_throttle()
 
+    def test_step_number_entry_commits_only_on_apply(self) -> None:
+        self.build()
+        config = dpg.get_item_configuration("step_size_slider")
+        self.assertIsNone(config["callback"], "Partial typed numbers must not invoke the writer")
+        self.assertFalse(config["on_enter"], "A draft must survive clicking Save As")
+        self.assertEqual(config["step"], 1)
+        self.assertEqual(config["step_fast"], 1)
+        self.service.set_step_size.return_value = SimpleNamespace(outcome=SetStepSizeOutcome.OK)
+        self.service.get_step_size.return_value = 147
+        for partial in (14, 1, 147):
+            dpg.set_value("step_size_slider", partial)
+            self.settle()
+            self.service.set_step_size.assert_not_called()
+        dpg.get_item_configuration("controller_apply_step_size")["callback"]()
+        self.settle()
+        self.service.set_step_size.assert_called_once_with(147)
+        self.assertEqual(self.shell.last_controller_snapshot.step_size, 147)
+
+    def test_save_refuses_unsubmitted_step_number(self) -> None:
+        self.build()
+        dpg.set_value("step_size_slider", 14)
+        self.shell.save_current_as_named_wrapper_profile("Unfinished", include_device=True)
+        self.shell.wrapper_profile_store.save.assert_not_called()
+        self.service.set_step_size.assert_not_called()
+        self.assertEqual(self.shell.last_controller_snapshot.step_size, 146)
+        self.assertEqual(dpg.get_value("step_size_slider"), 14)
+
+    def test_save_as_reports_unapplied_step_before_opening_modal(self) -> None:
+        self.build()
+        dpg.set_value("step_size_slider", 147)
+        self.shell._open_save_as_modal()
+        self.assertFalse(dpg.does_item_exist("wrapper_profile_save_as_modal"))
+        self.assertEqual(dpg.get_value("step_size_slider"), 147)
+        self.shell.wrapper_profile_store.save.assert_not_called()
+        self.service.set_step_size.assert_not_called()
+
+    def test_step_apply_is_disabled_until_read_and_while_busy(self) -> None:
+        self.build()
+        self.assertTrue(dpg.get_item_configuration("controller_apply_step_size")["enabled"])
+        self.shell._hid_job_in_flight = True
+        controller.refresh_state(self.shell)
+        self.assertFalse(dpg.get_item_configuration("controller_apply_step_size")["enabled"])
+        self.shell._hid_job_in_flight = False
+        self.shell.last_controller_snapshot = empty_snapshot(step_size=None)
+        controller.refresh_state(self.shell)
+        self.assertFalse(dpg.get_item_configuration("controller_apply_step_size")["enabled"])
+
+    def test_save_after_step_apply_uses_confirmed_value(self) -> None:
+        self.build()
+        self.service.set_step_size.return_value = SimpleNamespace(outcome=SetStepSizeOutcome.OK)
+        self.service.get_step_size.return_value = 147
+        dpg.set_value("step_size_slider", 147)
+        dpg.get_item_configuration("controller_apply_step_size")["callback"]()
+        self.shell.save_current_as_named_wrapper_profile("Pending", include_device=True)
+        self.shell.wrapper_profile_store.save.assert_not_called()
+        self.settle()
+        self.shell.save_current_as_named_wrapper_profile("Confirmed", include_device=True)
+        self.assertEqual(self.shell.wrapper_profile_store.save.call_args.args[0].snapshot.step_size, 147)
+
+    def test_unchanged_step_number_does_not_block_profile_save(self) -> None:
+        self.build()
+        dpg.set_value("step_size_slider", 14)
+        dpg.set_value("step_size_slider", 146)
+        self.shell.save_current_as_named_wrapper_profile("Unchanged", include_device=True)
+        self.shell.wrapper_profile_store.save.assert_called_once()
+        self.service.set_step_size.assert_not_called()
+
+    def test_pending_deadzone_banner_does_not_claim_failure_or_success(self) -> None:
+        self.shell._hid_executor = lambda _job, _deliver: None
+        self.build()
+        dpg.set_value("deadzone_left_center_slider", 1)
+        self.shell.apply_deadzone_settings()
+        for locale in ("en", "zh-CN", "ko"):
+            set_locale(locale)
+            self.shell._render_active_apply_status()
+            self.assertEqual(self.shell._apply_status_text, t("apply.deadzone.verifying"))
+
     def test_step_size_readback_replaces_cache_after_drag_settles(self) -> None:
         self.build()
         self.service.set_step_size.return_value = SimpleNamespace(outcome=SetStepSizeOutcome.OK)

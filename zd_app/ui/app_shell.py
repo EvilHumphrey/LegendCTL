@@ -245,6 +245,7 @@ _HID_FLOW_BUTTON_TAGS = (
     "footer_apply_button",
     "footer_delete_button",
     "controller_apply_deadzones",
+    "controller_apply_step_size",
     restore_points.TAG_CONFIRM_RESTORE_BUTTON,
 )
 
@@ -782,7 +783,9 @@ def _top_sync_status_label(status: str) -> str:
     return t(key) if key else status
 
 
-def _apply_banner_message(message: str, success: bool) -> str:
+def _apply_banner_message(message: str, success: bool | None) -> str:
+    if success is None:
+        return message  # An operation awaiting readback has no result yet.
     known_prefixes = (
         "OK:",
         "OK：",
@@ -3481,6 +3484,12 @@ class AppShell:
             self._record_settings_apply_result(False, t("apply.profile.save.awaiting_readback"))
             self.refresh_shell()
             return
+        if self._step_size_draft_pending():
+            # Step-size input retains a local draft until Apply. Saving
+            # the previous snapshot here would appear to revert that edit.
+            self._record_settings_apply_result(False, t("apply.profile.save.step_size_draft"))
+            self.refresh_shell()
+            return
         if self.last_controller_snapshot is None:
             message = t("apply.profile.save.no_snapshot")
             self._record_settings_apply_result(False, message)
@@ -5511,7 +5520,20 @@ class AppShell:
             key="wrapper_profile_delete",
         )
 
+    def _step_size_draft_pending(self) -> bool:
+        return bool(
+            self._dpg_context_ready
+            and self._step_size_hydrated
+            and self.last_controller_snapshot is not None
+            and dpg.does_item_exist("step_size_slider")
+            and dpg.get_value("step_size_slider") != self.last_controller_snapshot.step_size
+        )
+
     def _open_save_as_modal(self) -> None:
+        if self._step_size_draft_pending():
+            self._record_settings_apply_result(False, t("apply.profile.save.step_size_draft"))
+            self.refresh_shell()
+            return
         if dpg.does_item_exist("wrapper_profile_save_as_modal"):
             dpg.delete_item("wrapper_profile_save_as_modal")
         self._save_as_modal_open = True
@@ -5609,7 +5631,7 @@ class AppShell:
     def _update_apply_status(
         self,
         message: str | LogEntry | ComposedLogEntry,
-        success: bool,
+        success: bool | None,
     ) -> None:
         if not self._dpg_context_ready:
             logger.info("_update_apply_status skipped: context not ready")
@@ -7060,7 +7082,7 @@ class AppShell:
             self._set_last_controller_snapshot(replace(self.last_controller_snapshot, deadzones=None))
         if success:
             self._controller_deadzone_status_key = "verifying"
-            self._update_apply_status(_make_log_entry("apply.deadzone.verifying"), False)
+            self._update_apply_status(_make_log_entry("apply.deadzone.verifying"), None)
             self._schedule_controller_deadzone_readback(
                 deadzones, presence_key, presence_generation, no_restore_point=no_restore_point,
             )
