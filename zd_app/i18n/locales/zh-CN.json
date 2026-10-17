@@ -1289,6 +1289,7 @@
   "restore_points.result.header.partially_restored": "部分还原",
   "restore_points.result.header.mismatch_after_restore": "还原后存在不匹配",
   "restore_points.result.header.restore_failed": "还原失败",
+  "restore_points.result.footer": "还原：{status}（{matched}/{attempted} 项匹配）",
   "restore_points.result.counts.attempted": "尝试：{n}",
   "restore_points.result.counts.wrote_succeeded": "写入成功：{n}",
   "restore_points.result.counts.write_failed": "写入失败：{n}",

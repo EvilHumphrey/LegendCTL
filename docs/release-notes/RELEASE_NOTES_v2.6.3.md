@@ -1,5 +1,7 @@
 # LegendCTL v2.6.3 — release candidate
 
+> v2.6.3 was not published. Its changes ship in [v2.6.4](RELEASE_NOTES_v2.6.4.md); this file is kept as the historical candidate text.
+
 This candidate collects controller-state, restore-consent, import, diagnostics,
 and build-provenance fixes since v2.6.2. Final installer lifecycle, hardware smoke,
 and release-artifact qualification remain pending. These notes do not announce a
