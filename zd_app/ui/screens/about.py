@@ -273,6 +273,7 @@ def _open_license_view(shell) -> None:
             delete_tags=(LICENSE_MODAL,),
             key="about_license_view",
             owner_screen="about",
+            notify_if_dropped=True,
         )
         return
 

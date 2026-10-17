@@ -1553,6 +1553,7 @@ def _on_open_delete_confirm(shell, rp_id: str, title: str) -> None:
             delete_tags=(TAG_DELETE_CONFIRM_MODAL,),
             key="restore_points_delete_confirm",
             owner_screen="restore_points",
+            notify_if_dropped=True,
         )
         return
 

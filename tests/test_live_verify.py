@@ -2092,6 +2092,40 @@ class ExportRichBundleTests(unittest.TestCase):
             bundle.preview_bundle_manifest.return_value,
         )
 
+    def test_preview_takes_the_seam_when_another_transition_holds_the_slot(self) -> None:
+        # Export stays enabled during HID jobs, so the click can land while a
+        # job's outcome modal holds the create slot; then the preview is
+        # arbitrated instead of built inline beside that create.
+        shell = _make_write_shell(settings_service=MagicMock())
+        shell.diagnostic_bundle_service = self._bundle(
+            result=Path(tempfile.gettempdir()) / "diagnostic_bundle_test.zip"
+        )
+        shell._modal_open_needs_seam = MagicMock(return_value=True)
+        shell._defer_modal_swap = MagicMock()
+        with patch(
+            "zd_app.ui.app_shell.diagnostic_bundle_preview.open_preview_modal"
+        ) as open_preview:
+            shell.export_rich_diagnostic_bundle()
+            open_preview.assert_not_called()
+            kwargs = shell._defer_modal_swap.call_args.kwargs
+            self.assertEqual(kwargs["key"], "diagnostics_bundle_preview")
+            self.assertEqual(kwargs["owner_screen"], "diagnostics")
+            self.assertTrue(kwargs["notify_if_dropped"])
+            shell._defer_modal_swap.call_args.args[0]()  # the deferred create
+        open_preview.assert_called_once()
+
+    def test_front_door_check_never_touches_dpg_without_a_context(self) -> None:
+        # dpg.does_item_exist with no context is a native access violation
+        # that kills the whole test process; with no context nothing can share
+        # a pass anyway.
+        shell = _make_write_shell(settings_service=MagicMock())
+        shell._dpg_context_ready = False
+        with patch(
+            "zd_app.ui.app_shell.dpg.does_item_exist",
+            side_effect=AssertionError("touched dpg with no context"),
+        ):
+            self.assertFalse(shell._modal_open_needs_seam("any_tag", "any_key"))
+
     def test_preview_export_calls_generate_bundle_zip_with_rich_args(self) -> None:
         shell = _make_write_shell(settings_service=MagicMock())
         result = Path(tempfile.gettempdir()) / "diagnostic_bundle_test.zip"

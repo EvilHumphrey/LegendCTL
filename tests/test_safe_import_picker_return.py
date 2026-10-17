@@ -43,6 +43,11 @@ class _Shell:
         self._modal_swap_teardown_done = False
         self._modal_swap_owner_screen = None
         self.current_screen = "controller"
+        self.status_updates = []
+
+    def _update_apply_status(self, message, success):
+        # The seam's dropped-request notice writes the footer; record it.
+        self.status_updates.append((message, success))
 
 
 def _code_names(code: types.CodeType) -> set[str]:
@@ -109,8 +114,12 @@ class FakeShellContractTests(unittest.TestCase):
                 if not hasattr(fake, name):
                     missing.append(f"{method_name} reads self.{name}")
                     continue
-                if isinstance(
-                    vars(app_shell.AppShell).get(name), (types.FunctionType, staticmethod)
+                # Follow a method only where the fake borrows the real one: a
+                # method the fake overrides with its own stub (the footer
+                # status writer) has the stub's contract, not the real body's.
+                real_member = vars(app_shell.AppShell).get(name)
+                if isinstance(real_member, (types.FunctionType, staticmethod)) and (
+                    _function(vars(_Shell).get(name)) is _function(real_member)
                 ):
                     pending.append(name)
         self.assertEqual(missing, [], "the picker fake no longer carries the seam's contract")

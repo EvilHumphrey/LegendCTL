@@ -1956,6 +1956,7 @@ def _open_assign_modal(shell, side: str, *, is_swap: bool) -> None:
                 delete_tags=(TAG_ASSIGN_MODAL,),
                 key="modules_assign_modal",
                 owner_screen="modules",
+                notify_if_dropped=True,
             )
         except SystemError:
             # Unarmed the seam runs the teardown inline, so a missing DPG
@@ -2128,6 +2129,7 @@ def _open_notes_modal(shell, side: str) -> None:
                 delete_tags=(TAG_NOTES_MODAL,),
                 key="modules_notes_modal",
                 owner_screen="modules",
+                notify_if_dropped=True,
             )
         except SystemError:
             # See _open_assign_modal: unarmed, the inline teardown inside the
@@ -2351,6 +2353,7 @@ def _open_export_modal(shell) -> None:
                 delete_tags=(TAG_EXPORT_MODAL,),
                 key="modules_export_modal",
                 owner_screen="modules",
+                notify_if_dropped=True,
             )
         except SystemError:
             # See _open_assign_modal: unarmed, the inline teardown inside the
@@ -2473,6 +2476,7 @@ def _open_zip_preview(
             ),
             key="modules_export_zip_preview",
             owner_screen="modules",
+            notify_if_dropped=True,
         )
     else:
         _close_export_modal()

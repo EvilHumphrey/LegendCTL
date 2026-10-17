@@ -135,38 +135,64 @@ MODAL_SITE_REGISTRY: tuple[RegistryEntry, ...] = (
     ),
     RegistryEntry(
         relpath=APP_SHELL,
-        owner="AppShell._open_no_restore_point_confirm",
+        owner="AppShell._open_no_restore_point_confirm_now",
         tag="apply_no_restore_point_modal",
         modality=Modality.MODAL,
         tag_source=TagSource.MODULE_CONST,
-        bucket=DEFECT,
+        bucket=EXEMPT,
         reason=(
-            "does_item_exist -> delete_item -> inline dpg.window in one pass. "
-            "One of its two callers is on the seam (the profile-apply job's "
-            "on_done); the other, _manual_device_write_gate, calls it directly "
-            "from a render-side Device callback. The docstring treats "
-            "render-side as sufficient, but the benched law is thread- and "
-            "caller-independent: a stale instance hidden by the titlebar X "
-            "(no_close is omitted, i.e. False, and the X only hides) makes the "
-            "next open a same-pass teardown+create. Not yet cured."
+            "Was DEFECT. Two limbs, cured 2026-10-17 with the front-door rule "
+            "(AppShell._modal_open_needs_seam): _open_no_restore_point_confirm "
+            "builds inline only when no copy exists, its key is not pending and "
+            "no transition holds the create slot, and goes through the seam "
+            "otherwise. The live limb was the held slot: a manual Device write "
+            "(Controller sliders, the Diagnostics deadzone) made in the tick a "
+            "job's outcome modal was requested. The stale-copy branch is "
+            "defensive: this modal's on_close deletes it, so the titlebar X "
+            "leaves nothing behind. Entries, pinned by "
+            "test_front_door_gates_have_their_known_callers: the manual-write "
+            "gate (screen-scoped, so it passes owner_screen and gets the drop "
+            "notice) and the profile-apply job hop, which names this tag in its "
+            "own delete_tags. Not law-safe in every case: that job hop's create "
+            "can still land while a user-opened modal whose button no job "
+            "disables (the footer's Save As, for one) stands -- the "
+            "landed-modal limit in _defer_modal_swap's "
+            "docstring. EXEMPT, not SEAM, because a fresh open is not seamed; "
+            "seam_via keeps both seamed routes enforced."
         ),
-        seam_via=(f"{APP_SHELL}::AppShell._apply_wrapper_profile_resolved.on_done",),
+        seam_via=(
+            f"{APP_SHELL}::AppShell._open_no_restore_point_confirm",
+            f"{APP_SHELL}::AppShell._apply_wrapper_profile_resolved.on_done",
+        ),
     ),
     RegistryEntry(
         relpath=APP_SHELL,
-        owner="AppShell._open_apply_device_confirm",
+        owner="AppShell._open_apply_device_confirm_now",
         tag="apply_device_confirm_modal",
         modality=Modality.MODAL,
         tag_source=TagSource.MODULE_CONST,
-        bucket=DEFECT,
+        bucket=EXEMPT,
         reason=(
-            "Confirmed same-pass teardown+create with no on_close, gating a "
-            "global device write. Deliberately NOT seam-patched in isolation: "
-            "deferring this hop alone does not fix the Apply flow, which needs "
-            "a flow-level owner spanning the pre-write confirm, the job and the "
-            "post-write result (a separate flow-ownership ruling, still open). "
-            "Tracked here so the exemption stays visible rather than implied."
+            "Was DEFECT: a same-pass delete+create with no on_close, gating a "
+            "controller-global write; dismissing the confirm with the X (which "
+            "only hides it) and pressing Apply again reached it. Cured "
+            "2026-10-17 with the front-door rule: _open_apply_device_confirm "
+            "builds inline only when nothing can precede the create and goes "
+            "through the seam otherwise, binding the controller presence at the "
+            "click and refusing (with the device-changed status) a seamed "
+            "create whose controller changed. Its entries are the footer Apply "
+            "and the Controller > Profiles row Apply, both via "
+            "apply_named_wrapper_profile. Both are disabled while a HID job runs "
+            "(footer via _HID_FLOW_BUTTON_TAGS, the row via the disabled "
+            "settings editor), and apply_named_wrapper_profile also refuses "
+            "while busy, as a backstop. No standing modal lets either button "
+            "through. Pinned by "
+            "test_front_door_gates_have_their_known_callers. This cures the hop "
+            "only; ownership of the whole Apply flow (pre-write confirm, job, "
+            "post-write result) is still an open design question, and the slot "
+            "check narrows the landed-modal race without closing it."
         ),
+        seam_via=(f"{APP_SHELL}::AppShell._open_apply_device_confirm",),
     ),
     RegistryEntry(
         relpath=APP_SHELL,
@@ -235,11 +261,11 @@ MODAL_SITE_REGISTRY: tuple[RegistryEntry, ...] = (
             "modal and hands only the modal to the seam, naming both openers' "
             "tags. Gated fail-on-base by "
             "tests/test_safe_import_failure_modal_seam_live.py. "
-            "RESIDUAL, stated rather than closed: "
-            "_retry_failed_settings.on_done is safe only because its job-start "
-            "delete clears this tag and production wires a threaded executor, "
-            "so on_done lands frames later. Under a synchronous executor that "
-            "limb collapses back into one pass. It is not seam-routed."
+            "The third, _retry_failed_settings.on_done, built inline until "
+            "2026-10-17; it now hands its modal to "
+            "_open_profile_apply_readback_details_modal like the first apply, "
+            "so a user click holding the create slot in that completion tick "
+            "is arbitrated instead of landing beside it."
         ),
         seam_via=(
             f"{APP_SHELL}::AppShell._open_profile_apply_readback_details_modal",
@@ -337,9 +363,16 @@ MODAL_SITE_REGISTRY: tuple[RegistryEntry, ...] = (
             "cannot be clicked behind it; only a programmatic re-entry while it "
             "is open would reproduce the shape, and no such caller exists. "
             "Re-verify the on_close-deletes property before reclassifying: it, "
-            "not the call shape, is what makes this safe."
+            "not the call shape, is what makes this safe. One more case, "
+            "covered since 2026-10-17: Export stays enabled during HID jobs, so "
+            "a click could land while a job's outcome modal holds the create "
+            "slot; export_rich_diagnostic_bundle then takes the seam (the "
+            "front-door rule) instead of building inline."
         ),
-        seam_via=(f"{MODULES}::_open_zip_preview",),
+        seam_via=(
+            f"{MODULES}::_open_zip_preview",
+            f"{APP_SHELL}::AppShell.export_rich_diagnostic_bundle",
+        ),
     ),
     # -- screens -------------------------------------------------------------
     RegistryEntry(
@@ -523,9 +556,15 @@ MODAL_SITE_REGISTRY: tuple[RegistryEntry, ...] = (
             "_finish_safe_import_apply in the shell's hop, while the apply-job "
             "path tears the import modals down at job start and creates this one "
             "from a later completion drain, with rendered frames in between. "
-            "The direct callers therefore correctly do NOT mention the seam."
+            "The direct callers therefore correctly do NOT mention the seam. "
+            "The fail-closed abort (a missing restore point) also runs from a "
+            "job completion and, since 2026-10-17, hands its result modal to "
+            "the seam with the success path's key and teardown."
         ),
-        seam_via=(f"{APP_SHELL}::AppShell.safe_import_apply",),
+        seam_via=(
+            f"{APP_SHELL}::AppShell.safe_import_apply",
+            f"{APP_SHELL}::AppShell._finish_safe_import_abort",
+        ),
     ),
     RegistryEntry(
         relpath=WEAR_LEDGER,
@@ -607,6 +646,81 @@ SWEEP_LIST_KNOWN_GAPS: dict[str, str] = {
 SWEEP_LIST_UNREACHABLE_ENTRIES: frozenset[str] = frozenset(
     {"rename_profile_modal", "import_profile_modal"}
 )
+
+
+# Every seam call site's drop-notice setting, keyed ``file::function::key``
+# (a variable key shows as ``<name>``; "-" means the kwarg is absent, i.e.
+# False; a bare name means the caller passes its own flag through). The rule:
+# a user click asks for the notice; a request made right after the caller
+# wrote its own result line (job completions, the consent re-offer and its
+# restore, the store-only Safe Import save) does not, because "try again"
+# over a failure report invites a repeat write. A new seam site must be
+# classified here, deliberately.
+MODAL_SWAP_NOTIFY_FLAGS: dict[str, str] = {
+    "zd_app/ui/app_shell.py::AppShell._apply_wrapper_profile_resolved.on_done::apply_profile_no_restore_point_confirm": "-",
+    "zd_app/ui/app_shell.py::AppShell._finish_safe_import_abort::safe_import_open_result": "-",
+    "zd_app/ui/app_shell.py::AppShell._finish_safe_import_apply::safe_import_open_result": "-",
+    "zd_app/ui/app_shell.py::AppShell._open_apply_device_confirm::<swap_key>": "True",
+    "zd_app/ui/app_shell.py::AppShell._open_no_restore_point_confirm::<swap_key>": "user_request",
+    "zd_app/ui/app_shell.py::AppShell._open_profile_apply_readback_details_modal::profile_apply_details": "user_request",
+    "zd_app/ui/app_shell.py::AppShell._open_save_as_modal::wrapper_profile_save_as": "True",
+    "zd_app/ui/app_shell.py::AppShell._reoffer_first_run_gate::first_run_consent_reoffer": "-",
+    "zd_app/ui/app_shell.py::AppShell._settle_consent_reoffer::first_run_consent_restore": "-",
+    "zd_app/ui/app_shell.py::AppShell.clear_diagnostic_logs::clear_diagnostic_logs_confirm": "True",
+    "zd_app/ui/app_shell.py::AppShell.confirm_delete_named_wrapper_profile::wrapper_profile_delete": "True",
+    "zd_app/ui/app_shell.py::AppShell.export_rich_diagnostic_bundle::<swap_key>": "True",
+    "zd_app/ui/app_shell.py::AppShell.open_support_guide::support_guide": "True",
+    "zd_app/ui/app_shell.py::AppShell.safe_import_apply::safe_import_open_result": "-",
+    "zd_app/ui/app_shell.py::AppShell.safe_import_cancel_apply_confirm::safe_import_cancel_confirm": "True",
+    "zd_app/ui/app_shell.py::AppShell.safe_import_request_apply_to_controller::safe_import_open_confirm": "True",
+    "zd_app/ui/app_shell.py::AppShell.safe_import_scan_path::safe_import_open_preview": "True",
+    "zd_app/ui/screens/about.py::_open_license_view::about_license_view": "True",
+    "zd_app/ui/screens/modules.py::_open_assign_modal::modules_assign_modal": "True",
+    "zd_app/ui/screens/modules.py::_open_export_modal::modules_export_modal": "True",
+    "zd_app/ui/screens/modules.py::_open_notes_modal::modules_notes_modal": "True",
+    "zd_app/ui/screens/modules.py::_open_zip_preview::modules_export_zip_preview": "True",
+    "zd_app/ui/screens/restore_points.py::_on_open_delete_confirm::restore_points_delete_confirm": "True",
+    "zd_app/ui/screens/safe_import.py::open_browse._close_and_restore::safe_import_browse_close": "True",
+    "zd_app/ui/screens/safe_import.py::open_file_select::<swap_key>": "True",
+    "zd_app/ui/screens/wear_ledger.py::_open_note_modal::wear_ledger_note_modal": "True",
+}
+
+
+def _modal_swap_notify_flags() -> dict[str, str]:
+    found: dict[str, str] = {}
+
+    def walk(node: ast.AST, relpath: str, scope: list[str]) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                walk(child, relpath, scope + [child.name])
+                continue
+            if isinstance(child, ast.Call):
+                func = child.func
+                name = (
+                    func.attr
+                    if isinstance(func, ast.Attribute)
+                    else func.id if isinstance(func, ast.Name) else None
+                )
+                if name in ("_defer_modal_swap", "modal_swap"):
+                    kwargs = {kw.arg: kw.value for kw in child.keywords}
+                    key, flag = kwargs.get("key"), kwargs.get("notify_if_dropped")
+                    key_text = (
+                        key.value
+                        if isinstance(key, ast.Constant)
+                        else f"<{key.id}>" if isinstance(key, ast.Name) else "-"
+                    )
+                    flag_text = (
+                        repr(flag.value)
+                        if isinstance(flag, ast.Constant)
+                        else flag.id if isinstance(flag, ast.Name) else "-"
+                    )
+                    found[f"{relpath}::{'.'.join(scope)}::{key_text}"] = flag_text
+            walk(child, relpath, scope)
+
+    for path in iter_source_files(PACKAGE_ROOT):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        walk(tree, path.relative_to(REPO_ROOT).as_posix(), [])
+    return found
 
 
 def _references_to(name: str) -> list[str]:
@@ -932,6 +1046,121 @@ class SeamClaimTests(unittest.TestCase):
                 f"{entry.key}: registered as dead code but now called from "
                 f"{callers}. Route it through the seam before wiring it up.",
             )
+
+    def test_inline_builders_have_one_entry(self) -> None:
+        """The two front-door builders are reached only through their gate.
+
+        ``_open_*_now`` builds inline with no seam check of its own; the check
+        lives in the wrapper. A second caller wired straight to the builder
+        would skip the front-door rule, so every reference is pinned.
+        """
+
+        self.assertEqual(
+            _references_to("_open_no_restore_point_confirm_now"),
+            [f"{APP_SHELL}::AppShell._open_no_restore_point_confirm"],
+        )
+        self.assertEqual(
+            _references_to("_open_apply_device_confirm_now"),
+            [
+                f"{APP_SHELL}::AppShell._open_apply_device_confirm",
+                f"{APP_SHELL}::AppShell._open_apply_device_confirm.open_if_still_current",
+            ],
+        )
+
+    def test_every_seam_site_has_a_deliberate_drop_notice_setting(self) -> None:
+        self.assertEqual(_modal_swap_notify_flags(), MODAL_SWAP_NOTIFY_FLAGS)
+
+    def test_readback_details_callers_pass_the_right_notice_setting(self) -> None:
+        """The details hop passes its caller's ``user_request`` through.
+
+        The flag table above records only the pass-through, so the callers are
+        pinned here: the footer button is a click and asks for the notice; the
+        apply and retry completions have just written their own result line
+        and must not.
+        """
+
+        found: dict[str, str] = {}
+        tree = ast.parse((PACKAGE_ROOT / "ui" / "app_shell.py").read_text(encoding="utf-8"))
+
+        def walk(node: ast.AST, scope: list[str]) -> None:
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    walk(child, scope + [child.name])
+                    continue
+                if (
+                    isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Attribute)
+                    and child.func.attr == "_open_profile_apply_readback_details_modal"
+                ):
+                    flag = {kw.arg: kw.value for kw in child.keywords}.get("user_request")
+                    found[".".join(scope)] = (
+                        repr(flag.value) if isinstance(flag, ast.Constant) else "-"
+                    )
+                walk(child, scope)
+
+        walk(tree, [])
+        self.assertEqual(
+            found,
+            {
+                "AppShell._build_footer": "True",
+                "AppShell._apply_wrapper_profile_snapshot.on_done": "-",
+                "AppShell._retry_failed_settings.on_done": "-",
+            },
+        )
+
+    def test_apply_failure_modal_is_built_only_behind_the_seam(self) -> None:
+        """No completion path may build the failure/Retry modal inline again.
+
+        Both references are seamed routes: the first apply's details hop (which
+        the retry completion now reuses) and Safe Import's commit, whose
+        returned opener the caller hands to the seam.
+        """
+
+        self.assertEqual(
+            _references_to("_show_apply_failure_modal"),
+            [
+                f"{APP_SHELL}::AppShell._commit_safe_import_apply_result",
+                f"{APP_SHELL}::AppShell._open_profile_apply_readback_details_modal",
+            ],
+        )
+
+    def test_front_door_gates_have_their_known_callers(self) -> None:
+        """The EXEMPT reasons for the two Apply confirms argue from callers.
+
+        Their inline branch is law-safe because each entry is a button no
+        standing modal lets through (or, for the job hop, a create already
+        paced by the seam). A new caller -- a button inside a modal, a timer
+        -- would need its own argument, so the caller sets are pinned.
+        """
+
+        self.assertEqual(
+            _references_to("_open_no_restore_point_confirm"),
+            [
+                f"{APP_SHELL}::AppShell._apply_wrapper_profile_resolved.on_done"
+                ".open_no_restore_point_if_current",
+                f"{APP_SHELL}::AppShell._manual_device_write_gate",
+            ],
+        )
+        self.assertEqual(
+            _references_to("_manual_device_write_gate"),
+            [
+                f"{APP_SHELL}::AppShell.apply_deadzone_settings",
+                f"{APP_SHELL}::AppShell.apply_diagnostics_deadzone",
+                f"{APP_SHELL}::AppShell.apply_polling_rate",
+                f"{APP_SHELL}::AppShell.apply_step_size",
+            ],
+        )
+        self.assertEqual(
+            _references_to("_open_apply_device_confirm"),
+            [f"{APP_SHELL}::AppShell.apply_named_wrapper_profile"],
+        )
+        self.assertEqual(
+            _references_to("apply_named_wrapper_profile"),
+            [
+                f"{APP_SHELL}::AppShell.apply_selected_wrapper_profile",
+                "zd_app/ui/screens/controller.py::_render_profiles_tab",
+            ],
+        )
 
     def test_safe_import_front_door_has_one_entry(self) -> None:
         """The EXEMPT reason for ``open_file_select`` rests on caller topology.

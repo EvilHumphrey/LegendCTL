@@ -59,6 +59,7 @@ from zd_app.services.settings_service import (
 from zd_app.storage.wrapper_profile_store import WrapperProfileError
 from zd_app.ui.app_shell import (
     APPLY_DEVICE_CONFIRM_MODAL,
+    APPLY_NO_RESTORE_POINT_MODAL,
     POST_APPLY_READ_SETTLE_S,
     READ_TIMEOUT_RETRY_SETTLE_S,
     SAVE_AS_INCLUDE_DEVICE_CHECKBOX,
@@ -4357,6 +4358,70 @@ class DeviceSettingsTests(unittest.TestCase):
         settings_service.set_polling_rate.assert_called_once_with(profile.snapshot.polling_rate)
         settings_service.set_step_size.assert_called_once_with(profile.snapshot.step_size)
         settings_service.set_vibration.assert_called_once_with(profile.snapshot.vibration)
+
+    def test_failed_capture_hop_names_every_tag_its_open_can_build(self) -> None:
+        # The seam's rule: a hop's delete_tags must name every tag its open_fn
+        # constructs, or the open_fn's own defensive delete runs inside the
+        # create pass. This hop's open_fn builds the no-restore-point confirm.
+        settings_service = MagicMock()
+        _ok_profile_write_results(settings_service)
+        profile = WrapperProfile(name="Apex", snapshot=_full_snapshot())
+        shell = _make_shell(settings_service, MagicMock())
+        shell.refresh_from_controller = MagicMock()
+        shell.restore_point_service.capture.return_value = None
+        shell._defer_modal_swap = MagicMock()
+
+        shell._apply_wrapper_profile_resolved("Apex", profile, include_device=True)
+
+        hops = [
+            call
+            for call in shell._defer_modal_swap.call_args_list
+            if call.kwargs.get("key") == "apply_profile_no_restore_point_confirm"
+        ]
+        self.assertEqual(len(hops), 1, shell._defer_modal_swap.call_args_list)
+        self.assertEqual(
+            set(hops[0].kwargs["delete_tags"]),
+            {APPLY_DEVICE_CONFIRM_MODAL, APPLY_NO_RESTORE_POINT_MODAL},
+        )
+        settings_service.set_polling_rate.assert_not_called()
+        # An async hop: the job just wrote its own result line, so a drop
+        # must not cover it with the notice.
+        self.assertFalse(hops[0].kwargs.get("notify_if_dropped", False))
+
+    def test_named_apply_refuses_while_a_hid_job_runs(self) -> None:
+        # Backstop for both Apply buttons (each is disabled during a job):
+        # no Device confirm, no consent re-offer, no store read over a job.
+        shell = _make_shell(MagicMock(), MagicMock())
+        shell._hid_job_in_flight = True
+        shell._refuse_hid_job = MagicMock()
+        shell._open_apply_device_confirm = MagicMock()
+        shell._consent_pending_write_allowed_or_refuse = MagicMock(return_value=True)
+        shell.wrapper_profile_store = MagicMock()
+
+        shell.apply_named_wrapper_profile("Apex")
+
+        shell._refuse_hid_job.assert_called_once()
+        shell._open_apply_device_confirm.assert_not_called()
+        shell._consent_pending_write_allowed_or_refuse.assert_not_called()
+        shell.wrapper_profile_store.load.assert_not_called()
+
+    def test_manual_write_gate_scopes_its_confirm_and_asks_for_the_notice(self) -> None:
+        # The manual-write Continue re-reads that screen's controls, so the
+        # seamed confirm is abandoned on navigation; it is a user click, so a
+        # drop says so.
+        shell = _make_shell(MagicMock(), MagicMock())
+        shell.restore_point_service.capture.return_value = None
+        shell.current_screen = "diagnostics"
+        shell._open_no_restore_point_confirm = MagicMock()
+
+        allowed, _disclosed = shell._manual_device_write_gate(
+            field_key="step_size", on_continue=lambda: None
+        )
+
+        self.assertFalse(allowed)
+        kwargs = shell._open_no_restore_point_confirm.call_args.kwargs
+        self.assertEqual(kwargs["owner_screen"], "diagnostics")
+        self.assertIs(kwargs["user_request"], True)
 
     # --- Migration (D6) -----------------------------------------------------
 
