@@ -188,16 +188,38 @@ class RawSourceTests(RepositoryFixture):
         finally:
             junction.rmdir()  # unlink only this task-owned junction
 
+    @unittest.skipUnless(os.name == "nt", "Windows generated-root junction boundary")
+    def test_generated_compiler_cache_root_junction_is_rejected(self):
+        target = self.root / "outside-runtime"
+        target.mkdir()
+        sentinel = target / "keep.py"
+        sentinel.write_text("fixture sentinel")
+        junction = self.repo / ".release-tools"
+        completed = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
+            "New-Item -ItemType Junction -Path $env:PROVENANCE_LINK -Target $env:PROVENANCE_TARGET | Out-Null"],
+            env={**os.environ, "PROVENANCE_LINK": str(junction), "PROVENANCE_TARGET": str(target)}, capture_output=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        try:
+            with self.assertRaisesRegex(exporter.ExportError, "Reparse"):
+                exporter.assert_clean_tree(self.repo)
+            self.assertEqual(sentinel.read_text(), "fixture sentinel")
+            self.assertEqual(list(target.iterdir()), [sentinel])
+        finally:
+            junction.rmdir()  # unlink only this task-owned junction
+
     def test_orchestrator_binds_source_label_trust_record_and_artifact_receipt(self):
         real_run = subprocess.run
         original_version = (self.repo / "zd_app/version.py").read_bytes()
+        self.write(".release-tools/inno-setup-6.7.1/ISCC.exe", "not source or executed by fixture")
 
         def fixture_packager(args, **kwargs):
             if args[0] != "powershell.exe":
                 return real_run(args, **kwargs)
             source = Path(kwargs["cwd"])
             self.assertFalse((source / ".git").exists())
-            self.assertEqual(args[-1], self.commit_id)
+            self.assertEqual(args[args.index("-ExpectedCommit") + 1], self.commit_id)
+            self.assertEqual(Path(args[args.index("-InnoToolchainRoot") + 1]), self.repo / ".release-tools")
+            self.assertFalse((source / ".release-tools").exists())
             self.assertNotIn("PYTHONPATH", kwargs["env"])
             version = source / "zd_app/version.py"
             version.write_bytes(original_version.replace(b'__build_commit__ = ""',
@@ -551,7 +573,7 @@ class WorkerMetadataTests(unittest.TestCase):
             with self.subTest(changed=changed), tempfile.TemporaryDirectory(prefix="legendctl-worker-prefix-") as temporary:
                 result, version = self.worker_prefix(Path(temporary), changed)
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn("does not match requirements-release.lock", result.stderr.decode(errors="replace"))
+                self.assertIn("does not match requirements-release.lock", " ".join(result.stderr.decode(errors="replace").split()))
                 self.assertIn(b'__build_commit__ = ""', version.read_bytes())
 
 

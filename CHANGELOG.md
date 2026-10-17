@@ -1,7 +1,27 @@
 # Changelog
 
-## Unreleased
+## v2.6.3 — Unreleased
 
+Candidate maintenance release collecting fixes since v2.6.2. Final installer,
+hardware, and release-artifact qualification remains pending.
+
+- Controller reconnects hydrate the correct controls from fresh readback;
+  disconnected settings are hidden and unread deadzones cannot be applied.
+- Manual deadzone, step-size and polling-rate readback updates saved-profile
+  values without requiring a separate Read. Saving waits for pending changes
+  and confirmation instead of saving an older cached value.
+- Step-size number entry and plus/minus controls edit a draft. Only Apply Step
+  Size writes it; profile saving refuses an unapplied draft.
+- Controller operations retain device identity across asynchronous work and
+  disconnect/reconnect boundaries. Pending-consent and busy guards prevent
+  competing writes; Last Applied state remains tied to the intended device.
+  Unconfirmed 8 kHz writes are not presented as verified changes.
+- Safe Import hardens local file handling, validates malformed profile data,
+  bounds classification work before preview, and safely displays malformed
+  Unicode field names. Profile storage publishes new files atomically.
+- Safe Import restores its preview after the file picker returns or is cancelled.
+  Restore recovery and snapshot handoff handle incomplete or malformed stored
+  data more carefully.
 - Restore confirmation now binds to the reviewed snapshot content. Write-only
   paddle changes disclose exact slots and targets and require explicit consent.
   Attempt summaries are stored separately without rewriting snapshot settings.
@@ -14,6 +34,17 @@
 - Local release builds use an immutable Git source export, record its full commit
   and artifact hashes, preserve existing output, and no longer refresh local
   installs or shortcuts. See [build provenance](docs/BUILD_PROVENANCE.md).
+- Installer builds verify the pinned compiler inputs. Installation enforces the
+  managed Program Files destination and rejects redirected paths or conflicting
+  prior registrations; it assumes normal protected Program Files permissions.
+- Python release dependencies are transitively pinned with SHA-256 hashes,
+  installed from a verified wheelhouse offline, and audited in the build
+  environment. Build/audit dependencies and pinned CI actions were refreshed;
+  a weekly dependency audit supplements pull-request checks.
+- Documentation and English, Simplified Chinese, and Korean trust wording more
+  closely describe existing read-back and profile behavior. Gated post-publication
+  Winget automation verifies installer checksums and build provenance before
+  submission; its presence does not mean catalog submission is enabled.
 
 ## v2.6.2 — 2026-07-19
 

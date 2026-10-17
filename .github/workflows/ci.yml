@@ -87,26 +87,33 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Create isolated audit environment
+        shell: pwsh
+        run: |
+          python -m venv .venv-audit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Download and install the hash-locked audit closure
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path .audit-wheelhouse | Out-Null
-          python -m pip download --disable-pip-version-check --only-binary=:all: --no-deps `
+          .\.venv-audit\Scripts\python.exe -m pip download --disable-pip-version-check --only-binary=:all: --no-deps `
             --require-hashes --dest .audit-wheelhouse -r requirements-release.lock
-          python -m pip install --disable-pip-version-check --no-index --find-links .audit-wheelhouse `
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv-audit\Scripts\python.exe -m pip install --disable-pip-version-check --no-index --find-links .audit-wheelhouse `
             --only-binary=:all: --no-deps --require-hashes -r requirements-release.lock
-          python -m pip check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv-audit\Scripts\python.exe -m pip check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Audit installed environment for known CVEs
         # requirements-build.txt itself asks for this before tagging a release;
         # this makes it continuous. Dependabot (see .github/dependabot.yml) keeps
         # the pins fresh between audits.
         #
-        # Triage pattern: if a finding is not applicable to the shipped app
-        # (e.g. a PyInstaller advisory scoped to the build host, not the bundled
-        # exe), SUPPRESS it with a written reason rather than dropping the gate:
-        #   run: pip-audit --ignore-vuln GHSA-xxxx-xxxx-xxxx  # why it doesn't apply
-        # Tip: in branch protection, keep `test` required but leave this `audit`
-        # job non-required until the baseline is clean, so a day-one transitive
-        # advisory doesn't block merges while you add the justified ignore.
-        run: python -m pip_audit
+        # Audit the same isolated closure that passed pip check; audit failures
+        # remain blocking and require review before dependency changes.
+        shell: pwsh
+        run: |
+          .\.venv-audit\Scripts\python.exe -m pip_audit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

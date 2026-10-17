@@ -891,8 +891,11 @@ class BusyRefusalTests(unittest.TestCase):
         service.release.set()
         _drain_queued_completions(shell, 1)
         _, drain_config = _capture_widget_state(shell._drain_hid_job_completions)
+        # This fixture only reads polling rate. Narrow Apply controls stay
+        # disabled until their own settings have been read successfully.
+        unread_apply_tags = {"controller_apply_deadzones", "controller_apply_step_size"}
         for tag in _HID_FLOW_BUTTON_TAGS:
-            self.assertIs(drain_config[tag]["enabled"], True, tag)
+            self.assertIs(drain_config[tag]["enabled"], tag not in unread_apply_tags, tag)
 
     def test_hydration_request_deferred_not_consumed_while_busy(self) -> None:
         shell, service = self._gated_busy_shell()

@@ -52,3 +52,4 @@ desktop.ini
 *.swp
 *~
 tools/symbols/
+.release-tools/

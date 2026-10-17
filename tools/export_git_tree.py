@@ -26,7 +26,7 @@ class ExportError(RuntimeError):
 # Excluded, never copied or imported. These allowances apply only to untracked
 # files; a tracked file is always compared with its committed bytes.
 GENERATED_ROOTS = {".venv-zd", "build", "dist", "local-install", "zd_data", ".pytest_cache",
-                   ".mypy_cache", ".ruff_cache", ".release-wheelhouse"}
+                   ".mypy_cache", ".ruff_cache", ".release-wheelhouse", ".release-tools"}
 
 
 def _git_env() -> dict[str, str]:
@@ -380,6 +380,7 @@ def run_build(repo: Path, destination: Path, python: Path) -> None:
             "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
             str(source / "tools" / "build_release.ps1"), "-FromVerifiedSnapshot",
             "-BuildPython", str(python), "-ExpectedCommit", commit,
+            "-InnoToolchainRoot", str(repo / ".release-tools"),
         ], cwd=source, env=env)
         if result.returncode:
             raise ExportError(f"Isolated release build failed (exit {result.returncode}); source retained: {source}")

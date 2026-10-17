@@ -487,8 +487,8 @@ class ControllerUnverifiedBannerTests(unittest.TestCase):
     def test_banner_shown_on_generic_xinput(self) -> None:
         self.assertTrue(self._banner_show("generic_xinput"))
 
-    def test_banner_shown_on_no_device(self) -> None:
-        self.assertTrue(self._banner_show("none"))
+    def test_banner_hidden_on_no_device(self) -> None:
+        self.assertFalse(self._banner_show("none"))
 
     def test_banner_hidden_on_zd(self) -> None:
         self.assertFalse(self._banner_show("zd_ultimate_legend"))

@@ -99,6 +99,8 @@ _EXEMPT_READ_JOB_OWNERS = frozenset(
         "refresh_from_controller",
         "_apply_wrapper_profile_resolved",
         "_schedule_deadzone_readback_verify",
+        "_schedule_controller_deadzone_readback",
+        "_schedule_device_setting_verify",
     }
 )
 
