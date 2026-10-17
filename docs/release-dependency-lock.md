@@ -11,6 +11,13 @@ installing only from that wheelhouse with `--no-index`. `pip check`, the complet
 test suite, `python -m pip_audit`, and PyInstaller all run from that same venv.
 There is no second online package resolution after the wheelhouse download.
 
+The CI and weekly dependency audit jobs use a separate `.venv-audit` with the
+same hash-locked wheelhouse download and offline install. Their download,
+install, `pip check`, and `pip_audit` commands all use that venv's explicit
+interpreter. Runner-preinstalled packages such as `pipx` stay outside the audited
+closure; they cannot introduce unrelated compatibility failures or be downgraded
+by the locked install. Any install, compatibility, or audit failure stops the job.
+
 Local release builds retain the supported Python 3.12 workflow:
 
 ```powershell

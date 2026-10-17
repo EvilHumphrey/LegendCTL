@@ -57,7 +57,7 @@ from tests.test_restore_points_screen import (
 )
 from zd_app import i18n
 from zd_app.models import AppSettings, DeviceState
-from zd_app.services.settings_service import MacroSlot, PollingRate
+from zd_app.services.settings_service import MacroSlot, PollingRate, StickDeadzones
 from zd_app.ui.app_shell import (
     _HID_FLOW_BUTTON_TAGS,
     BUTTON_SLOT_BY_LABEL,
@@ -486,6 +486,8 @@ class EntryPointBusyRefusalTests(_BusyWindowTestCase):
                 )
 
                 self._finish(shell, service)
+                if case["name"] == "apply_deadzone_settings":
+                    shell.last_controller_snapshot = empty_snapshot(deadzones=StickDeadzones(0, 0, 0, 0))
 
                 with patch(
                     "zd_app.ui.app_shell.dpg.get_value",

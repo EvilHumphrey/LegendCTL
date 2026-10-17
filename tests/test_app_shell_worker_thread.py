@@ -32,7 +32,13 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from tests.test_restore_points_screen import _rp as _restore_point_fixture
-from zd_app.storage.restore_point_models import PreparedRestore, RestorePreview
+from zd_app.storage.restore_point_models import (
+    PreparedRestore,
+    RestoreFieldOutcome,
+    RestorePreview,
+    RestoreResult,
+    RestoreResultLabel,
+)
 from tests.r2_shell_test_helpers import empty_snapshot
 from zd_app import i18n
 from zd_app.models import AppSettings, DeviceState, WrapperProfile
@@ -526,11 +532,24 @@ class _GatedService:
         )
 
 
+def _verified_restore_result() -> RestoreResult:
+    """One acknowledged step-size write with matching, reusable readback."""
+    return RestoreResult(
+        label=RestoreResultLabel.VERIFIED,
+        attempted=1, wrote_succeeded=1, write_failed=0,
+        verified_matched=1, could_not_verify=0, mismatched=0,
+        fields=(RestoreFieldOutcome("step_size", True, None, True),),
+        before_restore_point_id=None,
+        completed_at="2026-10-17T00:00:00Z",
+        readback_snapshot=empty_snapshot(step_size=_prepared_restore().materialize().snapshot.step_size),
+    )
+
+
 class _StubRestoreService:
     """RestorePointService stub for the restore flow: gated or raising."""
 
     def __init__(self, result=None, *, gate=False, raises=None):
-        self.result = result if result is not None else SimpleNamespace(label="ok")
+        self.result = result if result is not None else _verified_restore_result()
         self._gate = gate
         self._raises = raises
         self.started = threading.Event()
@@ -568,7 +587,7 @@ class _TokenAwareStubRestoreService(RestorePointService):
         self.write_calls = 0
         self.started = threading.Event()
         self.release = threading.Event()
-        self.result = SimpleNamespace(label="verified")
+        self.result = _verified_restore_result()
 
     def restore(self, rp_id, *, presence_guard=None, **_kwargs):
         if self.writes_started:
@@ -664,7 +683,7 @@ class SyncDefaultBehaviorTests(unittest.TestCase):
         shell = _make_shell(MagicMock(), restore_point_service=service)
         shell.restore_points_screen_state = _restore_screen_state()
 
-        rp_screen._execute_restore(shell)
+        _capture_widget_state(lambda: rp_screen._execute_restore(shell))
 
         state = shell.restore_points_screen_state
         self.assertEqual(state.view, rp_screen.VIEW_RESULT)
@@ -891,8 +910,11 @@ class BusyRefusalTests(unittest.TestCase):
         service.release.set()
         _drain_queued_completions(shell, 1)
         _, drain_config = _capture_widget_state(shell._drain_hid_job_completions)
+        # This fixture only reads polling rate. Narrow Apply controls stay
+        # disabled until their own settings have been read successfully.
+        unread_apply_tags = {"controller_apply_deadzones", "controller_apply_step_size"}
         for tag in _HID_FLOW_BUTTON_TAGS:
-            self.assertIs(drain_config[tag]["enabled"], True, tag)
+            self.assertIs(drain_config[tag]["enabled"], tag not in unread_apply_tags, tag)
 
     def test_hydration_request_deferred_not_consumed_while_busy(self) -> None:
         shell, service = self._gated_busy_shell()

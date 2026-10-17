@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CODEQL_WORKFLOW = ROOT / ".github" / "workflows" / "codeql.yml"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 WEEKLY_AUDIT_WORKFLOW = (
     ROOT / ".github" / "workflows" / "weekly-dependency-audit.yml"
 )
@@ -55,14 +56,52 @@ class DependencyUpdateAutomationTests(unittest.TestCase):
         self.assertIn("requirements-release.lock", workflow)
         self.assertIn("--require-hashes --dest .audit-wheelhouse", workflow)
         self.assertIn("--no-index --find-links .audit-wheelhouse", workflow)
-        self.assertIn("python -m pip check", workflow)
-        self.assertIn("python -m pip_audit", workflow)
-        self.assertEqual(workflow.count("if ($LASTEXITCODE -ne 0)"), 4)
+        self.assertIn(r".\.venv-audit\Scripts\python.exe -m pip check", workflow)
+        self.assertIn(r".\.venv-audit\Scripts\python.exe -m pip_audit", workflow)
 
         # A weekly audit must never grow into the GUI-producing product suite.
         self.assertNotIn("unittest", workflow)
         self.assertNotIn("evaluate-unittest-result", workflow)
         self.assertNotIn("tests/", workflow)
+
+    def test_audits_install_and_check_only_the_isolated_hash_locked_environment(self) -> None:
+        interpreter = r".\.venv-audit\Scripts\python.exe"
+        for path in (CI_WORKFLOW, WEEKLY_AUDIT_WORKFLOW):
+            with self.subTest(workflow=path.name):
+                # Inspect only the audit job; the independent product-test job
+                # is intentionally outside this dependency-closure contract.
+                audit_job = path.read_text(encoding="utf-8").split("\n  audit:\n", 1)[1]
+                scripts = re.findall(
+                    r"(?ms)^        run: \|\n(.*?)(?=^      - name:|\Z)", audit_job,
+                )
+                commands = []
+                for script in scripts:
+                    # Fold PowerShell continuations so each native command's
+                    # flags and immediate exit guard are checked together.
+                    script = re.sub(r"`\s*\n\s*", " ", script)
+                    lines = [line.strip() for line in script.splitlines()
+                             if line.strip() and not line.lstrip().startswith("#")]
+                    for index, line in enumerate(lines):
+                        if re.match(r"(?:python\b|\.\\.*python\.exe\b)", line):
+                            commands.append(line)
+                            self.assertLess(index + 1, len(lines), line)
+                            self.assertEqual(lines[index + 1], "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", line)
+                self.assertEqual(len(commands), 5, commands)
+                self.assertEqual(commands[0], "python -m venv .venv-audit")
+                for command in commands[1:]:
+                    self.assertTrue(command.startswith(interpreter + " -m "), command)
+                download, install, check, audit = commands[1:]
+                self.assertIn(" -m pip download ", download)
+                self.assertIn(" -m pip install ", install)
+                for command in (download, install):
+                    for flag in ("--only-binary=:all:", "--no-deps", "--require-hashes", "-r requirements-release.lock"):
+                        self.assertIn(flag, command)
+                self.assertIn("--dest .audit-wheelhouse", download)
+                self.assertIn("--no-index --find-links .audit-wheelhouse", install)
+                self.assertEqual(check, interpreter + " -m pip check")
+                self.assertEqual(audit, interpreter + " -m pip_audit")
+                for forbidden in ("--system-site-packages", "--user", "--target", "--ignore-vuln", "continue-on-error"):
+                    self.assertNotIn(forbidden, audit_job)
 
 
 if __name__ == "__main__":

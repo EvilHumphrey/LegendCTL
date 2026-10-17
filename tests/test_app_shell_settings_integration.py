@@ -2532,6 +2532,8 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         )
         settings_service.set_all_deadzones.return_value = result
         shell = _make_shell(settings_service)
+        shell.last_controller_snapshot = empty_snapshot(deadzones=StickDeadzones(0, 0, 0, 0))
+        settings_service.get_deadzones.return_value = expected
         values = {
             "deadzone_left_center_slider": 5,
             "deadzone_right_center_slider": 10,
@@ -2550,7 +2552,7 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         )
         shell.device_service.record_apply_result.assert_called_once_with(
             True,
-            "OK: Deadzone settings written.",
+            "OK: All four deadzones read back and match the requested values.",
         )
 
     def test_apply_deadzone_settings_service_none_no_write(self) -> None:
@@ -2599,6 +2601,8 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
             lambda deadzones: order.append("write") or apply_result
         )
         shell = _make_shell(settings_service)
+        shell.last_controller_snapshot = empty_snapshot(deadzones=StickDeadzones(0, 0, 0, 0))
+        settings_service.get_deadzones.return_value = expected
         shell.restore_point_service.capture.side_effect = (
             lambda trigger, **kwargs: order.append("capture")
             or SimpleNamespace(id="rp_deadzone", title="Deadzone restore point")
@@ -2628,6 +2632,8 @@ class TestAppShellSettingsIntegration(unittest.TestCase):
         )
         settings_service.set_all_deadzones.return_value = apply_result
         shell = _make_shell(settings_service)
+        shell.last_controller_snapshot = empty_snapshot(deadzones=StickDeadzones(0, 0, 0, 0))
+        settings_service.get_deadzones.return_value = StickDeadzones(5, 10, 3, 7)
         shell.restore_point_service.capture.return_value = None
         shell._open_no_restore_point_confirm = MagicMock()
         values = {
@@ -4143,9 +4149,9 @@ class PollingRate8000FirmwareHonestyTests(unittest.TestCase):
         self.assertEqual(shell.device_service.state.data_freshness, "write_failed")
         self.assertEqual(shell.device_service.state.sync_status, "Apply Failed")
 
-    def test_sub_8000_selection_never_reads_back(self) -> None:
-        # Only 8000 Hz pays the confirmation read — every other rate is
-        # unchanged (zero extra round-trips, no behaviour change).
+    def test_sub_8000_selection_defers_readback_until_quiet(self) -> None:
+        # Lower rates defer their confirmation until the control settles;
+        # the callback itself still performs no read.
         settings_service = MagicMock()
         result = SimpleNamespace(outcome=SetPollingRateOutcome.OK, error_code=None)
         settings_service.set_polling_rate.return_value = result
@@ -5268,6 +5274,8 @@ class StepSizeSaveToProfileNudgeTests(unittest.TestCase):
         shell, _store = self._shell_with_active_profile(1, self._ok())
 
         shell._do_write_step_size(73)
+        shell.settings_service.get_step_size.return_value = 73
+        shell._schedule_device_setting_verify("step_size", shell._device_setting_pending_verify.pop("step_size"))
 
         self.assertTrue(shell.step_size_save_nudge_offered())
         self.assertEqual(shell._pending_step_size_save, ("Apex", 73))
@@ -5280,6 +5288,8 @@ class StepSizeSaveToProfileNudgeTests(unittest.TestCase):
         shell._active_wrapper_profile_name = None
 
         shell._do_write_step_size(73)
+        shell.settings_service.get_step_size.return_value = 73
+        shell._schedule_device_setting_verify("step_size", shell._device_setting_pending_verify.pop("step_size"))
 
         self.assertFalse(shell.step_size_save_nudge_offered())
         store.load.assert_not_called()  # no profile to compare against
@@ -5288,6 +5298,8 @@ class StepSizeSaveToProfileNudgeTests(unittest.TestCase):
         shell, _store = self._shell_with_active_profile(73, self._ok())
 
         shell._do_write_step_size(73)
+        shell.settings_service.get_step_size.return_value = 73
+        shell._schedule_device_setting_verify("step_size", shell._device_setting_pending_verify.pop("step_size"))
 
         self.assertFalse(shell.step_size_save_nudge_offered())
 
@@ -5297,6 +5309,8 @@ class StepSizeSaveToProfileNudgeTests(unittest.TestCase):
         shell, _store = self._shell_with_active_profile(None, self._ok())
 
         shell._do_write_step_size(73)
+        shell.settings_service.get_step_size.return_value = 73
+        shell._schedule_device_setting_verify("step_size", shell._device_setting_pending_verify.pop("step_size"))
 
         self.assertFalse(shell.step_size_save_nudge_offered())
 

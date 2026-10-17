@@ -4,7 +4,8 @@ param(
     # Internal worker: invoked only from the raw-blob export orchestrator.
     [switch]$FromVerifiedSnapshot,
     [string]$BuildPython,
-    [string]$ExpectedCommit
+    [string]$ExpectedCommit,
+    [string]$InnoToolchainRoot
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,7 +53,7 @@ Set-Location $repoRoot
 
 $python = if ($FromVerifiedSnapshot) { $BuildPython } else { Join-Path $repoRoot ".venv-zd\Scripts\python.exe" }
 if (-not $FromVerifiedSnapshot) {
-    if ($BuildPython -or $ExpectedCommit) { throw "Snapshot parameters are internal to the release builder." }
+    if ($BuildPython -or $ExpectedCommit -or $InnoToolchainRoot) { throw "Snapshot parameters are internal to the release builder." }
     if (-not $ArtifactDestination) { $ArtifactDestination = Join-Path $repoRoot "dist" }
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
         throw "Expected venv at .venv-zd; run tools\setup_dev_env.ps1 first."
@@ -122,6 +123,11 @@ $versionEncoding = New-Object System.Text.UTF8Encoding($false)
 
 Write-Host "Building ZDUltimateLegend v$version" -ForegroundColor Cyan
 
+. (Join-Path $PSScriptRoot 'inno_setup.ps1')
+# The source/pin are immutable snapshot inputs; the external compiler cache is
+# separately verified, just like the external release Python environment.
+$inno = Find-VerifiedInnoSetupCompiler -RepoRoot $repoRoot -ToolchainRoot $InnoToolchainRoot
+
 try {
     # setup_dev_env.ps1 already installed this exact release lock from a
     # hash-verified wheelhouse. Do not run pip install here: a second resolver
@@ -152,15 +158,13 @@ try {
     # --- Build Inno Setup installer ---
     $installerPath = $null
     $installerHash = $null
-    $inno = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-    if (-not (Test-Path $inno)) {
-        $inno = "C:\Program Files\Inno Setup 6\ISCC.exe"
-    }
-    if (-not (Test-Path $inno)) {
-        Write-Warning "Inno Setup compiler (ISCC.exe) not found. Skipping installer build. Install Inno Setup 6.7.1+ from https://jrsoftware.org/isdl.php to enable installer output."
+    if (-not $inno) {
+        Write-Warning "Inno Setup compiler (ISCC.exe) not found. Skipping installer build. See docs/inno-setup-toolchain.md for the exact approved compiler."
     } else {
         $env:ZDUL_VERSION = $version
         $issPath = Join-Path $repoRoot "tools\installer\inno_setup_zd_wrapper.iss"
+        # Recheck the selected closure at use; never rediscover/fall back.
+        $inno = Assert-InnoSetupCompiler -Directory (Split-Path -Parent $inno) -Pin (Read-InnoSetupPin)
         Write-Host "Building Inno Setup installer..." -ForegroundColor Cyan
         Invoke-NativeCommand -Label "Inno Setup compile" -ScriptBlock { & $inno $issPath }
         $installerPath = Join-Path $repoRoot "dist\ZDUltimateLegend-v$version-Setup.exe"

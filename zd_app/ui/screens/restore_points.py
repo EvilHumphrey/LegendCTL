@@ -38,6 +38,7 @@ from typing import Optional
 import dearpygui.dearpygui as dpg
 
 from zd_app.i18n import t
+from zd_app.services._log_entry import LogEntry
 from zd_app.services.restore_field_formatting import format_field_value
 from zd_app.services.restore_points import (
     CLAIM_BOUNDARY_PARAGRAPH,
@@ -1344,12 +1345,16 @@ def _execute_restore(shell) -> None:
         if isinstance(outcome, BaseException):
             if not isinstance(outcome, Exception):
                 raise outcome  # keep today's `except Exception` scope
+            if not presence_guard():
+                finish_presence_changed(writes_may_have_occurred=True)
+                return
             logger.error("Restore failed", exc_info=outcome)
             _invalidate_prepared_restore(state)
             state.view = VIEW_LIST
             state.status_text = t("restore_points.manual.failure", reason=str(outcome))
             state.status_kind = "warn"
             state.result = None
+            _record_restore_footer_result(shell, None)
             shell.rebuild_current_screen()
             return
         if not presence_guard():
@@ -1369,6 +1374,10 @@ def _execute_restore(shell) -> None:
                 presence_key,
                 presence_generation,
             )
+        if not presence_guard():
+            finish_presence_changed(writes_may_have_occurred=True)
+            return
+        _record_restore_footer_result(shell, outcome)
         state.view = VIEW_RESULT
         state.result = outcome
         state.status_text = ""
@@ -1394,6 +1403,30 @@ def _execute_restore(shell) -> None:
         state.status_text = t("apply.busy")
         state.status_kind = "warn"
         shell.rebuild_current_screen()
+
+
+def _record_restore_footer_result(shell, result: RestoreResult | None) -> None:
+    """Replace the canonical last action with this Restore's actual outcome."""
+    record = getattr(shell, "_record_settings_apply_result", None)
+    if not callable(record):
+        return
+    timestamp = time.strftime("%H:%M:%S")
+    if result is None:
+        message = LogEntry(timestamp, "restore_points.result.header.restore_failed")
+        success = False
+    else:
+        message = LogEntry(timestamp, "restore_points.result.footer", {
+            "status_key": _RESULT_HEADER_KEYS.get(result.label, "restore_points.result.header.restore_failed"),
+            "matched": result.verified_matched,
+            "attempted": result.attempted,
+        })
+        success = result.label in (RestoreResultLabel.VERIFIED, RestoreResultLabel.RESTORED_WITH_WARNINGS)
+    record(success, message)
+    # Restore's own label already distinguishes verified/warnings/partial/
+    # mismatch/failure. Do not add a generic OK/Apply-failed banner prefix.
+    update = getattr(shell, "_update_apply_status", None)
+    if callable(update):
+        update(message, None)
 
 
 def _on_export_rp(shell, rp_id: str) -> None:
