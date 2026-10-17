@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -1750,6 +1752,105 @@ class SensitivityPlotAxisTests(unittest.TestCase):
             controller._PLOT_AXIS_TICKS,
             (("0", 0.0), ("25", 25.0), ("50", 50.0), ("75", 75.0), ("100", 100.0)),
         )
+
+
+class ControllerPrecedingTabTests(unittest.TestCase):
+    """The first-visible-tab guard's tab-order arithmetic (pure functions)."""
+
+    def test_first_tab_hides_nothing(self) -> None:
+        self.assertEqual(controller._preceding_tab_tags("sticks"), ())
+
+    def test_middle_tab_hides_everything_before_it(self) -> None:
+        self.assertEqual(
+            controller._preceding_tab_tags("lighting"),
+            ("tab_sticks", "tab_buttons", "tab_triggers", "tab_vibration"),
+        )
+
+    def test_last_tab_hides_the_other_six(self) -> None:
+        self.assertEqual(len(controller._preceding_tab_tags("profiles")), 6)
+
+    def test_unknown_tab_id_hides_nothing(self) -> None:
+        self.assertEqual(controller._preceding_tab_tags("bogus"), ())
+
+    def test_integer_app_data_resolves_to_its_alias(self) -> None:
+        """Callback ids arrive as INTEGERS under real DPG, not tag strings.
+
+        A bare ``str(<int>)`` never matches ``tab_``, which silently reset the
+        persisted tab to ``sticks`` on every real selection.
+        """
+
+        with patch.object(controller.dpg, "get_item_alias", return_value="tab_motion"):
+            self.assertEqual(controller._tab_tag_to_id(4321), "motion")
+
+    def test_string_tag_passes_through_untouched(self) -> None:
+        self.assertEqual(controller._tab_tag_to_id("tab_lighting"), "lighting")
+
+    def test_unresolvable_id_falls_back_to_default(self) -> None:
+        with patch.object(controller.dpg, "get_item_alias", return_value=""):
+            self.assertEqual(controller._tab_tag_to_id(9999), "sticks")
+
+
+class ControllerTabPersistenceIsolatedTests(unittest.TestCase):
+    """Real-render gate for Controller active-tab persistence.
+
+    Controller shared two REAL-render defects with the pre-fix Diagnostics
+    screen, and mocked tests here cannot see either. (1) The tab_bar callback's
+    app_data is the selected tab's INTEGER item id under real Dear PyGui, but
+    this module injects the alias STRING, so ``_tab_tag_to_id``'s ``str()``
+    fall-through to the ``sticks`` default never fired in the suite — every real
+    selection silently reset ``controller_active_tab``. (2) Real dpg selects the
+    first VISIBLE tab on the first rendered frame even after a same-pass
+    ``set_value``, flashing Sticks when a build lands on a non-first tab. Both
+    were measured on 2026-07-24 and both failed before the fix. One subprocess
+    per method — a second DPG context in one process hits the known teardown
+    segfault."""
+
+    _METHODS = (
+        "test_real_user_tab_selection_persists_across_rebuild",
+        "test_rebuild_holds_non_default_tab_every_frame",
+    )
+
+    def test_isolated_real_render_tab_persistence(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        for method in self._METHODS:
+            with self.subTest(method=method):
+                test_id = (
+                    "tests.isolated_controller_tab_persistence."
+                    f"IsolatedControllerTabPersistenceTest.{method}"
+                )
+                try:
+                    result = subprocess.run(
+                        [sys.executable, "-m", "unittest", test_id],
+                        cwd=repo_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    output_parts: list[str] = []
+                    for part in (exc.stdout, exc.stderr):
+                        if isinstance(part, bytes):
+                            output_parts.append(part.decode(errors="replace"))
+                        elif part:
+                            output_parts.append(part)
+                    self.fail(
+                        "Isolated controller tab-persistence child hung (native "
+                        "render hang class).\n\nChild output before timeout:\n"
+                        + "\n".join(output_parts)
+                    )
+
+                output = "\n".join(
+                    part for part in (result.stdout, result.stderr) if part
+                )
+                if any(line.strip() == "OK" for line in output.splitlines()):
+                    continue
+                self.fail(
+                    "Isolated controller tab-persistence test did not report "
+                    "unittest OK.\n"
+                    f"Return code: {result.returncode}\n"
+                    f"Command: {sys.executable} -m unittest {test_id}\n\n"
+                    f"Child output:\n{output}"
+                )
 
 
 if __name__ == "__main__":

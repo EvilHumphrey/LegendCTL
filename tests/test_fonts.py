@@ -192,6 +192,29 @@ class FontTests(unittest.TestCase):
         self.assertNotIn(("body", "ko"), handles)
         self.assertIn("Noto Sans KR", "\n".join(captured.output))
 
+    def test_zh_fonts_force_ranges_when_version_gate_is_false(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            font_path = Path(tmpdir) / "NotoSansSC-Regular.otf"
+            font_path.write_bytes(b"fake")
+            fake_dpg = SimpleNamespace(
+                add_font=MagicMock(return_value=10),
+                add_font_range_hint=MagicMock(),
+                mvFontRangeHint_Chinese_Full=123,
+                mvFontRangeHint_Korean=456,
+            )
+
+            with patch.object(fonts, "dpg", fake_dpg), patch.object(
+                fonts, "_needs_explicit_cjk_range", return_value=False
+            ):
+                for purpose in ("header", "h2", "body", "helper"):
+                    fonts._add_font_with_cjk(font_path, 15, purpose)
+
+        self.assertEqual(fake_dpg.add_font_range_hint.call_count, 8)
+        self.assertEqual(
+            fake_dpg.add_font_range_hint.call_args_list,
+            [call(123, parent=10), call(456, parent=10)] * 4,
+        )
+
     def test_bind_default_font_uses_locale_font(self) -> None:
         fake_dpg = SimpleNamespace(bind_font=MagicMock())
         fonts.FONT_HANDLES[("body", "en")] = 11
@@ -337,6 +360,60 @@ class KoFontRenderIsolatedTests(unittest.TestCase):
                     continue
                 self.fail(
                     f"Isolated ko-font-render child failed: {classification.reason}.\n"
+                    f"Return code: {result.returncode}\n"
+                    f"Command: {sys.executable} -m unittest {test_id}\n\n"
+                    f"Child output:\n{output}"
+                )
+
+
+class ZhFontRenderIsolatedTests(unittest.TestCase):
+    """Real-render gate: Han renders non-tofu through the real font registry.
+
+    The mocked tests above cannot establish that real DPG built Han glyphs into
+    the atlas. The isolated child renders the REAL ``register_fonts`` output in
+    a REAL viewport and asserts Chinese strings are strictly wider than a
+    same-length unmapped control. One subprocess per method — a second DPG
+    context in one process hits the known teardown segfault. Timeout-wrapped
+    for the native render-hang class."""
+
+    _METHODS = ("test_han_renders_non_tofu_through_register_fonts",)
+
+    def test_isolated_real_render_zh_font(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        for method in self._METHODS:
+            with self.subTest(method=method):
+                test_id = (
+                    "tests.isolated_zh_font_render."
+                    f"IsolatedZhFontRenderTest.{method}"
+                )
+                try:
+                    result = subprocess.run(
+                        [sys.executable, "-m", "unittest", test_id],
+                        cwd=repo_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    output_parts: list[str] = []
+                    for part in (exc.stdout, exc.stderr):
+                        if isinstance(part, bytes):
+                            output_parts.append(part.decode(errors="replace"))
+                        elif part:
+                            output_parts.append(part)
+                    self.fail(
+                        "Isolated zh-font-render child hung (native render hang "
+                        "class).\n\nChild output before timeout:\n"
+                        + "\n".join(output_parts)
+                    )
+
+                output = "\n".join(
+                    part for part in (result.stdout, result.stderr) if part
+                )
+                if any(line.strip() == "OK" for line in output.splitlines()):
+                    continue
+                self.fail(
+                    "Isolated zh-font-render test did not report unittest OK.\n"
                     f"Return code: {result.returncode}\n"
                     f"Command: {sys.executable} -m unittest {test_id}\n\n"
                     f"Child output:\n{output}"

@@ -366,6 +366,18 @@ class PrepareImportGuardTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.error_key, "safe_import.error.invalid_json")
 
+    def test_invalid_utf8_is_invalid_json(self) -> None:
+        # A byte sequence that is not UTF-8 is reported as an invalid file,
+        # not raised out of the scan callback. read_guarded_text decodes
+        # strictly, and prepare_import maps the UnicodeDecodeError. (An earlier
+        # reader had this case; that reader was retired by LegendCTL PR #18 and the
+        # case re-added 2026-10-17 against read_guarded_text.)
+        path = self.dir / "bad-utf8.json"
+        path.write_bytes(b'{"name": "\xff"}')
+        result = model.prepare_import(str(path), existing_names=set())
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_key, "safe_import.error.invalid_json")
+
     def test_too_deep_rejected_before_parse(self) -> None:
         deep = "[" * 70 + "]" * 70
         path = self._write("deep.json", deep)
@@ -870,6 +882,23 @@ class ModalThreadDeferralTests(_DpgTestCase):
     live in test_app_shell_ui_deferral.py.
     """
 
+    def _open_file_select_armed(self, shell) -> None:
+        """Open the front door and land it.
+
+        The shipped design (v2.6.4, LegendCTL PR #29): a fresh
+        open has no predecessor and builds inline, so the drain below is a
+        no-op on that path; it stays so a helper caller that left a stale
+        front door behind (a reopen, which rides the seam) still lands it.
+
+        The shell is parked on ``controller``, the screen that owns the Safe
+        Import button: a reopen's deferred create is abandoned if the screen
+        has changed since the request. A test shell defaults to ``home``.
+        """
+
+        shell.current_screen = "controller"
+        shell.open_safe_import()
+        self._drain_swap(shell)
+
     def _scan_armed(self, shell, raw) -> None:
         """The base ``_scan`` steps, without assuming a synchronous preview.
 
@@ -880,7 +909,7 @@ class ModalThreadDeferralTests(_DpgTestCase):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "p.json"
             path.write_text(json.dumps(raw), encoding="utf-8")
-            shell.open_safe_import()
+            self._open_file_select_armed(shell)
             dpg.set_value(safe_import.PATH_INPUT, str(path))
             shell.safe_import_scan_path()
 
@@ -925,7 +954,7 @@ class ModalThreadDeferralTests(_DpgTestCase):
         shell = make_shell(settings_service=MagicMock())
         shell._defer_ui_armed = True
 
-        shell.open_safe_import()
+        self._open_file_select_armed(shell)
         shell.safe_import_scan_path()  # empty path
         self.assertTrue(dpg.get_item_configuration(safe_import.FILE_ERROR)["show"])
         self.assertTrue(shell._deferred_ui_calls.empty())
@@ -970,6 +999,204 @@ class ModalThreadDeferralTests(_DpgTestCase):
         self.assertTrue(dpg.does_item_exist(safe_import.RESULT_MODAL))
         self.assertTrue(shell._deferred_ui_calls.empty())
         self._assert_no_placeholders(safe_import.RESULT_MODAL)
+
+    def test_plain_save_commits_its_tail_before_entering_the_seam(self) -> None:
+        # The profile is written to disk synchronously, so everything that
+        # RECORDS that write -- status result, footer profile combo, screen
+        # rebuild -- must happen before the seam, not inside the transition's
+        # open_fn. Inside it, a request from any other site arriving before the
+        # create pass superseded this transition and the user was left with a
+        # committed save, no status, a stale profile list and no confirmation.
+        # Fail-on-base: on the pre-fix code ``recorded`` is still empty when
+        # safe_import_apply returns.
+        shell = make_shell(settings_service=MagicMock())
+        self._full_ui(shell)
+        shell._defer_ui_armed = True
+        self._scan_armed(shell, _export_dict())
+        self._drain_swap(shell)
+
+        recorded: list[str] = []
+        shell.device_service.record_apply_result.side_effect = (
+            lambda *a, **k: recorded.append("status")
+        )
+        with patch.object(
+            shell,
+            "_refresh_footer_profile_combo",
+            side_effect=lambda **kw: recorded.append("footer"),
+        ), patch.object(
+            shell,
+            "rebuild_current_screen",
+            side_effect=lambda: recorded.append("rebuild"),
+        ):
+            shell.safe_import_apply(apply_to_controller=False)
+
+            # Safe Import reserves a fresh profile name with save_new
+            # (an earlier version of this test asserted the older save()).
+            shell.wrapper_profile_store.save_new.assert_called()
+            self.assertEqual(
+                recorded,
+                ["status", "footer", "rebuild"],
+                "the committed-save tail must run before the seam, so no "
+                "later modal request can discard it",
+            )
+
+            # Now supersede the result modal from another site, in the window
+            # the review reproduced (before the teardown pass).
+            shell._open_save_as_modal()
+            self._drain_swap(shell)
+            self._drain_swap(shell)
+
+            # The modal is the only thing lost, and the tail did not re-run.
+            self.assertEqual(recorded, ["status", "footer", "rebuild"])
+
+        self.assertFalse(dpg.does_item_exist(safe_import.RESULT_MODAL))
+        self.assertTrue(dpg.does_item_exist("wrapper_profile_save_as_modal"))
+
+    def test_a_late_request_cannot_strand_the_preview_hidden(self) -> None:
+        # Save + Apply's teardown HIDES the preview and only its own create
+        # puts the confirm in front of it. A different site asking for a modal
+        # in the one-frame window between the two passes used to supersede,
+        # which left the preview present-but-hidden with no confirm and no way
+        # back. Supersession is now refused once the teardown has run.
+        shell = make_shell(settings_service=MagicMock())
+        shell._defer_ui_armed = True
+        self._scan_armed(shell, _export_dict())
+        self._drain_swap(shell)
+        self.assertTrue(self._preview_shown())
+
+        shell.safe_import_request_apply_to_controller()
+        shell._drain_deferred_ui_calls()  # pass 1: preview hidden
+        self.assertFalse(self._preview_shown())
+        self.assertFalse(dpg.does_item_exist(safe_import.CONFIRM_MODAL))
+
+        shell._open_save_as_modal()  # dropped, not honoured
+        self._drain_swap(shell)
+        self._drain_swap(shell)
+
+        self.assertTrue(
+            dpg.does_item_exist(safe_import.CONFIRM_MODAL),
+            "the confirm must still land: without it the hidden preview has "
+            "no confirm in front of it and no route back on screen",
+        )
+        self.assertTrue(dpg.does_item_exist(safe_import.PREVIEW_MODAL))
+        # The documented cost of the rule: the dropped request is dropped.
+        self.assertFalse(dpg.does_item_exist("wrapper_profile_save_as_modal"))
+
+    def test_a_late_request_cannot_suppress_the_cancel_reshow(self) -> None:
+        # The mirror transition: Cancel deletes the confirm in pass 1 and
+        # re-shows the preview in pass 2. Superseding in between deleted the
+        # confirm and never re-showed the preview -- the same stranded state
+        # reached from the other direction.
+        shell = make_shell(settings_service=MagicMock())
+        shell._defer_ui_armed = True
+        self._scan_armed(shell, _export_dict())
+        self._drain_swap(shell)
+        shell.safe_import_request_apply_to_controller()
+        self._drain_swap(shell)
+        self.assertTrue(dpg.does_item_exist(safe_import.CONFIRM_MODAL))
+
+        shell.safe_import_cancel_apply_confirm()
+        shell._drain_deferred_ui_calls()  # pass 1: confirm deleted
+        self.assertFalse(dpg.does_item_exist(safe_import.CONFIRM_MODAL))
+        self.assertFalse(self._preview_shown())
+
+        shell._open_save_as_modal()  # dropped, not honoured
+        self._drain_swap(shell)
+        self._drain_swap(shell)
+
+        self.assertTrue(
+            self._preview_shown(),
+            "cancelling the confirm must always put the preview back",
+        )
+        self.assertFalse(dpg.does_item_exist("wrapper_profile_save_as_modal"))
+
+    def test_a_request_before_the_teardown_leaves_the_preview_shown(self) -> None:
+        # Anti-vacuity for the two above. Supersession is still allowed before
+        # the teardown pass, and it is safe there precisely because nothing has
+        # been hidden or deleted yet: the preview is still up and usable.
+        shell = make_shell(settings_service=MagicMock())
+        shell._defer_ui_armed = True
+        self._scan_armed(shell, _export_dict())
+        self._drain_swap(shell)
+
+        shell.safe_import_request_apply_to_controller()
+        shell._open_save_as_modal()  # supersedes; no teardown has run
+        self._drain_swap(shell)
+        self._drain_swap(shell)
+
+        self.assertFalse(dpg.does_item_exist(safe_import.CONFIRM_MODAL))
+        self.assertTrue(self._preview_shown())
+        self.assertTrue(dpg.does_item_exist("wrapper_profile_save_as_modal"))
+
+    def _dismiss_landed_front_door(self, shell) -> None:
+        """Open the front door fresh, then dismiss it with the titlebar X.
+
+        The X only HIDES a ``no_close=False`` window, so the stale front door
+        it leaves is what makes the next open a REOPEN, the path the shipped
+        design routes through the seam. A fresh open builds inline and has
+        no pending create to abandon.
+        """
+
+        shell.current_screen = "controller"
+        shell.open_safe_import()
+        self.assertTrue(dpg.does_item_exist(safe_import.PATH_INPUT))
+        dpg.configure_item(safe_import.FILE_MODAL, show=False)
+
+    def test_navigating_away_abandons_a_pending_file_select(self) -> None:
+        # The front door is screen-scoped: its only entry point is the
+        # Controller screen's Safe Import button, so a reopen requested a frame
+        # before the user clicks a nav item must not open over the destination.
+        # Fail-on-base: without the deferred create's screen check the front
+        # door lands over Home.
+        shell = make_shell(settings_service=MagicMock())
+        self._full_ui(shell)
+        shell._defer_ui_armed = True
+        self._dismiss_landed_front_door(shell)
+
+        shell.open_safe_import()  # a reopen: rides the seam
+        self.assertFalse(
+            dpg.is_item_shown(safe_import.FILE_MODAL),
+            "precondition: the reopen is deferred, not rebuilt inline",
+        )
+        shell._drain_deferred_ui_calls()  # teardown pass
+        self.assertFalse(dpg.does_item_exist(safe_import.FILE_MODAL))
+        shell.switch_screen("home")
+        self._drain_swap(shell)
+
+        self.assertFalse(dpg.does_item_exist(safe_import.FILE_MODAL))
+
+        # Anti-wedge: back on Controller, the front door opens again.
+        shell.switch_screen("controller")
+        shell.open_safe_import()
+        self.assertTrue(dpg.does_item_exist(safe_import.PATH_INPUT))
+
+    def test_navigating_away_before_the_teardown_also_abandons_file_select(
+        self,
+    ) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        self._full_ui(shell)
+        shell._defer_ui_armed = True
+        self._dismiss_landed_front_door(shell)
+
+        shell.open_safe_import()  # a reopen: rides the seam
+        shell.switch_screen("home")
+        self._drain_swap(shell)
+
+        self.assertFalse(dpg.does_item_exist(safe_import.FILE_MODAL))
+
+    def test_reopen_lands_when_the_user_stays_on_controller(self) -> None:
+        # Anti-vacuity for the two navigation tests: the same reopen, with no
+        # navigation, lands a fresh front door after the frame gap.
+        shell = make_shell(settings_service=MagicMock())
+        self._full_ui(shell)
+        shell._defer_ui_armed = True
+        self._dismiss_landed_front_door(shell)
+
+        shell.open_safe_import()
+        self._drain_swap(shell)
+
+        self.assertTrue(dpg.does_item_exist(safe_import.FILE_MODAL))
+        self.assertTrue(dpg.is_item_shown(safe_import.FILE_MODAL))
 
     def test_request_apply_confirm_hides_preview_then_creates_confirm(self) -> None:
         shell = make_shell(settings_service=MagicMock())

@@ -28,7 +28,7 @@ from zd_app.services._log_entry import (
     render_log_entry,
     render_log_message,
 )
-from zd_app.services.path_scrub import scrub_paths
+from zd_app.services.path_scrub import redact_inline_instance_ids, scrub_paths
 
 
 DIGCF_PRESENT = 0x2
@@ -38,6 +38,12 @@ DIGCF_PRESENT = 0x2
 # on the operator's machine 2026-07-02 (the mocked-API tests cannot catch this).
 DIGCF_ALLCLASSES = 0x4
 ERROR_NO_MORE_ITEMS = 259
+# Bounds for the SetupDi enumeration walk. A Windows machine enumerating more
+# than a few thousand present devices is already pathological, and a run of
+# consecutive per-index failures means the enumerator is not advancing, so
+# neither ceiling can truncate a healthy enumeration.
+_MAX_DEVICE_ENUM_INDEX = 8192
+_MAX_CONSECUTIVE_ENUM_FAILURES = 64
 SPDRP_DEVICEDESC = 0x0
 _INVALID_HANDLE_VALUE = w.HANDLE(-1).value
 _DEVICE_INSTANCE_ID_BUFFER_CHARS = 512
@@ -223,15 +229,33 @@ def _enumerate_present_device_entries_for(enumerator: str | None) -> list[dict[s
     entries: list[dict[str, str]] = []
     try:
         index = 0
-        while True:
+        consecutive_failures = 0
+        # Termination previously rested entirely on GetLastError() returning
+        # ERROR_NO_MORE_ITEMS. That value is read through a SEPARATE ctypes FFI
+        # call rather than via use_last_error=True, so ctypes does not
+        # guarantee it survives the preceding call's teardown. If it is ever
+        # clobbered, the old `while True` spun forever on the device-refresh
+        # path. These bounds make termination independent of that value; the
+        # loop still exits normally on ERROR_NO_MORE_ITEMS.
+        while index < _MAX_DEVICE_ENUM_INDEX:
             device_info = _SP_DEVINFO_DATA()
             device_info.cbSize = c.sizeof(_SP_DEVINFO_DATA)
             ok = bool(setupapi.SetupDiEnumDeviceInfo(info_set, index, c.byref(device_info)))
             if not ok:
                 if kernel32.GetLastError() == ERROR_NO_MORE_ITEMS:
                     break
+                consecutive_failures += 1
+                if consecutive_failures > _MAX_CONSECUTIVE_ENUM_FAILURES:
+                    logger.warning(
+                        "Device enumeration abandoned after %d consecutive "
+                        "failures at index %d; treating the set as complete.",
+                        consecutive_failures,
+                        index,
+                    )
+                    break
                 index += 1
                 continue
+            consecutive_failures = 0
 
             instance_id = _setupdi_device_instance_id(setupapi, info_set, device_info)
             if instance_id:
@@ -663,7 +687,25 @@ class DeviceService:
         )
 
     def recent_events(self, limit: int = 8) -> list[str]:
-        return [scrub_paths(render_log_entry(entry)) for entry in list(self.event_log)[:limit]]
+        """Recent event-log lines, share-safe.
+
+        Redacts the per-unit instance-ID tail as well as scrubbing paths.
+        ``scrub_paths`` alone is not enough here: a HID device-interface path
+        is structurally a path, so the scrubber returns its "basename", which
+        still carries the whole per-unit identifier. Event lines do carry those
+        ("Attempted path: ..." from the transport probes).
+
+        Applied at THIS source rather than per sink. Three consumers copy these
+        lines to the clipboard -- Copy compatibility report and Copy evidence
+        card redacted, Copy event log did not, from one shared source. Fixing
+        the source means a fourth sink cannot diverge the same way. Downstream
+        redaction is unaffected: the truncation is idempotent.
+        """
+
+        return [
+            redact_inline_instance_ids(scrub_paths(render_log_entry(entry)))
+            for entry in list(self.event_log)[:limit]
+        ]
 
     def clear_event_log(self) -> None:
         self.event_log.clear()

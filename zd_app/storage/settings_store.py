@@ -87,8 +87,17 @@ def _read_migration_state(marker_path: Path) -> str | None:
     if not marker_path.exists():
         return None
     try:
-        payload = json.loads(marker_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        # Guarded like every other persisted reader in this package. This one
+        # was added after the 2026-06-29 hardening pass routed the rest through
+        # read_guarded_json and was missed, leaving it the only unguarded
+        # reader here: no size cap, and RecursionError (a RuntimeError, NOT a
+        # ValueError) escaping the catch below. It runs inside
+        # initialize_user_data_dir() on the frozen-build startup path, so an
+        # escape is a launch brick with no in-app recovery, where every sibling
+        # store degrades to defaults. The marker is ~20 bytes; the cap is
+        # generous purely to bound a tampered file.
+        payload = read_guarded_json(marker_path, max_bytes=64 * 1024)
+    except (OSError, ValueError, TypeError, RecursionError):
         return _normalise_unreadable_migration_state(marker_path)
     if payload == {"state": MIGRATION_STATE_STARTED}:
         return MIGRATION_STATE_STARTED

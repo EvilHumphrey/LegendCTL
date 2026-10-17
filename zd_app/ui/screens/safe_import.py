@@ -108,7 +108,21 @@ def open_file_select(shell) -> None:
     # DPG hides that window, so delete/create must be separated by a frame.
     swap_key = "safe_import_open_file_select"
     pending = getattr(shell, "_pending_modal_swap_keys", ())
-    if callable(modal_swap) and (dpg.does_item_exist(FILE_MODAL) or swap_key in pending):
+    # A fresh entry made while another modal transition holds the create slot
+    # is arbitrated too. That transition's create lands on a later pass; built
+    # inline here, the front door would already be standing when it does, and
+    # that create would never render. The realistic case is a threaded HID
+    # job's outcome modal: its request is drained in the same tick the job
+    # re-enables this button. Through the seam the click is dropped (and
+    # logged) once that teardown has run, or supersedes it before, exactly as
+    # every other seamed site behaves. This narrows the race, not closes it:
+    # a callback running after that create claimed and released the slot
+    # still builds inline (the seam does not track landed modals; see
+    # AppShell._defer_modal_swap). ``is True`` keeps mock shells inline.
+    slot_held = getattr(shell, "_modal_swap_pending", False) is True
+    if callable(modal_swap) and (
+        dpg.does_item_exist(FILE_MODAL) or swap_key in pending or slot_held
+    ):
         modal_swap(
             _open,
             delete_tags=(FILE_MODAL,),

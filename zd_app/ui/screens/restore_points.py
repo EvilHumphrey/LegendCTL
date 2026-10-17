@@ -1474,40 +1474,91 @@ def _on_open_delete_confirm(shell, rp_id: str, title: str) -> None:
     modal pattern but lives here because this screen owns the action. The
     modal is a top-level window (not a child of the screen container), so
     both outcomes delete it explicitly before any rebuild.
+
+    Modal-swap hop (2026-07-25): this used to mirror the footer's *pre-fix*
+    shape -- ``does_item_exist`` -> ``delete_item`` -> inline
+    ``with dpg.window(modal=True)`` -- which pairs a teardown with a create
+    in ONE render pass. Under the benched DPG modal law (2026-06-11,
+    ``tools/diag_dpg_modal_thread_visibility.py``) the fresh modal then
+    exists but never becomes interactive: the Confirm button is dead and
+    nothing is logged. The footer sibling was cured in
+    ``AppShell.confirm_delete_named_wrapper_profile``; this screen was never
+    carried across.
+    Reachable without any exotic state: ``no_close=False`` means the
+    titlebar X only HIDES the window, so opening Delete on one row,
+    dismissing it with the X, then opening Delete on another row hits the
+    delete+create-in-one-pass shape. That the item outlives this screen is
+    already assumed elsewhere -- ``TAG_DELETE_CONFIRM_MODAL`` is listed in
+    ``app_shell.CLEAR_DIAGNOSTIC_LOGS_MODAL_SWAP_DELETE_TAGS``.
+
+    Routing through ``shell._defer_modal_swap`` puts a rendered frame
+    between the teardown and the create, which is what cures the law. The
+    ``getattr`` guard mirrors ``modules._open_export_preview``: screen
+    modules are handed lightweight fake shells by the mocked suite, and the
+    inline branch preserves the synchronous contract those paths rely on.
+
+    ``owner_screen`` scopes the request to Restore Points, the only screen
+    that builds these rows, matching the Modules and Wear Ledger
+    hops. The create captures this row's ``rp_id``, so a confirm landing
+    after the user navigated away would ask to delete a restore point over a
+    screen that no longer shows it; navigation now abandons the pending
+    create instead.
     """
+
+    def _open() -> None:
+        with dpg.window(
+            label=t("restore_points.delete_confirm.title"),
+            modal=True,
+            no_close=False,
+            no_resize=True,
+            # Delete can be chosen from inside a row ``More`` popup (on builds
+            # that carry one), and DPG defaults this to True -- which ImGui reads as
+            # NoOpenOverExistingPopup, so the modal does not open AT ALL while a
+            # popup is up. Confirmed live 2026-08-01: clicking
+            # ``Delete`` in the popup left the popup standing and no confirm
+            # modal appeared, so a destructive action silently did nothing.
+            # This is NOT the same-pass modal law and a seam hop does not fix it
+            # -- the seam is already in use below and the modal still never
+            # opened. Do not "simplify" this kwarg away.
+            no_open_over_existing_popup=False,
+            width=420,
+            height=170,
+            tag=TAG_DELETE_CONFIRM_MODAL,
+        ):
+            dpg.add_text(t("restore_points.delete_confirm.body", title=title), wrap=390)
+            dpg.add_spacer(height=SPACE_MD)
+            with dpg.group(horizontal=True):
+                dpg.add_button(
+                    label=t("actions.cancel"),
+                    tag=TAG_DELETE_CONFIRM_CANCEL_BUTTON,
+                    width=100,
+                    callback=lambda *args: dpg.delete_item(TAG_DELETE_CONFIRM_MODAL),
+                )
+                # Same load-bearing ``lambda *args, ...=...`` idiom as the row
+                # buttons (see _build_list_row / ListRowButtonDpgSignatureTests).
+                action_button(
+                    t("restore_points.delete_confirm.confirm"),
+                    destructive=True,
+                    tag=TAG_DELETE_CONFIRM_CONFIRM_BUTTON,
+                    width=100,
+                    callback=lambda *args, rp_id=rp_id, title=title: (
+                        _on_delete_confirmed(shell, rp_id, title)
+                    ),
+                )
+
+    modal_swap = getattr(shell, "_defer_modal_swap", None)
+    if callable(modal_swap):
+        modal_swap(
+            _open,
+            delete_tags=(TAG_DELETE_CONFIRM_MODAL,),
+            key="restore_points_delete_confirm",
+            owner_screen="restore_points",
+        )
+        return
 
     if dpg.does_item_exist(TAG_DELETE_CONFIRM_MODAL):
         dpg.delete_item(TAG_DELETE_CONFIRM_MODAL)
-
-    with dpg.window(
-        label=t("restore_points.delete_confirm.title"),
-        modal=True,
-        no_close=False,
-        no_resize=True,
-        width=420,
-        height=170,
-        tag=TAG_DELETE_CONFIRM_MODAL,
-    ):
-        dpg.add_text(t("restore_points.delete_confirm.body", title=title), wrap=390)
-        dpg.add_spacer(height=SPACE_MD)
-        with dpg.group(horizontal=True):
-            dpg.add_button(
-                label=t("actions.cancel"),
-                tag=TAG_DELETE_CONFIRM_CANCEL_BUTTON,
-                width=100,
-                callback=lambda *args: dpg.delete_item(TAG_DELETE_CONFIRM_MODAL),
-            )
-            # Same load-bearing ``lambda *args, ...=...`` idiom as the row
-            # buttons (see _build_list_row / ListRowButtonDpgSignatureTests).
-            action_button(
-                t("restore_points.delete_confirm.confirm"),
-                destructive=True,
-                tag=TAG_DELETE_CONFIRM_CONFIRM_BUTTON,
-                width=100,
-                callback=lambda *args, rp_id=rp_id, title=title: (
-                    _on_delete_confirmed(shell, rp_id, title)
-                ),
-            )
+    _open()
 
 
 def _on_delete_confirmed(shell, rp_id: str, title: str) -> None:

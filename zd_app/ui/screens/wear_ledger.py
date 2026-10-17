@@ -114,7 +114,6 @@ class WearLedgerScreenState:
     expanded_event_ts: Optional[str] = None  # ts of the currently-expanded row
     status_text: str = ""
     status_kind: str = "info"
-    pending_note_text: str = ""
 
 
 def _ensure_state(shell) -> WearLedgerScreenState:
@@ -611,51 +610,96 @@ def _label_to_module_filter_key(
 
 
 def _open_note_modal(shell) -> None:
-    state = _ensure_state(shell)
-    state.pending_note_text = ""
+    """Open the add-service-note modal.
+
+    Modal-swap hop (2026-07-27): the window used to be built inline right
+    after ``delete_item(TAG_NOTE_MODAL)``, pairing a teardown with a create in
+    ONE render pass. Under the benched DPG modal law (2026-06-11,
+    ``tools/diag_dpg_modal_thread_visibility.py``) the fresh modal then exists
+    but never becomes interactive: Save and Cancel are dead, no exception,
+    nothing logged. ``no_close=False`` makes that reachable by the plainest
+    path there is — the titlebar X only HIDES the window, so Add Service Note,
+    dismiss with the X, Add Service Note again. Routing through
+    ``shell._defer_modal_swap`` puts a rendered frame between the two halves,
+    which cures it. The ``getattr`` guard mirrors
+    ``modules._open_zip_preview``: the mocked suite hands this screen a
+    lightweight fake shell with no seam, and the inline branch preserves the
+    synchronous contract it relies on.
+
+    The button carries no payload — every request opens the same empty
+    editor — so the seam's plain drop-first coalescing is correct here and a
+    double-fired click opens exactly the modal it would have anyway. There is
+    no draft to carry either: the note text lives in the DPG input widget,
+    which ``_on_save_note`` reads directly, and the modal is rebuilt empty
+    every time.
+
+    ``owner_screen`` scopes the request to Wear Ledger, so navigating away
+    while the swap is pending abandons the create instead of opening the note
+    editor over the destination screen.
+    """
+
+    def _open() -> None:
+        try:
+            with dpg.window(
+                tag=TAG_NOTE_MODAL,
+                label=t("wear_ledger.modal.title"),
+                modal=True,
+                no_close=False,
+                no_resize=True,
+                width=520,
+                height=320,
+            ):
+                dpg.add_text(t("wear_ledger.modal.body"), wrap=480)
+                dpg.add_spacer(height=8)
+                dpg.add_input_text(
+                    tag=TAG_NOTE_MODAL_INPUT,
+                    multiline=True,
+                    width=480,
+                    height=160,
+                    hint=t("wear_ledger.modal.hint"),
+                )
+                dpg.add_spacer(height=8)
+                with dpg.group(horizontal=True):
+                    dpg.add_button(
+                        label=t("wear_ledger.modal.save"),
+                        tag=TAG_NOTE_MODAL_SAVE,
+                        width=160,
+                        callback=lambda *_a: _on_save_note(shell),
+                    )
+                    dpg.add_button(
+                        label=t("wear_ledger.modal.cancel"),
+                        tag=TAG_NOTE_MODAL_CANCEL,
+                        width=120,
+                        callback=lambda *_a: _on_cancel_note(shell),
+                    )
+        except SystemError:
+            # No DPG context — silently no-op. Tests assert via the
+            # _save_service_note pure helper.
+            return
+
+    modal_swap = getattr(shell, "_defer_modal_swap", None)
+    if callable(modal_swap):
+        try:
+            modal_swap(
+                _open,
+                delete_tags=(TAG_NOTE_MODAL,),
+                key="wear_ledger_note_modal",
+                owner_screen="wear_ledger",
+            )
+        except SystemError:
+            # Unarmed the seam runs the teardown inline, so a missing DPG
+            # context (test path) raises out of the same does_item_exist this
+            # function used to guard directly. Keep returning.
+            return
+        return
+
     try:
         if dpg.does_item_exist(TAG_NOTE_MODAL):
             dpg.delete_item(TAG_NOTE_MODAL)
     except SystemError:
         # No DPG context (test path). Nothing to clean up.
         return
-    try:
-        with dpg.window(
-            tag=TAG_NOTE_MODAL,
-            label=t("wear_ledger.modal.title"),
-            modal=True,
-            no_close=False,
-            no_resize=True,
-            width=520,
-            height=320,
-        ):
-            dpg.add_text(t("wear_ledger.modal.body"), wrap=480)
-            dpg.add_spacer(height=8)
-            dpg.add_input_text(
-                tag=TAG_NOTE_MODAL_INPUT,
-                multiline=True,
-                width=480,
-                height=160,
-                hint=t("wear_ledger.modal.hint"),
-            )
-            dpg.add_spacer(height=8)
-            with dpg.group(horizontal=True):
-                dpg.add_button(
-                    label=t("wear_ledger.modal.save"),
-                    tag=TAG_NOTE_MODAL_SAVE,
-                    width=160,
-                    callback=lambda *_a: _on_save_note(shell),
-                )
-                dpg.add_button(
-                    label=t("wear_ledger.modal.cancel"),
-                    tag=TAG_NOTE_MODAL_CANCEL,
-                    width=120,
-                    callback=lambda *_a: _on_cancel_note(shell),
-                )
-    except SystemError:
-        # No DPG context — silently no-op. Tests assert via the
-        # _save_service_note pure helper.
-        return
+    _open()
 
 
 def _on_save_note(shell) -> None:

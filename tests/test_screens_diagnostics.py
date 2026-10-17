@@ -1490,6 +1490,120 @@ class DiagnosticsFrontDoorScrollIsolatedTests(unittest.TestCase):
                 )
 
 
+class DiagnosticsFrontDoorLandingIsolatedTests(unittest.TestCase):
+    """Real-render gate for the trust front door's first shown tab.
+
+    Diagnostics creates Status first and selects the persisted Guidance tab in
+    the same build pass. The isolated child observes the REAL tab bar from the
+    pre-render frame-0 state through settling and fails if Status is selected
+    for any frame. One subprocess per method — a second DPG context in one
+    process hits the known teardown segfault. Timeout-wrapped for the native
+    render-hang class."""
+
+    _METHODS = (
+        "test_trust_matrix_shows_guidance_on_every_frame",
+        "test_self_check_shows_guidance_on_every_frame",
+    )
+
+    def test_isolated_real_render_frontdoor_landing(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        for method in self._METHODS:
+            with self.subTest(method=method):
+                test_id = (
+                    "tests.isolated_diagnostics_frontdoor_landing."
+                    f"IsolatedDiagnosticsFrontDoorLandingTest.{method}"
+                )
+                try:
+                    result = subprocess.run(
+                        [sys.executable, "-m", "unittest", test_id],
+                        cwd=repo_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    output_parts: list[str] = []
+                    for part in (exc.stdout, exc.stderr):
+                        if isinstance(part, bytes):
+                            output_parts.append(part.decode(errors="replace"))
+                        elif part:
+                            output_parts.append(part)
+                    self.fail(
+                        "Isolated front-door landing child hung (native render "
+                        "hang class).\n\nChild output before timeout:\n"
+                        + "\n".join(output_parts)
+                    )
+
+                output = "\n".join(
+                    part for part in (result.stdout, result.stderr) if part
+                )
+                if any(line.strip() == "OK" for line in output.splitlines()):
+                    continue
+                self.fail(
+                    "Isolated front-door landing test did not report unittest OK.\n"
+                    f"Return code: {result.returncode}\n"
+                    f"Command: {sys.executable} -m unittest {test_id}\n\n"
+                    f"Child output:\n{output}"
+                )
+
+
+class DiagnosticsPrecedingTabTests(unittest.TestCase):
+    """The first-visible-tab guard's tab-order arithmetic.
+
+    Pure functions, so this runs in the mocked suite — the REAL-render
+    behaviour they exist to prevent is gated separately by
+    ``DiagnosticsTabPersistenceIsolatedTests``.
+    """
+
+    @staticmethod
+    def _shell(developer_panels_visible: bool):
+        return MagicMock(
+            settings=AppSettings(developer_panels_visible=developer_panels_visible)
+        )
+
+    def test_developer_tab_counted_only_when_mounted(self) -> None:
+        self.assertEqual(
+            diagnostics._mounted_tab_ids(self._shell(False)),
+            ("status", "actions", "guidance"),
+        )
+        self.assertEqual(
+            diagnostics._mounted_tab_ids(self._shell(True)),
+            ("status", "actions", "guidance", "developer"),
+        )
+
+    def test_preceding_tabs_for_each_position(self) -> None:
+        mounted = ("status", "actions", "guidance")
+        self.assertEqual(diagnostics._preceding_tab_tags("status", mounted), ())
+        self.assertEqual(
+            diagnostics._preceding_tab_tags("actions", mounted), ("diag_tab_status",)
+        )
+        self.assertEqual(
+            diagnostics._preceding_tab_tags("guidance", mounted),
+            ("diag_tab_status", "diag_tab_actions"),
+        )
+
+    def test_unmounted_developer_tab_hides_nothing(self) -> None:
+        """The regression this guard must never cause: a blank tab bar.
+
+        A user can sit on Developer, then switch the Developer toggle off. The
+        persisted id survives but its tab is no longer built, so treating every
+        mounted tab as "preceding" would hide the WHOLE bar for a frame.
+        """
+
+        self.assertEqual(
+            diagnostics._preceding_tab_tags(
+                "developer", ("status", "actions", "guidance")
+            ),
+            (),
+        )
+
+    def test_unknown_tab_id_hides_nothing(self) -> None:
+        self.assertEqual(
+            diagnostics._preceding_tab_tags("bogus", ("status", "actions", "guidance")),
+            (),
+        )
+
+
 class DiagnosticsTabPersistenceIsolatedTests(unittest.TestCase):
     """Real-render gate for active-tab persistence under REAL DPG.
 
@@ -1506,6 +1620,7 @@ class DiagnosticsTabPersistenceIsolatedTests(unittest.TestCase):
 
     _METHODS = (
         "test_trust_surface_selection_survives_rebuild",
+        "test_presence_rebuild_after_focus_consumed_holds_guidance",
         "test_real_user_tab_selection_persists_across_rebuild",
     )
 

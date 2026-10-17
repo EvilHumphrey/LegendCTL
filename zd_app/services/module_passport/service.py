@@ -189,9 +189,14 @@ class ModulePassportService:
             # would otherwise raise RecursionError (escaping the old except). The
             # size cap is raised to MAX_PASSPORT_BYTES: a passport is trusted and
             # append-only, so it can outgrow the 1 MiB untrusted-import default.
+            # AttributeError is caught alongside them because the passport codec
+            # reads its fields with ``.get`` off a root it never type-checks (it
+            # does check the fingerprint entries), so a parseable non-object root
+            # (``[]`` / ``"x"`` / ``3`` / ``null``) degrades to "unreadable
+            # passport" rather than crashing. Same in the two archive readers.
             payload = read_guarded_json(path, max_bytes=MAX_PASSPORT_BYTES)
             return module_passport_from_dict(payload)
-        except (OSError, ValueError, RecursionError, json.JSONDecodeError):
+        except (OSError, ValueError, RecursionError, json.JSONDecodeError, AttributeError):
             logger.exception(
                 "ModulePassportService.get: failed to load %r", str(path)
             )
@@ -211,7 +216,7 @@ class ModulePassportService:
             try:
                 payload = read_guarded_json(path, max_bytes=MAX_PASSPORT_BYTES)
                 passport = module_passport_from_dict(payload)
-            except (OSError, ValueError, RecursionError, json.JSONDecodeError):
+            except (OSError, ValueError, RecursionError, json.JSONDecodeError, AttributeError):
                 logger.warning(
                     "ModulePassportService.list_archive: skipping unreadable %s",
                     path.name,
@@ -244,7 +249,7 @@ class ModulePassportService:
             try:
                 payload = read_guarded_json(path, max_bytes=MAX_PASSPORT_BYTES)
                 passport = module_passport_from_dict(payload)
-            except (OSError, ValueError, RecursionError, json.JSONDecodeError):
+            except (OSError, ValueError, RecursionError, json.JSONDecodeError, AttributeError):
                 logger.warning(
                     "ModulePassportService.list_archive_entries: skipping unreadable %s",
                     path.name,

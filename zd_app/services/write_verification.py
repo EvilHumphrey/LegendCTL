@@ -502,13 +502,28 @@ def verify_collection_outcome(
 ) -> tuple[Optional[bool], Optional[str], Optional[str], Optional[str]]:
     """Return the three-valued verification result for one collection field.
 
-    Honesty ordering: an entry that actually read back AND genuinely differs is
-    a KNOWN mismatch, and is surfaced even when a sibling entry's getter raised
-    mid-sweep. A known-bad must never be masked behind a sibling's
-    "could not verify". Only when NO readable entry mismatched does a read error
-    or an all-empty read-back degrade the field to could-not-verify — never to a
-    firmware mismatch, because the read error is proof we cannot make that call.
+    Honesty ordering: a ``WRITE_ONLY_FIELDS`` member is could-not-verify by
+    construction, checked before anything else in ``read_entries`` is even
+    looked at. Otherwise, an entry that actually read back AND genuinely
+    differs is a KNOWN mismatch, and is surfaced even when a sibling entry's
+    getter raised mid-sweep. A known-bad must never be masked behind a
+    sibling's "could not verify". Only when NO readable entry mismatched does
+    a read error or an all-empty read-back degrade the field to
+    could-not-verify — never to a firmware mismatch, because the read error is
+    proof we cannot make that call.
     """
+
+    # Write-only fields have no trustworthy read-back channel at all -- checked
+    # first, before any read_entries are even inspected, so this is
+    # could-not-verify BY CONSTRUCTION. It must not depend on today's getter
+    # happening to return an empty dict; a future getter that starts returning
+    # (unverifiable) cached data must not be able to smuggle a KNOWN mismatch
+    # past this guard via the readable_mismatches check below.
+    if name in WRITE_ONLY_FIELDS:
+        read_err = read_errors.get(name)
+        if read_err:
+            return None, f"verify-read failed: {read_err}", None, None
+        return None, "read-back did not return a value", None, None
 
     # KNOWN mismatches: entries present in the read-back that genuinely differ.
     # Unambiguous, so they win over any sibling read error. Entries ABSENT from
@@ -528,7 +543,7 @@ def verify_collection_outcome(
         return False, "read-back value differs from expected", expected_str, observed_str
 
     # No readable entry mismatched — the original three-valued logic stands.
-    if name in WRITE_ONLY_FIELDS or read_errors.get(name) or not read_entries:
+    if read_errors.get(name) or not read_entries:
         read_err = read_errors.get(name)
         if read_err:
             return None, f"verify-read failed: {read_err}", None, None

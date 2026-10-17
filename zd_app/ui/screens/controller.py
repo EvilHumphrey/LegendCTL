@@ -314,24 +314,64 @@ def render(shell) -> None:
 
 
 def _render_settings_tabs(shell) -> None:
+    # Real dpg 2.2 selects the first VISIBLE tab on the first rendered frame,
+    # even after a same-pass set_value — so a build that lands on a non-first
+    # tab paints one frame of Sticks before settling. Hiding the tabs that
+    # PRECEDE the active one for that frame makes the active tab the first
+    # visible one; the deferred reveal below restores the stable tab order on
+    # the next pass. Same order-keyed guard as Diagnostics — key it off tab
+    # ORDER, never off a one-shot navigation flag, or every rebuild after the
+    # flag is consumed runs unguarded (found after the v2.6.2 release).
+    # (All seven Controller tabs mount unconditionally — unlike Diagnostics,
+    # whose Developer tab is toggle-gated — so there is no "mounted subset" to
+    # compute here. An unknown persisted id still yields no guard.)
+    active_tab_id = getattr(shell, "controller_active_tab", "sticks")
+    preceding_tab_tags = _preceding_tab_tags(active_tab_id)
+
+    def _tab_shown(tab_tag: str) -> bool:
+        return tab_tag not in preceding_tab_tags
+
     with dpg.tab_bar(tag="controller_tab_bar", callback=lambda _s, selected_tab, _u: _remember_active_tab(shell, selected_tab)):
-        with dpg.tab(label=t("controller.tab.sticks"), tag="tab_sticks"):
+        with dpg.tab(label=t("controller.tab.sticks"), tag="tab_sticks", show=_tab_shown("tab_sticks")):
             _render_sticks_tab(shell)
-        with dpg.tab(label=t("controller.tab.buttons"), tag="tab_buttons"):
+        with dpg.tab(label=t("controller.tab.buttons"), tag="tab_buttons", show=_tab_shown("tab_buttons")):
             _render_buttons_tab(shell)
-        with dpg.tab(label=t("controller.tab.triggers"), tag="tab_triggers"):
+        with dpg.tab(label=t("controller.tab.triggers"), tag="tab_triggers", show=_tab_shown("tab_triggers")):
             _render_triggers_tab(shell)
-        with dpg.tab(label=t("controller.tab.vibration"), tag="tab_vibration"):
+        with dpg.tab(label=t("controller.tab.vibration"), tag="tab_vibration", show=_tab_shown("tab_vibration")):
             _render_vibration_tab(shell)
-        with dpg.tab(label=t("controller.tab.lighting"), tag="tab_lighting"):
+        with dpg.tab(label=t("controller.tab.lighting"), tag="tab_lighting", show=_tab_shown("tab_lighting")):
             _render_lighting_tab(shell)
-        with dpg.tab(label=t("controller.tab.motion"), tag="tab_motion"):
+        with dpg.tab(label=t("controller.tab.motion"), tag="tab_motion", show=_tab_shown("tab_motion")):
             _render_motion_tab(shell)
-        with dpg.tab(label=t("controller.tab.profiles"), tag="tab_profiles"):
+        with dpg.tab(label=t("controller.tab.profiles"), tag="tab_profiles", show=_tab_shown("tab_profiles")):
             _render_profiles_tab(shell)
-    active_tab_tag = _tab_id_to_tag(getattr(shell, "controller_active_tab", "sticks"))
+    active_tab_tag = _tab_id_to_tag(active_tab_id)
     if dpg.does_item_exist(active_tab_tag):
         dpg.set_value("controller_tab_bar", active_tab_tag)
+    if preceding_tab_tags:
+        # Bind the reveal to THIS build's integer item ids, not to the reusable
+        # aliases. If another rebuild replaces the tab bar before this call
+        # drains, the old ids no longer exist and the reveal no-ops — whereas an
+        # alias-keyed reveal would resolve to the NEW bar and un-hide its
+        # preceding tabs before its first rendered frame, reinstating the very
+        # flash this guard prevents.
+        hidden_tab_ids = tuple(
+            dpg.get_alias_id(tab_tag)
+            for tab_tag in preceding_tab_tags
+            if dpg.does_item_exist(tab_tag)
+        )
+
+        def reveal_preceding_tabs() -> None:
+            for tab_id in hidden_tab_ids:
+                if dpg.does_item_exist(tab_id):
+                    dpg.show_item(tab_id)
+
+        defer = getattr(shell, "_defer_ui_call", None)
+        if callable(defer):
+            defer(reveal_preceding_tabs)
+        else:
+            reveal_preceding_tabs()
 
 
 def _render_unverified_device_banner(shell) -> None:
@@ -1442,8 +1482,50 @@ def _tab_id_to_tag(tab_id: str) -> str:
     return "tab_sticks"
 
 
+def _preceding_tab_tags(active_tab_id: str) -> tuple[str, ...]:
+    """Tags of the tabs that come BEFORE the active one, in build order.
+
+    Those are hidden for the construction frame so the active tab is the first
+    visible one (the first-visible-tab law — see :func:`render`). An unknown id
+    yields no guard rather than hiding the whole bar.
+    """
+
+    if active_tab_id not in CONTROLLER_TAB_IDS:
+        return ()
+    return tuple(
+        f"tab_{tab_id}"
+        for tab_id in CONTROLLER_TAB_IDS[: CONTROLLER_TAB_IDS.index(active_tab_id)]
+    )
+
+
+def _tab_tag_text(tab_tag) -> str:
+    """Normalize a tab_bar value to its ``tab_*`` alias string.
+
+    Dear PyGui hands the tab_bar callback the *integer item id* of the selected
+    tab as its ``app_data`` — NOT the string alias. ``str(<int id>)`` never
+    starts with ``tab_``, so without resolving the id back to its alias every
+    REAL tab selection fell through to the ``sticks`` default in
+    :func:`_tab_tag_to_id`: ``controller_active_tab`` was silently reset to
+    ``sticks`` on every selection, so the user's tab did not survive a rebuild.
+    The mocked suite injects the alias STRING directly, which passes straight
+    through and masked the integer-id path entirely — this is the same defect
+    fixed on Diagnostics after the v2.6.1 CU smoke, which Controller shared and
+    kept until a REAL-render probe measured it
+    (``tests/isolated_controller_tab_persistence.py``). String tags pass
+    through untouched.
+    """
+
+    if isinstance(tab_tag, str):
+        return tab_tag
+    try:
+        alias = dpg.get_item_alias(tab_tag)
+    except Exception:  # pragma: no cover - defensive; alias lookup is total.
+        alias = None
+    return alias if alias else str(tab_tag)
+
+
 def _tab_tag_to_id(tab_tag) -> str:
-    value = str(tab_tag)
+    value = _tab_tag_text(tab_tag)
     if value.startswith("tab_"):
         tab_id = value.removeprefix("tab_")
         if tab_id in CONTROLLER_TAB_IDS:

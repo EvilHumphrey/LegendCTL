@@ -825,6 +825,45 @@ class I18nAmbiguousLiteralGuardTests(unittest.TestCase):
 
         self.assertEqual(i18n._ambiguous_en, {})
 
+    def test_untranslated_reviewed_key_rearms_warning(self) -> None:
+        # Companion to the two tests above: the reviewed key-set stays silent
+        # only while every sibling locale actually translated it. A reviewed
+        # key that silently ships the raw English literal (e.g. a "Home" key
+        # that was never given a real ko translation) was never reviewed in
+        # that state, so it must re-arm the warning instead of hiding behind
+        # the allowlist.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        locale_dir = Path(tmp.name)
+        (locale_dir / "en.json").write_text(
+            json.dumps(
+                {
+                    "controller.back_paddles.target.BACK": "Back",
+                    "diagnostics.live_verify.workspace.back_view": "Back",
+                }
+            ),
+            encoding="utf-8",
+        )
+        (locale_dir / "zh-CN.json").write_text(
+            json.dumps(
+                {
+                    "controller.back_paddles.target.BACK": "返回键",
+                    # BUG: never translated -- still the raw English literal.
+                    "diagnostics.live_verify.workspace.back_view": "Back",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        i18n._loaded.clear()
+        i18n._reverse_en.clear()
+        with mock.patch.object(i18n, "_locale_dir", return_value=locale_dir):
+            with self.assertLogs("zd_app.i18n", level="WARNING") as captured:
+                i18n._load("en")
+
+        self.assertIn("Back", "\n".join(captured.output))
+        self.assertIn("Back", i18n._ambiguous_en)
+
     def test_reviewed_ambiguous_literals_are_keyed_before_dpg_translation(self) -> None:
         # C3 (swept in with fix E): every reviewed-ambiguous English literal must
         # be KEYED before it reaches a localized DPG call — a raw literal there
