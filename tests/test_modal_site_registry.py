@@ -67,7 +67,6 @@ from tests.modal_site_walker import (
     Modality,
     TagSource,
     discover,
-    find_callers,
     function_uses_seam,
     iter_source_files,
     read_string_tuple,
@@ -613,17 +612,18 @@ SWEEP_LIST_UNREACHABLE_ENTRIES: frozenset[str] = frozenset(
 def _references_to(name: str) -> list[str]:
     """``relpath::qualname`` of every function under ``zd_app`` naming ``name``.
 
-    Unlike ``find_callers`` this counts any load of the name, call or not, so a
-    bound method handed over as a callback is seen too. It also counts the name
-    as a literal string argument to a call (``getattr(shell, "name")``) and as
-    an imported name (``from ... import name as alias``). Walks ``zd_app`` and
+    Unlike ``find_callers`` this counts any use of the name -- loads and
+    assignments alike, call or not -- so a bound method handed over as a
+    callback is seen too. It also counts the name as a literal string argument
+    to a call, positional or keyword (``getattr(shell, "name")``), and as an
+    imported name (``from ... import name as alias``). Walks ``zd_app`` and
     ``main_zd.py``. Sorted and de-duplicated by function.
 
     A tripwire for ordinary wiring, not a proof. It misses indirection: the name
     held in a constant or variable, looked up through ``vars()`` or a dict,
-    built in an f-string, or given as a keyword default. It can also over-report:
-    ``hasattr(shell, "name")`` or a log call whose argument is exactly the name
-    counts as a reference.
+    built in an f-string, or given as a parameter's default. It can also
+    over-report: ``hasattr(shell, "name")`` or a log call whose argument is
+    exactly the name counts as a reference.
     """
 
     hits: set[str] = set()
@@ -644,7 +644,10 @@ def _references_to(name: str) -> list[str]:
                     isinstance(child, ast.Call)
                     and any(
                         isinstance(arg, ast.Constant) and arg.value == name
-                        for arg in child.args
+                        for arg in [
+                            *child.args,
+                            *(keyword.value for keyword in child.keywords),
+                        ]
                     )
                 )
             )
@@ -912,15 +915,17 @@ class SeamClaimTests(unittest.TestCase):
         """Registered-dead modals must stay unreachable while they survive.
 
         They are kept rather than deleted pending a maintainer decision. If
-        anything ever calls one, it becomes a live modal with an uncured
-        same-pass shape, and this fails.
+        anything ever wires one up, it becomes a live modal with an uncured
+        same-pass shape, and this fails. ``_references_to`` rather than
+        ``find_callers``, because the likeliest wiring is a button's
+        ``callback=shell.fn``, which is a reference with no call.
         """
 
         for entry in MODAL_SITE_REGISTRY:
             if not entry.dead_code:
                 continue
             function_name = entry.owner.split(".")[-1]
-            callers = find_callers(entry.relpath, function_name)
+            callers = _references_to(function_name)
             self.assertEqual(
                 callers,
                 [],

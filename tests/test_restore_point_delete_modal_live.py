@@ -269,7 +269,8 @@ class RestorePointDeleteModalLiveTests(unittest.TestCase):
         NoOpenOverExistingPopup: the modal does not open AT ALL while a popup is
         up. Confirmed live 2026-08-01 on a build that carries the ``More``
         row action (not every build does): clicking ``Delete`` in the popup
-        left the popup standing and no confirm modal appeared. A destructive action silently did nothing.
+        left the popup standing and no confirm modal appeared. A destructive
+        action silently did nothing.
 
         This is NOT the same-pass modal law, and the seam does not fix it: the
         seam was already in use and the modal still never opened. The symptoms
