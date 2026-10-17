@@ -138,10 +138,10 @@ class ReleaseLockClosureTests(unittest.TestCase):
         self.assertIn("urllib3==2.8.0", release_lock["urllib3"])
         self.assertIn("pip==26.2.1", release_input)
         self.assertIn("pip==26.2.1", release_lock["pip"])
-        self.assertIn("pip-tools==7.6.1", tools_input)
+        self.assertIn("pip-tools==7.6.2", tools_input)
         self.assertIn("pip==26.2.1", tools_input)
         self.assertIn("pip-tools", lock_tools)
-        self.assertIn("pip-tools==7.6.1", lock_tools["pip-tools"])
+        self.assertIn("pip-tools==7.6.2", lock_tools["pip-tools"])
         self.assertIn("--hash=sha256:", lock_tools["pip-tools"])
         self.assertIn("pip==26.2.1", lock_tools["pip"])
 
