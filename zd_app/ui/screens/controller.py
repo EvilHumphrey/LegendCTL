@@ -5,6 +5,7 @@ from __future__ import annotations
 import dearpygui.dearpygui as dpg
 
 from zd_app.i18n import get_locale, t
+from zd_app.services._log_entry import render_log_message
 from zd_app.ui import right_rail, safe_import_badges
 from zd_app.ui.choice_labels import display_items, to_display
 from zd_app.ui.fonts import font_for
@@ -305,7 +306,14 @@ def render(shell) -> None:
     dpg.add_spacer(height=8)
     dpg.add_text("", tag="settings_v2_status_text", color=shell.COLORS["muted"], wrap=720)
     dpg.add_spacer(height=8)
+    dpg.add_text("", tag="controller_state_hint", color=shell.COLORS["warn"], wrap=720)
+    with dpg.group(tag="controller_settings_editor"):
+        _render_settings_tabs(shell)
+    shell._controller_built_layout_key = layout_key(shell)
+    refresh_state(shell)
 
+
+def _render_settings_tabs(shell) -> None:
     with dpg.tab_bar(tag="controller_tab_bar", callback=lambda _s, selected_tab, _u: _remember_active_tab(shell, selected_tab)):
         with dpg.tab(label=t("controller.tab.sticks"), tag="tab_sticks"):
             _render_sticks_tab(shell)
@@ -345,8 +353,69 @@ def _render_unverified_device_banner(shell) -> None:
         tag="controller_unverified_device_banner",
         color=shell.COLORS["warn"],
         wrap=720,
-        show=not write_supported,
+        show=not write_supported and getattr(state, "device_class", None) != "none",
     )
+
+
+def layout_key(shell) -> tuple[bool, bool, bool]:
+    """Only a completed read can choose the controller's curve editor."""
+
+    snapshot = shell.last_controller_snapshot
+    return (
+        snapshot is not None,
+        getattr(snapshot, "sensitivity_left_8point", None) is not None,
+        getattr(snapshot, "sensitivity_right_8point", None) is not None,
+    )
+
+
+def refresh_state(shell) -> None:
+    """Refresh availability without replacing drafts on ordinary shell ticks."""
+
+    if not dpg.does_item_exist("controller_settings_editor"):
+        return
+    state = shell.device_service.state
+    absent = getattr(state, "device_class", None) == "none"
+    supported = bool(getattr(state, "write_supported", True)) and not absent
+    snapshot = shell.last_controller_snapshot
+    readable = supported and snapshot is not None
+    busy = bool(getattr(shell, "hid_busy", False))
+    dpg.configure_item("controller_unverified_device_banner", show=not supported and not absent)
+    dpg.configure_item("controller_settings_editor", show=readable, enabled=not busy)
+    if absent:
+        hint = t("controller.disconnected")
+    elif not supported:
+        hint = ""
+    elif busy:
+        hint = t("controller.loading")
+    else:
+        hint = shell.last_snapshot_status or t("controller.read_required")
+    dpg.set_value("controller_state_hint", hint)
+    dpg.configure_item("controller_state_hint", show=not readable and bool(hint))
+
+    deadzones_readable = readable and snapshot.deadzones is not None
+    dpg.configure_item("controller_deadzone_editor", show=deadzones_readable, enabled=not busy)
+    dpg.configure_item("controller_apply_deadzones", enabled=deadzones_readable and not busy)
+    status_key = getattr(shell, "_controller_deadzone_status_key", None)
+    status = t(f"apply.deadzone.{status_key}") if status_key else ""
+    if not status and not deadzones_readable:
+        status = t("controller.deadzones_unread")
+    written = getattr(shell, "_controller_deadzone_written", None)
+    readback = getattr(shell, "_controller_deadzone_readback", None)
+    if written is not None:
+        def values(dz):
+            return f"{dz.left_center}, {dz.right_center}, {dz.left_outer}, {dz.right_outer}"
+        status += "\n" + t(
+            "controller.deadzones_receipt", requested=values(written),
+            readback=values(readback) if readback is not None else t("common.unknown"),
+        )
+    dpg.set_value("controller_deadzone_status", status)
+    dpg.configure_item("controller_deadzone_status", show=bool(status))
+    for field in ("step_size", "polling_rate"):
+        message = getattr(shell, "_device_setting_status", {}).get(field)
+        tag = f"controller_{field}_status"
+        if dpg.does_item_exist(tag):
+            dpg.set_value(tag, render_log_message(message) if message is not None else "")
+            dpg.configure_item(tag, show=message is not None)
 
 
 def _render_loading_hint(shell) -> None:
@@ -380,6 +449,7 @@ def _render_vibration_tab(shell) -> None:
         show=False,
     )
     dpg.add_text(t("controller.polling_rate.helper"), color=shell.COLORS["muted"], wrap=520)
+    dpg.add_text("", tag="controller_polling_rate_status", color=shell.COLORS["muted"], wrap=680, show=False)
     dpg.add_spacer(height=16)
     section_title(t("controller.vibration.title"))
     dpg.add_text(t("controller.vibration.helper"), color=shell.COLORS["muted"])
@@ -457,6 +527,7 @@ def _render_sticks_tab(shell) -> None:
         show=False,
     )
     dpg.add_text(t("controller.sticks.step_size.helper"), color=shell.COLORS["muted"], wrap=520)
+    dpg.add_text("", tag="controller_step_size_status", color=shell.COLORS["muted"], wrap=680, show=False)
     # Fix B (2026-06-24): dismissible nudge to persist a manually-changed
     # step_size into the active profile ("73 is one click from sticking").
     # Built hidden every screen rebuild; the shell re-syncs visibility + the
@@ -484,14 +555,16 @@ def _render_sticks_tab(shell) -> None:
     shell._render_step_size_save_nudge()
     dpg.add_spacer(height=16)
     section_title(t("controller.sticks.deadzones"))
-    for tag, label_key in (
-        ("deadzone_left_center_slider", "controller.sticks.left_center"),
-        ("deadzone_right_center_slider", "controller.sticks.right_center"),
-        ("deadzone_left_outer_slider", "controller.sticks.left_outer"),
-        ("deadzone_right_outer_slider", "controller.sticks.right_outer"),
-    ):
-        dpg.add_slider_int(label=t(label_key), default_value=0, min_value=0, max_value=100, width=320, tag=tag)
-    dpg.add_button(label=t("controller.sticks.apply_deadzones"), width=220, callback=lambda: shell.apply_deadzone_settings())
+    with dpg.group(tag="controller_deadzone_editor"):
+        for tag, label_key in (
+            ("deadzone_left_center_slider", "controller.sticks.left_center"),
+            ("deadzone_right_center_slider", "controller.sticks.right_center"),
+            ("deadzone_left_outer_slider", "controller.sticks.left_outer"),
+            ("deadzone_right_outer_slider", "controller.sticks.right_outer"),
+        ):
+            dpg.add_slider_int(label=t(label_key), default_value=0, min_value=0, max_value=100, width=320, tag=tag)
+        dpg.add_button(label=t("controller.sticks.apply_deadzones"), tag="controller_apply_deadzones", width=220, enabled=False, callback=lambda: shell.apply_deadzone_settings())
+    dpg.add_text("", tag="controller_deadzone_status", color=shell.COLORS["muted"], wrap=680)
     dpg.add_text(t("controller.sticks.deadzones_note"), color=shell.COLORS["muted"], wrap=640)
     dpg.add_spacer(height=SPACE_LG)
     # Sensitivity curves are the screen's centerpiece: a clearly-titled section

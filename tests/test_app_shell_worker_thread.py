@@ -892,7 +892,7 @@ class BusyRefusalTests(unittest.TestCase):
         _drain_queued_completions(shell, 1)
         _, drain_config = _capture_widget_state(shell._drain_hid_job_completions)
         for tag in _HID_FLOW_BUTTON_TAGS:
-            self.assertIs(drain_config[tag]["enabled"], True, tag)
+            self.assertIs(drain_config[tag]["enabled"], tag != "controller_apply_deadzones", tag)
 
     def test_hydration_request_deferred_not_consumed_while_busy(self) -> None:
         shell, service = self._gated_busy_shell()

@@ -244,6 +244,7 @@ _HID_FLOW_BUTTON_TAGS = (
     "footer_read_button",
     "footer_apply_button",
     "footer_delete_button",
+    "controller_apply_deadzones",
     restore_points.TAG_CONFIRM_RESTORE_BUTTON,
 )
 
@@ -288,6 +289,14 @@ class _PendingDeadzoneVerify:
     written: StickDeadzones
     presence_key: tuple[str, str, str]
     presence_generation: int
+
+
+@dataclass(frozen=True)
+class _PendingDeviceSettingVerify:
+    written: int | PollingRate
+    presence_key: tuple[str, str, str]
+    presence_generation: int
+    no_restore_point: bool
 
 
 @dataclass(frozen=True)
@@ -1263,6 +1272,12 @@ class AppShell:
         # frame so the shell never reaches into a screen widget directly.
         self._diag_deadzone_hydrated = False
         self._diag_deadzone_status_key = "idle"
+        self._controller_deadzone_status_key: str | None = None
+        self._controller_deadzone_written: StickDeadzones | None = None
+        self._controller_deadzone_readback: StickDeadzones | None = None
+        self._device_setting_pending_verify: dict[str, _PendingDeviceSettingVerify] = {}
+        self._device_setting_status: dict[str, LogEntry] = {}
+        self._unconfirmed_manual_fields: set[str] = set()
         # The last leading-edge (verify=False) deadzone value that still needs a
         # read-back verify. A single-callback change does the leading
         # write but creates no trailing pending, so the trailing flush never
@@ -2167,6 +2182,9 @@ class AppShell:
         # async fingerprint, and disconnects all land afterward; this keeps each
         # row's verified/inferred/unknown label live. No-op off Diagnostics.
         diagnostics.refresh_trust_matrix(self)
+        controller.refresh_state(self)
+        self._set_widget_enabled("footer_save_as_button", not self._manual_profile_save_pending())
+        self._set_widget_enabled("wrapper_profile_save_button", not self._manual_profile_save_pending())
         right_rail.refresh(self)
 
     def _set_if_exists(self, tag: str, value) -> None:
@@ -2414,6 +2432,7 @@ class AppShell:
                     dpg.configure_item(tag, enabled=enabled)
             except Exception:
                 logger.debug("HID-flow button toggle failed for %r", tag, exc_info=True)
+        controller.refresh_state(self)
 
     def _drain_hid_job_completions(self) -> None:
         while True:
@@ -2814,6 +2833,15 @@ class AppShell:
         self._show_first_readable_connect_card(first_connect_identity)
 
         missing: list[str] = []
+        self._controller_deadzone_status_key = None
+        self._controller_deadzone_written = None
+        self._controller_deadzone_readback = None
+        if include_device:
+            self._device_setting_pending_verify.clear()
+            self._device_setting_status.clear()
+        for field in tuple(self._unconfirmed_manual_fields):
+            if getattr(stored, field) is not None:
+                self._unconfirmed_manual_fields.discard(field)
         self._hydrate_controller_snapshot(stored, missing, include_device=include_device)
         if skipped_fields:
             self.last_snapshot_status = t(
@@ -2837,6 +2865,17 @@ class AppShell:
             )
         else:
             self.device_service.log_i18n_event("log.snapshot.refreshed_ok")
+        # The initial/reconnect page was built without a snapshot, so updating
+        # values alone leaves its loading card and legacy curve editors behind.
+        # Rebuild only when the read changes structure, preserving ordinary
+        # drafts and the profile-only apply's device-widget exclusion.
+        if (
+            include_device
+            and self._canonical_screen_id(self.current_screen) == "controller"
+            and getattr(self, "_controller_built_layout_key", None) is not None
+            and self._controller_built_layout_key != controller.layout_key(self)
+        ):
+            self.rebuild_current_screen()
         self._render_settings_snapshot_status()
         self.refresh_shell()
 
@@ -3427,9 +3466,21 @@ class AppShell:
             return False
         return bool(dpg.get_value(SAVE_AS_INCLUDE_DEVICE_CHECKBOX))
 
+    def _manual_profile_save_pending(self) -> bool:
+        """Do not snapshot an old or intermediate value while a manual edit settles."""
+        return bool(
+            self._unconfirmed_manual_fields
+            or self._device_setting_pending_verify
+            or self._slider_throttle.peek_pending()
+        )
+
     def save_current_as_named_wrapper_profile(
         self, name: str, *, include_device: bool = False
     ) -> None:
+        if self._manual_profile_save_pending():
+            self._record_settings_apply_result(False, t("apply.profile.save.awaiting_readback"))
+            self.refresh_shell()
+            return
         if self.last_controller_snapshot is None:
             message = t("apply.profile.save.no_snapshot")
             self._record_settings_apply_result(False, message)
@@ -3901,6 +3952,12 @@ class AppShell:
         self._last_apply_result_presence_key = None
         self._last_apply_result_presence_generation = None
         self._deadzone_pending_verify = None
+        self._controller_deadzone_status_key = None
+        self._controller_deadzone_written = None
+        self._controller_deadzone_readback = None
+        self._device_setting_pending_verify.clear()
+        self._device_setting_status.clear()
+        self._unconfirmed_manual_fields.clear()
         throttle = getattr(self, "_slider_throttle", None)
         if throttle is not None:
             throttle.clear_all()
@@ -5487,6 +5544,8 @@ class AppShell:
             with dpg.group(horizontal=True):
                 dpg.add_button(
                     label=t("footer.save_as_modal.save"),
+                    tag="wrapper_profile_save_button",
+                    enabled=not self._manual_profile_save_pending(),
                     width=100,
                     callback=lambda: self.save_current_as_wrapper_profile(),
                 )
@@ -6201,6 +6260,8 @@ class AppShell:
             logger.debug("Ignoring polling-rate callback before hydration from a real read.")
             return None
 
+        presence_key = self._controller_presence_key()
+        presence_generation = self._controller_presence_generation
         # Trigger model #4 — capture before a manual device-class write. A
         # failed capture stops the render-side callback before it reaches the
         # throttle or service write and opens the disclosed-continue gate.
@@ -6217,6 +6278,10 @@ class AppShell:
             if not allowed:
                 return None
 
+        if not self._controller_presence_token_is_current(presence_key, presence_generation):
+            self._discard_stale_refresh_result(presence_key, presence_generation)
+            return None
+
         if not self._slider_throttle.should_write_now(
             "polling_rate",
             (rate, label),
@@ -6226,6 +6291,7 @@ class AppShell:
         ):
             # Stored as pending; trailing-edge fire happens via
             # _flush_slider_throttle() on the next render tick.
+            self.refresh_shell()
             return None
         return self._do_write_polling_rate(
             rate,
@@ -6240,21 +6306,24 @@ class AppShell:
         *,
         no_restore_point: bool = False,
     ):
+        presence_key = self._controller_presence_key()
+        presence_generation = self._controller_presence_generation
         result = self.settings_service.set_polling_rate(rate)
+        if not self._controller_presence_token_is_current(presence_key, presence_generation):
+            self._discard_stale_controller_operation_after_write(presence_key, presence_generation)
+            return result
         success = _settings_outcome_is_success(result.outcome)
+        self._store_device_setting_readback("polling_rate", None, hydrate=False)
+        self._device_setting_pending_verify.pop("polling_rate", None)
         if success and rate is PollingRate.HZ_8000:
-            # 8000 Hz is the one rate with a firmware-capability cliff: it needs
-            # controller fw v1.18+. On a pre-1.18 device the WriteFile still
-            # succeeds,
-            # but the firmware silently keeps its previous (lower) rate. Confirm
-            # the commit with ONE read-back — the same get_polling_rate() the
-            # hydrate path already uses — fired ONLY on an 8000 Hz selection, so
-            # every other rate (and a successful 8K on capable hardware) pays
-            # nothing extra. Mirrors the cat-0x86 8-point fail-safe philosophy:
-            # when we cannot confirm the high-capability value, tell the truth
-            # and reconcile the UI to the device's real rate rather than leaving
-            # a false "8000Hz" displayed.
+            # Preserve the immediate 8K capability check: older firmware can
+            # acknowledge the setter while retaining a lower rate. Other rates
+            # use the same single getter after their throttle quiet interval.
             committed = self._read_polling_rate_for_confirm()
+            if not self._controller_presence_token_is_current(presence_key, presence_generation):
+                self._discard_stale_controller_operation_after_write(presence_key, presence_generation)
+                return result
+            self._store_device_setting_readback("polling_rate", committed)
             if committed is not None and committed is not PollingRate.HZ_8000:
                 return self._record_polling_rate_non_commit(
                     result,
@@ -6263,6 +6332,7 @@ class AppShell:
                 )
             if committed is None:
                 message = _make_log_entry("apply.result.write_unverified")
+                self._device_setting_status["polling_rate"] = message
                 self._record_settings_apply_result(
                     False,
                     message,
@@ -6274,8 +6344,16 @@ class AppShell:
             # falls through to the normal success path below.
         if success:
             message = _make_log_entry("apply.polling_rate.success", label=label)
+            if rate is not PollingRate.HZ_8000:
+                self._queue_device_setting_verify("polling_rate", rate, no_restore_point=no_restore_point)
+            else:
+                self._device_setting_status["polling_rate"] = _make_log_entry(
+                    "apply.manual.verified", setting_key="apply.failure.row_label.polling", value=label,
+                )
         else:
             message = _make_result_log_entry("apply.polling_rate.failed", result, label=label)
+            self._device_setting_status["polling_rate"] = message
+            self._hydrate_polling_rate(None, [])
 
         self._record_settings_apply_result(
             success,
@@ -6297,7 +6375,8 @@ class AppShell:
         """
 
         try:
-            return self.settings_service.get_polling_rate()
+            readback = self.settings_service.get_polling_rate()
+            return readback if isinstance(readback, PollingRate) else None
         except Exception as exc:
             logger.info("polling-rate commit read-back failed: %s", exc)
             return None
@@ -6327,6 +6406,7 @@ class AppShell:
         message = _make_log_entry(
             "apply.polling_rate.non_commit_8000", kept=committed_label
         )
+        self._device_setting_status["polling_rate"] = message
         self._record_settings_apply_result(
             False,
             message,
@@ -6357,6 +6437,8 @@ class AppShell:
             logger.debug("Ignoring step-size callback before hydration from a real read.")
             return None
 
+        presence_key = self._controller_presence_key()
+        presence_generation = self._controller_presence_generation
         # Trigger model #4 — capture before a manual device-class write. A
         # failed capture stops before the throttle or service write and posts
         # the disclosed-continue gate.
@@ -6373,6 +6455,10 @@ class AppShell:
             if not allowed:
                 return None
 
+        if not self._controller_presence_token_is_current(presence_key, presence_generation):
+            self._discard_stale_refresh_result(presence_key, presence_generation)
+            return None
+
         if not self._slider_throttle.should_write_now(
             "step_size",
             int(value),
@@ -6382,6 +6468,7 @@ class AppShell:
         ):
             # Stored as pending; trailing-edge fire happens via
             # _flush_slider_throttle() on the next render tick.
+            self.refresh_shell()
             return None
         return self._do_write_step_size(
             int(value),
@@ -6389,38 +6476,107 @@ class AppShell:
         )
 
     def _do_write_step_size(self, value: int, *, no_restore_point: bool = False):
-        # Live slider path: a PLAIN write. This fires rapidly during a drag (the
-        # slider callback plus the trailing-edge throttle flush), and a per-move
-        # verified read-back is both slow and timeout-prone -- on real hardware
-        # the read-back's HID timeout raised straight through the verified setter
-        # and crashed the app mid-drag. The live path never needed verification:
-        # the original revert-to-floor concern was a profile clobber, not a
-        # failed live write. The deliberate Apply still confirms a single
-        # committed step_size via the apply-coordinator's verified trailer (where
-        # the in-burst-rejection quirk actually bites), so nothing is lost by
-        # writing plainly here.
+        # Keep rapid slider movement on the plain setter. A single bounded
+        # confirmation runs after the final write settles, off the render thread.
+        presence_key = self._controller_presence_key()
+        presence_generation = self._controller_presence_generation
         result = self.settings_service.set_step_size(value)
+        if not self._controller_presence_token_is_current(presence_key, presence_generation):
+            self._discard_stale_controller_operation_after_write(presence_key, presence_generation)
+            return result
         success = _settings_outcome_is_success(result.outcome)
+        self._store_device_setting_readback("step_size", None, hydrate=False)
+        self._device_setting_pending_verify.pop("step_size", None)
         if success:
             message = _make_log_entry("apply.step_size.success", value=value)
+            self._queue_device_setting_verify("step_size", value, no_restore_point=no_restore_point)
         else:
             message = _make_result_log_entry("apply.step_size.failed", result, value=value)
+            self._device_setting_status["step_size"] = message
+            self._hydrate_step_size(None, [])
 
         self._record_settings_apply_result(
             success,
             message,
             no_restore_point=no_restore_point,
         )
-        # Fix B: after a successful live change, offer to persist it into the
-        # active profile when it diverges from that profile's stored step_size.
-        # A failed write (device gone / write error) changed nothing on-device,
-        # so there is nothing new to save — clear any stale nudge instead.
-        if success:
-            self._maybe_offer_save_step_size_to_profile(value)
-        else:
-            self._clear_step_size_save_nudge()
+        # Offer profile persistence only after a read confirms the settled value.
+        self._clear_step_size_save_nudge()
         self.refresh_shell()
         return result
+
+    def _store_device_setting_readback(self, field: str, observed, *, hydrate: bool = True) -> None:
+        if observed is None:
+            self._unconfirmed_manual_fields.add(field)
+        else:
+            self._unconfirmed_manual_fields.discard(field)
+        if self.last_controller_snapshot is not None:
+            self._set_last_controller_snapshot(replace(self.last_controller_snapshot, **{field: observed}))
+        if hydrate:
+            if field == "step_size":
+                self._hydrate_step_size(observed, [])
+            else:
+                self._hydrate_polling_rate(observed, [])
+
+    def _queue_device_setting_verify(self, field: str, written, *, no_restore_point: bool) -> None:
+        self._device_setting_pending_verify[field] = _PendingDeviceSettingVerify(
+            written, self._controller_presence_key(), self._controller_presence_generation, no_restore_point,
+        )
+        self._device_setting_status[field] = _make_log_entry("apply.manual.verifying")
+
+    def _flush_device_setting_verifications(self, now: float) -> None:
+        if self.hid_busy:
+            return
+        for field, pending in list(self._device_setting_pending_verify.items()):
+            if not self._slider_throttle.quiet_window_elapsed(field, now=now):
+                continue
+            del self._device_setting_pending_verify[field]
+            self._schedule_device_setting_verify(field, pending)
+            if self.hid_busy:
+                break
+
+    def _schedule_device_setting_verify(self, field: str, pending: _PendingDeviceSettingVerify) -> None:
+        def current():
+            return self._controller_presence_token_is_current(pending.presence_key, pending.presence_generation)
+
+        def job():
+            if self._hid_executor is not None:
+                time.sleep(POST_APPLY_READ_SETTLE_S)
+            if not current():
+                return None
+            if field == "step_size":
+                return self.settings_service.get_step_size()
+            return self.settings_service.get_polling_rate()
+
+        def on_done(readback):
+            if not current():
+                self._discard_stale_controller_operation_after_write(pending.presence_key, pending.presence_generation)
+                return
+            if field == "step_size":
+                observed = readback if type(readback) is int and 1 <= readback <= 255 else None
+                setting_key = "apply.failure.row_label.step_size"
+                display = str(observed)
+            else:
+                observed = readback if isinstance(readback, PollingRate) else None
+                setting_key = "apply.failure.row_label.polling"
+                display = POLLING_RATE_LABEL_BY_ENUM.get(observed, t("common.unknown"))
+            self._store_device_setting_readback(field, observed)
+            matched = observed is not None and observed == pending.written
+            if observed is None:
+                message = _make_log_entry("apply.result.write_unverified")
+            else:
+                message = _make_log_entry(
+                    "apply.manual.verified" if matched else "apply.manual.mismatch", setting_key=setting_key, value=display,
+                )
+            self._device_setting_status[field] = message
+            self._record_settings_apply_result(matched, message, no_restore_point=pending.no_restore_point)
+            if field == "step_size" and matched:
+                self._maybe_offer_save_step_size_to_profile(observed)
+            logger.info("Manual setting readback: field=%s requested=%s observed=%s", field, pending.written, observed)
+            self.refresh_shell()
+
+        if not self._run_hid_job(job, on_done):
+            self._device_setting_pending_verify[field] = pending
 
     # -- Fix B: save a changed step_size into the active profile -------------
 
@@ -6686,6 +6842,7 @@ class AppShell:
                 _presence_key=pending_verify.presence_key,
                 _presence_generation=pending_verify.presence_generation,
             )
+        self._flush_device_setting_verifications(now)
 
     def apply_back_paddle_binding_from_combo(self, slot: MacroSlot):
         if not self._hid_write_available_or_refuse():
@@ -6859,6 +7016,12 @@ class AppShell:
             self.refresh_shell()
             return None
 
+        if self.last_controller_snapshot is None or self.last_controller_snapshot.deadzones is None:
+            self._record_settings_apply_result(False, t("controller.deadzones_unread"))
+            self.refresh_shell()
+            return None
+        presence_key = self._controller_presence_key()
+        presence_generation = self._controller_presence_generation
         deadzones = StickDeadzones(
             left_center=dpg.get_value("deadzone_left_center_slider"),
             right_center=dpg.get_value("deadzone_right_center_slider"),
@@ -6878,18 +7041,78 @@ class AppShell:
             )
             if not allowed:
                 return None
+        # Capturing the checkpoint can take time. Do not dispatch the captured
+        # values if their controller disappeared or changed during that read.
+        if not self._controller_presence_token_is_current(presence_key, presence_generation):
+            self._discard_stale_refresh_result(presence_key, presence_generation)
+            return None
         result = self.settings_service.set_all_deadzones(deadzones)
+        if not self._controller_presence_token_is_current(presence_key, presence_generation):
+            self._discard_stale_controller_operation_after_write(presence_key, presence_generation)
+            return result
         success = _settings_outcome_is_success(result.outcome)
+        self._controller_deadzone_written = deadzones
+        self._controller_deadzone_readback = None
+        self._unconfirmed_manual_fields.add("deadzones")
+        # A write outcome is not a new read. Retire the old deadzone values so
+        # rebuilding the page or saving a snapshot cannot revive the baseline.
+        if self.last_controller_snapshot is not None:
+            self._set_last_controller_snapshot(replace(self.last_controller_snapshot, deadzones=None))
         if success:
-            message = _make_log_entry("apply.deadzone.success")
+            self._controller_deadzone_status_key = "verifying"
+            self._update_apply_status(_make_log_entry("apply.deadzone.verifying"), False)
+            self._schedule_controller_deadzone_readback(
+                deadzones, presence_key, presence_generation, no_restore_point=no_restore_point,
+            )
         else:
+            self._controller_deadzone_status_key = "write_failed"
             message = _make_result_log_entry("apply.deadzone.failed", result)
-
-        self._record_settings_apply_result(
-            success, message, no_restore_point=no_restore_point
-        )
+            self._record_settings_apply_result(False, message, no_restore_point=no_restore_point)
         self.refresh_shell()
         return result
+
+    def _schedule_controller_deadzone_readback(
+        self,
+        written: StickDeadzones,
+        presence_key: tuple[str, str, str],
+        presence_generation: int,
+        *,
+        no_restore_point: bool,
+    ) -> None:
+        """One bounded confirmation read; never retry or repair a write here."""
+
+        def job():
+            if self._hid_executor is not None:
+                time.sleep(POST_APPLY_READ_SETTLE_S)
+            if not self._controller_presence_token_is_current(presence_key, presence_generation):
+                return None
+            return self.settings_service.get_deadzones()
+
+        def on_done(readback):
+            if not self._controller_presence_token_is_current(presence_key, presence_generation):
+                self._discard_stale_controller_operation_after_write(presence_key, presence_generation)
+                return
+            observed = readback if isinstance(readback, StickDeadzones) else None
+            if observed is not None:
+                self._unconfirmed_manual_fields.discard("deadzones")
+            status = _deadzone_verify_status_key(observed, written)
+            self._controller_deadzone_status_key = "unverified" if status == "sent_unverified" else status
+            self._controller_deadzone_readback = observed
+            if self.last_controller_snapshot is not None:
+                self._set_last_controller_snapshot(replace(self.last_controller_snapshot, deadzones=observed))
+            self._hydrate_deadzones(observed, [])
+            logger.info("Controller deadzone readback: requested=%s observed=%s status=%s", written, observed, status)
+            self._record_settings_apply_result(
+                status == "verified",
+                _make_log_entry(f"apply.deadzone.{self._controller_deadzone_status_key}"),
+                no_restore_point=no_restore_point,
+            )
+            controller.refresh_state(self)
+            self.refresh_shell()
+
+        logger.info("Controller deadzone write sent: requested=%s; confirmation pending", written)
+        if not self._run_hid_job(job, on_done):
+            on_done(None)
 
     def apply_diagnostics_deadzone(
         self,
