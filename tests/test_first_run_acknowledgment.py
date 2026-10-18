@@ -26,7 +26,9 @@ from tests.r2_shell_test_helpers import make_shell
 from zd_app import i18n
 from zd_app.i18n import t
 from zd_app.models import AppSettings
+from zd_app.services.device_service import DeviceService
 from zd_app.ui import trust_front_door
+from zd_app.ui.screens.restore_points import RestorePointsScreenState
 
 
 _MODAL = "first_run_ack_modal"
@@ -273,6 +275,197 @@ class FirstRunGateLogicTests(unittest.TestCase):
             )
         finally:
             dpg.destroy_context()
+
+
+class ConsentRefusalWithdrawnOnAcceptTests(unittest.TestCase):
+    """Accept takes down the "accept the first-run notice" refusal.
+
+    The refusal is recorded as the durable apply receipt, which the footer
+    falls back to whenever the transient banner is down, so without a
+    withdrawal it outlives the consent it asks for (installed-build smoke of
+    public 25ba935, check (c)).
+
+    The baseline is the real first-run one: no write can land before consent,
+    so the receipt, apply time and write duration are all unset, and the
+    startup auto-read has left the data fresh.
+    """
+
+    def setUp(self) -> None:
+        i18n.set_locale("en")
+        dpg.create_context()
+        self.shell = make_shell(
+            settings_service=mock.MagicMock(),
+            settings=AppSettings(first_run_acknowledged=False),
+        )
+        shell = self.shell
+        # Record receipts the way DeviceService does, so the fields the footer
+        # and the compatibility report read actually change.
+        service = shell.device_service
+        service.record_apply_result.side_effect = (
+            lambda success, message: DeviceService.record_apply_result(
+                service, success, message
+            )
+        )
+        state = service.state
+        state.connection_state = "connected"
+        state.sync_status = "Ready"
+        state.data_freshness = "fresh"
+        state.last_read_time = "2026-10-17T00:00:00Z"
+        self.assertIsNone(service.last_apply_result)
+        self.assertIsNone(service.last_write_duration_ms)
+        self.assertIsNone(state.last_apply_time)
+        with dpg.window(tag="footer_test_window"):
+            dpg.add_text(tag="footer_status_text", default_value="")
+            dpg.add_text(tag="settings_v2_status_text", default_value="")
+        shell._dpg_context_ready = True
+        shell.switch_screen = mock.MagicMock()
+        shell._hid_available_or_refuse = mock.MagicMock(return_value=True)
+        shell._step_size_hydrated = True
+        shell._manual_device_write_gate = mock.MagicMock(return_value=(True, False))
+        shell._do_write_step_size = mock.MagicMock()
+        shell._show_first_run_acknowledgment_modal_if_needed()
+        dpg.get_item_configuration(_VERIFY)["callback"]()
+
+    def tearDown(self) -> None:
+        dpg.destroy_context()
+        i18n.set_locale("en")
+
+    def _refuse(self) -> str:
+        refusal = t("first_run.pending_write_blocked")
+        self.assertIsNone(self.shell.apply_step_size(150))
+        self.assertEqual(self.shell.device_service.last_apply_result, refusal)
+        self.assertIn(refusal, dpg.get_value("footer_status_text"))
+        return refusal
+
+    def _accept(self) -> None:
+        dpg.get_item_configuration(_ACCEPT)["callback"]()
+
+    def test_accept_restores_every_field_the_refusal_stamped(self) -> None:
+        self._refuse()
+        self.assertEqual(self.shell.device_service.last_write_duration_ms, 0.0)
+        self._accept()
+        service = self.shell.device_service
+        state = service.state
+        self.assertIsNone(service.last_apply_result)
+        self.assertIsNone(service.last_write_duration_ms)
+        self.assertIsNone(state.last_apply_time)
+        self.assertEqual(state.sync_status, "Ready")
+        self.assertEqual(state.data_freshness, "fresh")
+        self.assertIsNone(self.shell._apply_status_message)
+        self.assertEqual(dpg.get_value("footer_status_text"), t("apply.idle_ready"))
+
+    def test_fields_that_moved_after_the_refusal_are_left_alone(self) -> None:
+        self._refuse()
+        state = self.shell.device_service.state
+        state.sync_status = "Connected"
+        state.data_freshness = "stale"
+        self._accept()
+        self.assertIsNone(self.shell.device_service.last_apply_result)
+        self.assertEqual(state.sync_status, "Connected")
+        self.assertEqual(state.data_freshness, "stale")
+
+    def test_repeat_refusal_restores_the_first_receipt_and_current_state(self) -> None:
+        self._refuse()
+        state = self.shell.device_service.state
+        # A replug between the refusals moves sync and freshness on.
+        state.sync_status = "Connected"
+        state.data_freshness = "stale"
+        self._refuse()
+        self._accept()
+        service = self.shell.device_service
+        self.assertIsNone(service.last_apply_result)
+        self.assertIsNone(service.last_write_duration_ms)
+        self.assertIsNone(state.last_apply_time)
+        self.assertEqual(state.sync_status, "Connected")
+        self.assertEqual(state.data_freshness, "stale")
+        self.assertEqual(dpg.get_value("footer_status_text"), t("apply.idle_ready"))
+
+    def test_back_to_back_refusals_restore_the_pre_refusal_state(self) -> None:
+        self._refuse()
+        self._refuse()
+        self._accept()
+        state = self.shell.device_service.state
+        self.assertIsNone(self.shell.device_service.last_apply_result)
+        self.assertEqual(state.sync_status, "Ready")
+        self.assertEqual(state.data_freshness, "fresh")
+
+    def test_a_receipt_between_refusals_is_what_accept_restores(self) -> None:
+        self._refuse()
+        self.shell.device_service.record_apply_result(True, "Saved profile X.")
+        self._refuse()
+        self._accept()
+        service = self.shell.device_service
+        self.assertEqual(service.last_apply_result, "Saved profile X.")
+        self.assertEqual(service.state.sync_status, "Ready")
+        self.assertEqual(service.state.data_freshness, "write_success")
+        self.assertEqual(dpg.get_value("footer_status_text"), "Saved profile X.")
+
+    def test_accept_takes_the_refusal_off_the_settings_status_line(self) -> None:
+        refusal = self._refuse()
+        self.assertIn(refusal, dpg.get_value("settings_v2_status_text"))
+        self._accept()
+        self.assertEqual(dpg.get_value("settings_v2_status_text"), "")
+
+    def test_a_newer_banner_and_restore_status_are_left_alone(self) -> None:
+        rp_state = self._refused_restore_state("restore_points")
+        rp_state.status_text = "A newer restore status."
+        self._refuse()
+        self.shell._update_apply_status("A newer banner.", True)
+        self._accept()
+        self.assertEqual(self.shell._apply_status_message, "A newer banner.")
+        self.assertEqual(rp_state.status_text, "A newer restore status.")
+        self.shell.rebuild_current_screen.assert_not_called()
+
+    def test_a_newer_receipt_is_left_alone(self) -> None:
+        self._refuse()
+        self.shell.device_service.record_apply_result(False, "A newer receipt.")
+        self.shell._apply_status_message = None
+        self.shell._apply_status_clear_after = None
+        self._accept()
+        service = self.shell.device_service
+        self.assertEqual(service.last_apply_result, "A newer receipt.")
+        self.assertEqual(service.last_write_duration_ms, 0.0)
+        self.assertEqual(service.state.sync_status, "Apply Failed")
+        self.assertEqual(dpg.get_value("footer_status_text"), "A newer receipt.")
+
+    def _refused_restore_state(self, screen: str) -> RestorePointsScreenState:
+        rp_state = RestorePointsScreenState()
+        rp_state.status_text = t("first_run.pending_write_blocked")
+        rp_state.status_kind = "warn"
+        self.shell.restore_points_screen_state = rp_state
+        self.shell.current_screen = screen
+        self.shell.rebuild_current_screen = mock.MagicMock()
+        return rp_state
+
+    def test_accept_clears_a_refused_restore_screen_status(self) -> None:
+        rp_state = self._refused_restore_state("restore_points")
+        self._refuse()
+        self._accept()
+        self.assertEqual(rp_state.status_text, "")
+        self.assertEqual(rp_state.status_kind, "info")
+        self.shell.rebuild_current_screen.assert_called_once_with()
+
+    def test_restore_status_is_cleared_off_screen_without_a_rebuild(self) -> None:
+        rp_state = self._refused_restore_state("home")
+        self._refuse()
+        self._accept()
+        self.assertEqual(rp_state.status_text, "")
+        self.shell.rebuild_current_screen.assert_not_called()
+
+    def test_restore_status_from_an_earlier_locale_is_cleared(self) -> None:
+        rp_state = self._refused_restore_state("restore_points")
+        self._refuse()
+        i18n.set_locale("zh-CN")
+        self._refuse()
+        self._accept()
+        self.assertEqual(rp_state.status_text, "")
+
+    def test_accept_without_a_refusal_touches_no_status(self) -> None:
+        self.shell.refresh_shell = mock.MagicMock()
+        self.shell._show_first_run_acknowledgment_modal_if_needed()
+        self._accept()
+        self.assertIsNone(self.shell.device_service.last_apply_result)
+        self.shell.refresh_shell.assert_not_called()
 
 
 class FirstRunModalContentTests(unittest.TestCase):
