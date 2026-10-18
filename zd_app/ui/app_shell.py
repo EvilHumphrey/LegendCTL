@@ -1205,6 +1205,15 @@ class AppShell:
         # hidden": the preview's own titlebar X also hides it, and a stateless
         # restore would resurrect a preview the user dismissed themselves.
         self._consent_reoffer_hidden_tags: tuple[str, ...] = ()
+        # A consent-pending write refusal is recorded as a failed-apply
+        # receipt, which outlives the transient banner. Accept withdraws it,
+        # so these keep the refusal text(s) shown since the last Accept (one
+        # per locale it was rendered in), the receipt object it became, and
+        # the receipt fields it replaced. See
+        # :meth:`_withdraw_consent_refusal_status`.
+        self._consent_refusal_texts: tuple[str, ...] = ()
+        self._consent_refusal_receipt: object | None = None
+        self._consent_refusal_prior: dict[str, object] | None = None
         set_locale(self.settings.language)
         self._locale_router = LocaleRouter()
         self._locale_router.subscribe(self._on_locale_changed)
@@ -2433,12 +2442,111 @@ class AppShell:
 
         if not self._consent_pending_verify:
             return True
-        self._record_settings_apply_result(
-            False,
-            t("first_run.pending_write_blocked"),
-        )
+        device_service = self.device_service
+        state = device_service.state
+        prior = self._consent_refusal_prior
+        if (
+            prior is None
+            or getattr(device_service, "last_apply_result", None)
+            is not self._consent_refusal_receipt
+        ):
+            # Every field ``record_apply_result`` is about to overwrite.
+            prior = {
+                "last_apply_result": getattr(device_service, "last_apply_result", None),
+                "last_write_duration_ms": getattr(
+                    device_service, "last_write_duration_ms", None
+                ),
+                "last_apply_time": state.last_apply_time,
+                "sync_status": state.sync_status,
+                "data_freshness": state.data_freshness,
+            }
+        else:
+            # A repeat refusal over our own receipt: the receipt, time and
+            # duration before the first refusal are still the ones to put
+            # back. Sync status and freshness also move on connect/read, so
+            # take their current values unless they still show the refusal.
+            prior = dict(prior)
+            if state.sync_status != "Apply Failed":
+                prior["sync_status"] = state.sync_status
+            if state.data_freshness != "write_failed":
+                prior["data_freshness"] = state.data_freshness
+        self._consent_refusal_prior = prior
+        refusal = t("first_run.pending_write_blocked")
+        self._record_settings_apply_result(False, refusal)
+        if refusal not in self._consent_refusal_texts:
+            self._consent_refusal_texts += (refusal,)
+        self._consent_refusal_receipt = getattr(device_service, "last_apply_result", None)
         self._reoffer_first_run_gate()
         return False
+
+    def _withdraw_consent_refusal_status(self) -> None:
+        """Take down the consent-pending write refusal once consent is given.
+
+        The refusal says "Accept the first-run notice before changing
+        controller settings"; after Accept that is no longer true, but it was
+        recorded as the durable apply receipt (so the footer falls back to it
+        whenever the transient banner is down) and, for a refused Restore, as
+        the Restore Points screen's own status line. Each is withdrawn only
+        while it is still the refusal: anything that has replaced it since is
+        newer than the refusal and stays.
+
+        Every field the refusal's ``record_apply_result`` stamped goes back to
+        what it replaced, rather than to a new "consent accepted" line: no
+        write happened, so the previous receipt is still the true one, and a
+        left-over write duration would read as a write attempt.
+        """
+
+        refusals = self._consent_refusal_texts
+        receipt = self._consent_refusal_receipt
+        prior = self._consent_refusal_prior
+        self._consent_refusal_texts = ()
+        self._consent_refusal_receipt = None
+        self._consent_refusal_prior = None
+        if not refusals:
+            return
+
+        device_service = self.device_service
+        if (
+            prior is not None
+            and getattr(device_service, "last_apply_result", None) is receipt
+        ):
+            # ``record_apply_result`` is the only writer of the apply time and
+            # write duration, and it always replaces the receipt, so a receipt
+            # that is still ours means those are still the refusal's too. Sync
+            # status and freshness also move on connect/read, so each goes
+            # back only if it still shows the refusal's value.
+            state = device_service.state
+            device_service.last_apply_result = prior["last_apply_result"]
+            device_service.last_write_duration_ms = prior["last_write_duration_ms"]
+            state.last_apply_time = prior["last_apply_time"]
+            if state.sync_status == "Apply Failed":
+                state.sync_status = prior["sync_status"]
+            if state.data_freshness == "write_failed":
+                state.data_freshness = prior["data_freshness"]
+
+        banner_was_refusal = self._apply_status_message in refusals
+        if banner_was_refusal:
+            self._apply_status_message = None
+            self._apply_status_success = False
+            self._apply_status_text = None
+            self._apply_status_clear_after = None
+
+        rp_state = self.restore_points_screen_state
+        rp_refused = (
+            rp_state is not None
+            and getattr(rp_state, "status_text", None) in refusals
+        )
+        if rp_refused:
+            rp_state.status_text = ""
+            rp_state.status_kind = "info"
+
+        if not self._dpg_context_ready:
+            return
+        if banner_was_refusal:
+            self._render_settings_snapshot_status()
+        if rp_refused and self._canonical_screen_id(self.current_screen) == "restore_points":
+            self.rebuild_current_screen()
+        self.refresh_shell()
 
     def _hid_write_available_or_refuse(self) -> bool:
         """Gate a synchronous UI write on device, busy, and consent state.
@@ -5437,6 +5545,8 @@ class AppShell:
             # Consented and staying in the app: bring back whatever the
             # re-offer hid, so a half-finished Safe Import is not lost.
             self._settle_consent_reoffer(reshow=True)
+            # The "accept the first-run notice" refusal is now untrue.
+            self._withdraw_consent_refusal_status()
 
         def _decline() -> None:
             # Not accepted: leave first_run_acknowledged unset so the gate
