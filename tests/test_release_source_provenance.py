@@ -53,14 +53,100 @@ class RepositoryFixture(unittest.TestCase):
         path.write_text(text, encoding="utf-8", newline="\n")
         return path
 
-    def commit(self):
+    def commit(self, *, allow_empty=False):
         git(self.repo, "add", ".")
-        git(self.repo, "commit", "-qm", "fixture")
+        git(self.repo, "commit", *(["--allow-empty"] if allow_empty else []), "-qm", "fixture")
         self.commit_id = git(self.repo, "rev-parse", "HEAD")
 
 
 @unittest.skipUnless(exporter, "raw export helper not present on this revision")
 class RawSourceTests(RepositoryFixture):
+    def test_direct_worker_rejects_changed_and_added_source_against_full_commit(self):
+        for name, content in (("main.py", b"modified"), ("extra.py", b"inert fixture"),
+                              ("assets/extra.dat", b"inert asset")):
+            with self.subTest(name=name):
+                source = self.root / ("source-" + name.replace("/", "-"))
+                source.mkdir()
+                with exporter.PathGuard() as guard:
+                    exporter.export_tree(self.repo, self.commit_id, source, guard)
+                exporter.verify_source(self.repo, source, self.commit_id)
+                changed = source / name
+                changed.parent.mkdir(parents=True, exist_ok=True)
+                changed.write_bytes(content)
+                with self.assertRaises(exporter.ExportError):
+                    exporter.verify_source(self.repo, source, self.commit_id)
+
+    def test_worker_identity_is_immutable_commit_not_later_head(self):
+        source = self.root / "source"
+        source.mkdir()
+        original = self.commit_id
+        with exporter.PathGuard() as guard:
+            exporter.export_tree(self.repo, original, source, guard)
+        self.write("main.py", "later committed bytes")
+        self.commit()
+        exporter.verify_source(self.repo, source, original)
+        with self.assertRaisesRegex(exporter.ExportError, "Exported source changed"):
+            exporter.verify_source(self.repo, source, self.commit_id)
+
+    def test_worker_checks_bytes_even_when_size_and_timestamp_are_preserved(self):
+        source = self.root / "source"
+        source.mkdir()
+        with exporter.PathGuard() as guard:
+            exporter.export_tree(self.repo, self.commit_id, source, guard)
+        changed = source / "main.py"
+        before = changed.stat()
+        changed.write_bytes(changed.read_bytes().replace(b"committed", b"corrupted"))
+        os.utime(changed, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(changed.stat().st_size, before.st_size)
+        with self.assertRaisesRegex(exporter.ExportError, "Exported source changed"):
+            exporter.verify_source(self.repo, source, self.commit_id)
+
+    def test_unapproved_git_path_is_rejected_without_execution(self):
+        unapproved = self.root / ("git.exe" if os.name == "nt" else "git")
+        unapproved.write_bytes(b"inert fixture, never an executable")
+        with self.assertRaises(exporter.ExportError):
+            exporter.trusted_git(str(unapproved))
+        self.assertEqual(unapproved.read_bytes(), b"inert fixture, never an executable")
+
+    def test_post_build_inventory_rejects_extra_inputs_outside_outputs(self):
+        source = self.root / "source"
+        source.mkdir()
+        with exporter.PathGuard() as guard:
+            manifest = exporter.export_tree(self.repo, self.commit_id, source, guard)
+        version = source / "zd_app/version.py"
+        version.write_bytes(version.read_bytes().replace(b'__build_commit__ = ""',
+                            f'__build_commit__ = "{self.commit_id}"'.encode()))
+        (source / "build").mkdir()
+        (source / "dist").mkdir()
+        exporter.verify_build_identity(source, self.commit_id, manifest)
+        (source / "zd_app/extra.py").write_text("inert extra source")
+        with self.assertRaisesRegex(exporter.ExportError, "Unexpected exported source file"):
+            exporter.verify_build_identity(source, self.commit_id, manifest)
+
+    def test_git_uses_authenticated_path_and_suppresses_execution_bearing_configuration(self):
+        actual_git = exporter.trusted_git()
+        real_run = subprocess.run
+        calls = []
+
+        def capture(args, **kwargs):
+            calls.append((args, kwargs))
+            return real_run(args, **kwargs)
+
+        git(self.repo, "config", "core.fsmonitor", "inert-not-a-program")
+        (self.root / ("git.exe" if os.name == "nt" else "git")).write_bytes(b"inert PATH decoy")
+        with patch.object(exporter.subprocess, "run", side_effect=capture), patch.dict(
+                os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.fsmonitor",
+                             "GIT_CONFIG_VALUE_0": "inert-alternate", "GIT_EXEC_PATH": "inert-path",
+                             "PATH": str(self.root)}):
+            self.assertEqual(exporter.assert_clean_tree(self.repo), self.commit_id)
+        self.assertTrue(calls)
+        for args, kwargs in calls:
+            self.assertEqual(args[0], actual_git)
+            self.assertIn("core.fsmonitor=false", args)
+            self.assertIn(f"core.hooksPath={os.devnull}", args)
+            self.assertNotIn("GIT_CONFIG_COUNT", kwargs["env"])
+            self.assertNotIn("GIT_EXEC_PATH", kwargs["env"])
+
     @unittest.skipUnless(os.name == "nt", "Windows short-path identity")
     def test_real_short_path_alias_is_the_same_clean_git_root(self):
         get_short = ctypes.WinDLL("kernel32", use_last_error=True).GetShortPathNameW
@@ -438,6 +524,8 @@ class BuilderAdmissionTests(RepositoryFixture):
         shutil.copyfile(ROOT / "tools/build_release.ps1", self.repo / "tools/build_release.ps1")
         if HELPER.exists():
             shutil.copyfile(HELPER, self.repo / "tools/export_git_tree.py")
+        for helper in ("release_git.ps1", "release_paths.ps1"):
+            shutil.copyfile(ROOT / "tools" / helper, self.repo / "tools" / helper)
         lock = self.write("requirements-release.lock", "fixture lock\n")
         self.write("pip.py", "from pathlib import Path\nPath('executed-unverified').write_text('live checkout executed')\nraise SystemExit(71)\n")
         self.commit()
@@ -511,7 +599,8 @@ class PowerShellParserTests(unittest.TestCase):
         if not hosts:
             self.skipTest("PowerShell unavailable")
         for host in hosts:
-            for name in ("build_release.ps1", "setup_dev_env.ps1"):
+            for name in ("build_release.ps1", "setup_dev_env.ps1", "release_git.ps1",
+                         "release_paths.ps1", "install_local.ps1"):
                 with self.subTest(host=host, script=name):
                     result = subprocess.run([host, "-NoProfile", "-Command",
                         "$tokens=$null; $parseErrors=$null; [void][System.Management.Automation.Language.Parser]::ParseFile($env:PROVENANCE_PARSE_FILE,[ref]$tokens,[ref]$parseErrors); if ($parseErrors.Count) { $parseErrors | Out-String | Write-Error; exit 1 }"],
@@ -520,34 +609,45 @@ class PowerShellParserTests(unittest.TestCase):
 
 
 @unittest.skipUnless(os.name == "nt", "real Windows PowerShell worker prefix")
-class WorkerMetadataTests(unittest.TestCase):
+class WorkerMetadataTests(RepositoryFixture):
     """Execute the real worker only through lock admission and metadata stamp.
 
     The extracted prefix ends before the first pip/compiler invocation. A
-    placeholder executable is sufficient: these tests never launch it.
+    The source verifier runs on an empty temporary venv. No dependency,
+    compiler, installer or product executable is invoked.
     """
     LOCK = b"fixture-package==1.2.3 \\\n    --hash=sha256:" + b"a" * 64 + b"\n"
-    COMMIT = "1234567" + "a" * 33
-
-    def worker_prefix(self, root: Path, marker_lock: bytes):
-        source = root / "source"
-        (source / "tools").mkdir(parents=True)
-        (source / "zd_app").mkdir()
-        version = source / "zd_app/version.py"
-        version.write_bytes(b'__version__ = "1.2.3"\n__build_commit__ = ""\n__build_date__ = ""\n')
-        (source / "requirements-release.lock").write_bytes(self.LOCK)
-        python = root / "venv/Scripts/python.exe"
-        python.parent.mkdir(parents=True)
-        python.write_bytes(b"not executed by this prefix fixture")
-        (root / "venv/.legendctl-release-lock.sha256").write_text(hashlib.sha256(marker_lock).hexdigest())
+    def worker_prefix(self, root: Path, marker_lock: bytes, *, mutation: str | None = None):
+        self.write("requirements-release.lock", self.LOCK.decode())
         body = (ROOT / "tools/build_release.ps1").read_text(encoding="utf-8")
         prefix = body.split('Write-Host "Building ZDUltimateLegend', 1)[0]
         self.assertNotEqual(prefix, body, "worker extraction boundary changed")
+        self.write("tools/build_release.ps1", prefix)
+        for helper in ("export_git_tree.py", "release_git.ps1", "release_paths.ps1"):
+            shutil.copyfile(ROOT / "tools" / helper, self.repo / "tools" / helper)
+        self.commit(allow_empty=True)
+        source = root / "source"
+        source.mkdir()
+        with exporter.PathGuard() as guard:
+            exporter.export_tree(self.repo, self.commit_id, source, guard)
+        if mutation == "hardlinked-version":
+            original = source / "zd_app/version.py"
+            outside = root / "outside-version.py"
+            outside.write_bytes(original.read_bytes())
+            original.unlink()
+            os.link(outside, original)
+        elif mutation:
+            (source / mutation).write_text("inert unexpected input")
+        version = source / "zd_app/version.py"
         worker = source / "tools/build_release.ps1"
-        worker.write_text(prefix, encoding="utf-8")
+        venv = root / "venv"
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True, capture_output=True)
+        python = venv / "Scripts/python.exe"
+        (venv / ".legendctl-release-lock.sha256").write_text(hashlib.sha256(marker_lock).hexdigest())
         result = subprocess.run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                                  str(worker), "-FromVerifiedSnapshot", "-BuildPython", str(python),
-                                 "-ExpectedCommit", self.COMMIT], capture_output=True,
+                                 "-ExpectedCommit", self.commit_id, "-SourceRepository", str(self.repo),
+                                 "-GitExecutable", exporter.trusted_git()], capture_output=True,
                                 env={key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"})
         return result, version
 
@@ -558,7 +658,7 @@ class WorkerMetadataTests(unittest.TestCase):
             tool_spec = importlib.util.spec_from_file_location("prefix_trust_tool", ROOT / "tools/generate_trust_manifest.py")
             module = importlib.util.module_from_spec(tool_spec)
             tool_spec.loader.exec_module(module)
-            self.assertEqual(module._version_metadata(version), ("1.2.3", self.COMMIT))
+            self.assertEqual(module._version_metadata(version), ("1.2.3", self.commit_id))
             self.assertFalse(version.read_bytes().startswith(b"\xef\xbb\xbf"))
 
     def test_legacy_crlf_checkout_marker_accepts_identical_raw_lf_dependencies(self):
@@ -575,6 +675,14 @@ class WorkerMetadataTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("does not match requirements-release.lock", " ".join(result.stderr.decode(errors="replace").split()))
                 self.assertIn(b'__build_commit__ = ""', version.read_bytes())
+
+    def test_direct_worker_rejects_dirty_and_extra_bytes_before_metadata_stamp(self):
+        for mutation in ("main.py", "extra.py", "hardlinked-version"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(prefix="legendctl-worker-prefix-") as temporary:
+                result, version = self.worker_prefix(Path(temporary), self.LOCK, mutation=mutation)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b'__build_commit__ = ""', version.read_bytes())
+                self.assertIn("source", result.stderr.decode(errors="replace").lower())
 
 
 if __name__ == "__main__":
