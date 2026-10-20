@@ -68,6 +68,10 @@ standard module path rather than inheriting another PowerShell edition's path.
 
 ## Identity, output and failures
 
+The build scripts and verification helpers, selected source repository, and
+build interpreter are trusted bootstrap inputs. These checks do not authenticate
+a caller-replaced verifier or interpreter.
+
 The internal worker independently compares its complete raw file inventory and
 bytes to the supplied immutable commit in the source repository before changing
 version metadata or running dependency/build commands. A caller-supplied
