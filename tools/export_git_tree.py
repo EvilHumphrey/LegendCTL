@@ -65,14 +65,16 @@ def trusted_git(expected: str | None = None) -> str:
 def _git_env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
     env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_CONFIG_NOSYSTEM="1",
-               GIT_CONFIG_GLOBAL=os.devnull, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+               GIT_CONFIG_GLOBAL=os.devnull, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0",
+               GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL=":")
     return env
 
 
 def _git(repo: Path, *args: str, data: bytes | None = None) -> bytes:
     result = subprocess.run([trusted_git(), "--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=false",
                              "-c", f"core.hooksPath={os.devnull}", "-c", f"core.attributesFile={os.devnull}",
-                             "-c", "core.untrackedCache=false", "-C", str(repo), *args],
+                             "-c", "core.untrackedCache=false", "-c", "protocol.allow=never",
+                             "-C", str(repo), *args],
                             input=data, capture_output=True, env=_git_env())
     if result.returncode:
         raise ExportError(f"git {args[0]} failed: {result.stderr.decode(errors='replace').strip()}")
@@ -191,7 +193,10 @@ def _blobs(repo: Path, entries: list[tuple[str, str, str]]):
     offset = 0
     for mode, oid, relative in entries:
         end = payload.index(b"\n", offset)
-        actual, kind, size = payload[offset:end].decode("ascii").split()
+        header = payload[offset:end].decode("ascii").split()
+        if len(header) != 3:
+            raise ExportError(f"Raw Git blob unavailable: {relative}")
+        actual, kind, size = header
         size = int(size)
         start = end + 1
         blob = payload[start:start + size]

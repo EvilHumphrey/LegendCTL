@@ -144,8 +144,32 @@ class RawSourceTests(RepositoryFixture):
             self.assertEqual(args[0], actual_git)
             self.assertIn("core.fsmonitor=false", args)
             self.assertIn(f"core.hooksPath={os.devnull}", args)
+            self.assertIn("protocol.allow=never", args)
+            self.assertEqual(kwargs["env"]["GIT_NO_LAZY_FETCH"], "1")
+            self.assertEqual(kwargs["env"]["GIT_ALLOW_PROTOCOL"], ":")
             self.assertNotIn("GIT_CONFIG_COUNT", kwargs["env"])
             self.assertNotIn("GIT_EXEC_PATH", kwargs["env"])
+
+    def test_missing_promisor_blob_does_not_start_a_transport_helper(self):
+        blob = git(self.repo, "rev-parse", "HEAD:main.py")
+        missing_helper = self.root / "INERT-MISSING-HELPER.exe"
+        self.assertFalse(missing_helper.exists())
+        git(self.repo, "config", "remote.fixture.promisor", "true")
+        git(self.repo, "config", "extensions.partialClone", "fixture")
+        git(self.repo, "config", "protocol.ext.allow", "always")
+        git(self.repo, "config", "remote.fixture.url", f"ext::{missing_helper.as_posix()}")
+        missing_blob = self.repo / ".git/objects" / blob[:2] / blob[2:]
+        missing_blob.chmod(0o600)
+        missing_blob.unlink()
+        output = exporter._git(self.repo, "cat-file", "--batch", data=blob.encode() + b"\n")
+        self.assertEqual(output, blob.encode() + b" missing\n")
+        with self.assertRaisesRegex(exporter.ExportError, "Raw Git blob unavailable"):
+            list(exporter._blobs(self.repo, exporter._tree_entries(self.repo, self.commit_id)))
+        # Even an explicit fetch cannot override the empty transport allowlist
+        # through a protocol-specific local setting or a command-line override.
+        with self.assertRaisesRegex(exporter.ExportError, "transport 'ext' not allowed"):
+            exporter._git(self.repo, "-c", "protocol.ext.allow=always", "fetch", "fixture")
+        self.assertFalse(missing_helper.exists())
 
     @unittest.skipUnless(os.name == "nt", "Windows short-path identity")
     def test_real_short_path_alias_is_the_same_clean_git_root(self):

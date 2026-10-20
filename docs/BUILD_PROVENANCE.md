@@ -58,6 +58,8 @@ authenticated by its approved signer and owner/write permissions before use.
 PATH entries, aliases, PowerShell functions and caller-supplied alternative Git
 paths cannot select a release executable. System/global Git configuration and
 execution-bearing fsmonitor/hooks options are suppressed for every query.
+Lazy object fetching and every transport protocol are disabled, so a missing
+promisor object fails locally even if repository configuration permits a remote helper.
 Symlinks, submodules, Windows device/alias paths and case-colliding tree names
 are rejected. The raw export has no Git checkout metadata and the build runs
 only there. Python runs in isolated mode, and inherited Python/pip configuration
