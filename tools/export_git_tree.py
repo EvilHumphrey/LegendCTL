@@ -45,7 +45,8 @@ def trusted_git(expected: str | None = None) -> str:
         result = subprocess.run(command, capture_output=True, env={
             key: value for key, value in _git_env().items() if key.upper() != "PSMODULEPATH"})
         if result.returncode:
-            raise ExportError("Trusted release Git authentication failed")
+            detail = " ".join(result.stderr.decode(errors="replace").split())[:2000]
+            raise ExportError(f"Trusted release Git authentication failed (exit {result.returncode}): {detail}")
         candidate = result.stdout.decode("utf-8-sig").strip()
         if not Path(candidate).is_absolute():
             raise ExportError("Trusted release Git did not return an absolute path")

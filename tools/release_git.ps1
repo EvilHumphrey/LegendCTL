@@ -2,6 +2,30 @@ param([string]$ExpectedPath)
 
 . (Join-Path $PSScriptRoot "release_paths.ps1")
 
+function Find-ReleaseGitImplementation {
+    param([Parameter(Mandatory)][string]$ProgramFiles)
+
+    # Git for Windows 2.56 moved its implementation from mingw64 to ucrt64.
+    # This only discovers a fixed installation path; the caller authenticates
+    # the selected file. Never fall back after that authentication has failed.
+    foreach ($layout in @("ucrt64", "mingw64")) {
+        $candidate = Join-Path $ProgramFiles "Git\$layout\bin\git.exe"
+        Assert-ReleasePath -LiteralPath $candidate
+        foreach ($directory in @("Git\$layout", "Git\$layout\bin")) {
+            if ([IO.File]::Exists((Join-Path $ProgramFiles $directory))) {
+                throw "Release Git implementation requires ordinary directories."
+            }
+        }
+        if ([IO.File]::Exists($candidate)) {
+            return $candidate
+        }
+        if ([IO.Directory]::Exists($candidate)) {
+            throw "Release Git implementation must be an ordinary file."
+        }
+    }
+    throw "Release builds require Git for Windows in Program Files (ucrt64 or mingw64)."
+}
+
 function Resolve-TrustedReleaseGit {
     param([string]$ExpectedPath)
 
@@ -12,13 +36,9 @@ function Resolve-TrustedReleaseGit {
     # installation only. PATH, aliases, functions and per-user shims are ignored.
     $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
     # Authenticate the actual implementation, not cmd\git.exe's launcher.
-    $candidate = Join-Path $programFiles "Git\mingw64\bin\git.exe"
+    $candidate = Find-ReleaseGitImplementation -ProgramFiles $programFiles
     if ($ExpectedPath -and -not $candidate.Equals($ExpectedPath, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Release Git must be the approved Program Files Git executable."
-    }
-    Assert-ReleasePath -LiteralPath $candidate
-    if (-not [IO.File]::Exists($candidate)) {
-        throw "Release builds require Git for Windows in Program Files."
     }
     $signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $candidate
     if (

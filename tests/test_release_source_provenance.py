@@ -61,6 +61,17 @@ class RepositoryFixture(unittest.TestCase):
 
 @unittest.skipUnless(exporter, "raw export helper not present on this revision")
 class RawSourceTests(RepositoryFixture):
+    @unittest.skipUnless(os.name == "nt", "Windows authentication diagnostics")
+    def test_authentication_failure_reports_bounded_helper_reason(self):
+        result = subprocess.CompletedProcess([], 7, b"", b"fixture authentication refused\n" + b"x" * 4000)
+        with patch.object(exporter.subprocess, "run", return_value=result):
+            with self.assertRaises(exporter.ExportError) as caught:
+                exporter.trusted_git.__wrapped__()
+        message = str(caught.exception)
+        self.assertIn("authentication failed (exit 7): fixture authentication refused", message)
+        self.assertLess(len(message), 2100)
+        self.assertNotIn("\n", message)
+
     def test_direct_worker_rejects_changed_and_added_source_against_full_commit(self):
         for name, content in (("main.py", b"modified"), ("extra.py", b"inert fixture"),
                               ("assets/extra.dat", b"inert asset")):

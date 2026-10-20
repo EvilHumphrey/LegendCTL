@@ -55,6 +55,10 @@ are verified. Replace refs, inherited Git overrides, smudge/clean filters,
 checkout hooks and archive attributes cannot rewrite the exported source.
 Release queries use the protected Program Files Git for Windows executable,
 authenticated by its approved signer and owner/write permissions before use.
+The fixed implementation locations are `Git/ucrt64/bin/git.exe` (Git 2.56 and
+later) and the older `Git/mingw64/bin/git.exe`. Discovery prefers `ucrt64`;
+an invalid selected installation is refused without falling back to `mingw64`.
+The `cmd/git.exe` launcher is not used for release queries.
 PATH entries, aliases, PowerShell functions and caller-supplied alternative Git
 paths cannot select a release executable. System/global Git configuration and
 execution-bearing fsmonitor/hooks options are suppressed for every query.
