@@ -70,9 +70,9 @@ from zd_app.storage.module_passport_models import (
     ModulePassport,
 )
 from zd_app.storage._import_guards import (
+    list_guarded_directory,
     read_guarded_json,
     read_guarded_text,
-    require_local_import_path,
 )
 from zd_app.version import __build_commit__, __version__
 
@@ -615,9 +615,10 @@ class DiagnosticBundleService:
         if directory is None:
             return []
         try:
-            # Reject network/device roots before discovery. Keep this lexical:
-            # resolving would follow a reparse before the guarded file open.
-            directory = Path(require_local_import_path(directory))
+            # Pin and enumerate the directory through the shared no-reparse
+            # guard. Path-based glob/scandir would follow a root or ancestor
+            # junction before the later per-file guard could reject it.
+            entries = list_guarded_directory(directory)
             # The Health Report export writes
             # ``zd_health_report_<YYYY-MM-DD_HHMMSS>.{md,json}`` (see
             # ``ui/screens/health_report.py:_save_report``), so a
@@ -628,7 +629,7 @@ class DiagnosticBundleService:
             # the more reliable source of truth.
             md_files = sorted(
                 (
-                    path for path in directory.glob("*.md")
+                    path for path in entries
                     if _HEALTH_REPORT_MARKDOWN_NAME.fullmatch(path.name)
                 ),
                 key=lambda p: p.name,
@@ -636,7 +637,7 @@ class DiagnosticBundleService:
             )
         except (OSError, ValueError):
             logger.exception(
-                "DiagnosticBundleService: failed to glob %r", str(directory)
+                "DiagnosticBundleService: failed to list %r", str(directory)
             )
             return []
         return md_files[: max(0, int(limit))]

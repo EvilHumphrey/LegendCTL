@@ -53,12 +53,12 @@ class HealthReportIngestionBoundaryTests(unittest.TestCase):
             self.skipTest(f"symlink creation unavailable: {exc}")
 
     def test_canonical_reports_remain_in_preview_and_sanitized_zip(self) -> None:
-        self.md.write_text("# Health\nC:/Users/FixtureOnly/private/report.txt", encoding="utf-8")
+        self.md.write_text("# Health\nC:/Users/ExampleUser/private/report.txt", encoding="utf-8")
         names, text = self._preview_and_zip()
         self.assertIn(f"health_reports/{self.name}", names)
         self.assertIn(f"health_reports/{self.md.with_suffix('.json').name}", names)
         self.assertIn("ordinary", text)
-        self.assertNotIn("FixtureOnly", text)
+        self.assertNotIn("ExampleUser", text)
 
     def test_noncanonical_names_are_not_selected_or_read(self) -> None:
         for name in (
@@ -145,6 +145,42 @@ class HealthReportIngestionBoundaryTests(unittest.TestCase):
         self._check_directory_reparse(
             lambda outside: _winapi.CreateJunction(str(outside), str(self.health))
         )
+
+    @unittest.skipUnless(os.name == "nt", "Windows no-reparse directory discovery")
+    def test_directory_and_ancestor_junction_rejected_before_discovery(self) -> None:
+        import _winapi
+
+        outside = self.root / "fixture_outside"
+        reports = outside / "reports"
+        reports.mkdir(parents=True)
+        (reports / self.name).write_text(self.sentinel, encoding="utf-8")
+        for ancestor in (False, True):
+            with self.subTest(ancestor=ancestor):
+                junction = self.root / f"junction_{ancestor}"
+                _winapi.CreateJunction(str(outside if ancestor else reports), str(junction))
+                self.addCleanup(os.rmdir, junction)
+                self.service._health_report_dir = junction / "reports" if ancestor else junction
+                with (
+                    patch.object(
+                        Path, "glob", side_effect=AssertionError("enumerated a reparse path")
+                    ),
+                    patch.object(
+                        _import_guards, "_query_windows_directory_names",
+                        side_effect=AssertionError("queried a rejected directory"),
+                        create=True,  # Also runs against the pre-fix implementation.
+                    ),
+                ):
+                    self.assertEqual(self.service._list_recent_health_reports(limit=5), [])
+
+    def test_directory_overflow_omits_reports_without_blocking_bundle(self) -> None:
+        from zd_app.services.diagnostic_bundle import service
+
+        def bounded_list(path):
+            return _import_guards.list_guarded_directory(path, max_entries=1)
+
+        with patch.object(service, "list_guarded_directory", side_effect=bounded_list):
+            names, _text = self._preview_and_zip()
+        self.assertFalse(any(name.startswith("health_reports/") for name in names))
 
     @unittest.skipUnless(os.name == "nt", "Windows no-reparse boundary")
     def test_directory_symlink_never_enters_summary_preview_or_zip(self) -> None:
