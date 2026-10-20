@@ -2,20 +2,25 @@
 install_local.ps1 — mirror the latest dist build to a stable local-install
 folder and (re)create the Desktop + Start Menu shortcuts pointing at it.
 
-Why this exists: tools\build_release.ps1 wipes dist\ on every run and versions
-its output (dist\ZDUltimateLegend-v<version>\), so a shortcut pointed straight
-into dist\ would break on every rebuild or version bump. This mirrors the
+The release builder versions its output (dist\ZDUltimateLegend-v<version>\),
+so a shortcut pointed straight into dist\ would need updating for a new version.
+This explicit helper mirrors the
 freshest build to a fixed path (<repo>\local-install\) that the shortcuts can
 rely on, then refreshes the shortcuts so they always launch the current build.
 
-Run it standalone any time, or let build_release.ps1 call it automatically at
-the end of a successful build (it does — see the tail of that script).
+Run it separately after reviewing a successful build in the standard dist
+layout. The release builder does not call this helper or update shortcuts.
 #>
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "release_paths.ps1")
+$distRoot = Join-Path $repoRoot "dist"
+$installDir = Join-Path $repoRoot "local-install"
+Assert-ReleasePath -LiteralPath $distRoot -Within $repoRoot -Recurse
+Assert-ReleasePath -LiteralPath $installDir -Within $repoRoot -Recurse -RejectHardLinks
 
 # 1. Find the freshest dist build folder.
-$latestBuild = Get-ChildItem -Path (Join-Path $repoRoot "dist") -Directory -Filter "ZDUltimateLegend-v*" -ErrorAction SilentlyContinue |
+$latestBuild = Get-ChildItem -LiteralPath $distRoot -Directory -Filter "ZDUltimateLegend-v*" -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if (-not $latestBuild) {
     Write-Error "No build found under dist\ZDUltimateLegend-v*. Run tools\build_release.ps1 first."
@@ -26,13 +31,19 @@ if (-not (Test-Path (Join-Path $latestBuild.FullName $exeName))) {
     Write-Error "Build folder '$($latestBuild.Name)' has no '$exeName'."
 }
 
-# 2. Mirror it to a stable location (survives dist\ cleaning + version bumps).
-$installDir = Join-Path $repoRoot "local-install"
-robocopy $latestBuild.FullName $installDir /MIR /NFL /NDL /NJH /NJS /NP /R:2 /W:1 | Out-Null
-if ($LASTEXITCODE -ge 8) {
-    Write-Error "robocopy mirror failed (exit $LASTEXITCODE). If the app is currently open, close it and re-run."
+# 2. Mirror it to a stable location while removing stale files from prior builds.
+Assert-ReleasePath -LiteralPath $latestBuild.FullName -Within $distRoot -Recurse
+Assert-ReleasePath -LiteralPath $installDir -Within $repoRoot -Recurse -RejectHardLinks
+if (-not ('LegendCtlReleaseMirror' -as [type])) {
+    Add-Type -Path (Join-Path $PSScriptRoot "release_mirror.cs")
 }
-$global:LASTEXITCODE = 0  # robocopy exit codes 1-7 are success; reset so callers don't see a false failure
+$mirror = New-Object LegendCtlReleaseMirror($latestBuild.FullName, $installDir)
+try {
+    $mirror.Prepare()
+    $mirror.Publish()
+} finally {
+    $mirror.Dispose()
+}
 
 $installedExe = Join-Path $installDir $exeName
 if (-not (Test-Path $installedExe)) {

@@ -28,6 +28,7 @@ def generate_manifest(
     generated_at: datetime | None = None,
     scanner_repo_root: str | Path | None = None,
     source_commit: str | None = None,
+    source_commit_short: str | None = None,
 ) -> Path:
     """Write one deterministic record and return its path.
 
@@ -52,6 +53,7 @@ def generate_manifest(
         scanners=scanners,
         generated_at=generated_at,
         source_commit=source_commit,
+        source_commit_short=source_commit_short,
     )
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     _write_json(manifest_path, document)
@@ -66,6 +68,7 @@ def _build_document(
     scanners: dict[str, Any],
     generated_at: datetime | None,
     source_commit: str | None = None,
+    source_commit_short: str | None = None,
 ) -> dict[str, object]:
     if not distribution.is_dir():
         raise ManifestBuildError(f"distribution root is missing: {distribution}")
@@ -99,6 +102,14 @@ def _build_document(
     if not _is_hex(build_commit, length=40):
         raise ManifestBuildError("git rev-parse HEAD did not return a full commit SHA")
     build_commit_short = build_commit if source_commit is not None else _git(repository, "rev-parse", "--short", "HEAD")
+    if source_commit_short is not None:
+        if (
+            source_commit is None
+            or not 4 <= len(source_commit_short) <= len(build_commit)
+            or not build_commit.startswith(source_commit_short)
+        ):
+            raise ManifestBuildError("verified short commit does not match source identity")
+        build_commit_short = source_commit_short
     version, patched_commit = _version_metadata(repository / "zd_app" / "version.py")
     if not patched_commit or patched_commit != build_commit_short:
         raise ManifestBuildError(
@@ -282,10 +293,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dist-root", required=True, type=Path)
     parser.add_argument("--repo-root", required=True, type=Path)
     parser.add_argument("--source-commit", help="Verified full commit of a raw source export")
+    parser.add_argument("--source-commit-short", help="Verified Git abbreviation of --source-commit")
     args = parser.parse_args(argv)
     try:
         generate_manifest(dist_root=args.dist_root, repo_root=args.repo_root,
-                          source_commit=args.source_commit)
+                          source_commit=args.source_commit,
+                          source_commit_short=args.source_commit_short)
     except ManifestBuildError as exc:
         print(f"trust manifest failed: {exc}", file=sys.stderr)
         return 1

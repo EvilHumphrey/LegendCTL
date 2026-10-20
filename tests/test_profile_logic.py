@@ -319,7 +319,9 @@ class SharedImportGuardTests(unittest.TestCase):
             )
 
         drive_type.assert_called_once_with(checked)
-        native_read.assert_called_once_with(checked, MAX_IMPORT_BYTES)
+        native_read.assert_called_once_with(
+            checked, MAX_IMPORT_BYTES, require_single_link=False
+        )
 
     def test_relative_path_on_mapped_current_drive_is_rejected_before_open(self) -> None:
         checked = r"Z:\workspace\incoming.json"

@@ -243,7 +243,7 @@ class BuildReleaseNativeCommandHardeningTests(unittest.TestCase):
         self.assertRegex(
             self.body,
             re.compile(
-                r'Invoke-NativeCommand\s+-Label\s+"[^"]*PyInstaller[^"]*"\s+-ScriptBlock\s*\{[^}]*\$python\s+-I\s+-m\s+PyInstaller[^}]*\}',
+                r'Invoke-NativeCommand\s+-Label\s+"[^"]*PyInstaller[^"]*"\s+-ScriptBlock\s*\{[^}]*\$python\s+-I\s+-B\s+-m\s+PyInstaller[^}]*\}',
             ),
             "PyInstaller must be wrapped by Invoke-NativeCommand with a PyInstaller-labelled -Label and a -ScriptBlock that runs `$python -m PyInstaller`",
         )

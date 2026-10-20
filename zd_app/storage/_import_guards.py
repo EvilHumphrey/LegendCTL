@@ -16,23 +16,32 @@ import ctypes
 import json
 import ntpath
 import os
+import stat
+import struct
 from pathlib import Path
 from typing import Any
 
 MAX_IMPORT_BYTES = 1 * 1024 * 1024
 MAX_IMPORT_JSON_DEPTH = 64
+MAX_DIRECTORY_ENTRIES = 4096
+MAX_DIRECTORY_NAME_BYTES = 1 * 1024 * 1024
 _DRIVE_REMOTE = 4
 _OBJ_CASE_INSENSITIVE = 0x00000040
 _OBJ_DONT_REPARSE = 0x00001000
 _STATUS_REPARSE_POINT_ENCOUNTERED = 0xC000050B
 _FILE_READ_DATA = 0x00000001
+_FILE_LIST_DIRECTORY = 0x00000001
+_FILE_READ_ATTRIBUTES = 0x00000080
 _SYNCHRONIZE = 0x00100000
 _FILE_SHARE_READ = 0x00000001
 _FILE_SHARE_WRITE = 0x00000002
 _FILE_SHARE_DELETE = 0x00000004
 _FILE_OPEN = 0x00000001
+_FILE_DIRECTORY_FILE = 0x00000001
 _FILE_SYNCHRONOUS_IO_NONALERT = 0x00000020
 _FILE_NON_DIRECTORY_FILE = 0x00000040
+_FILE_NAMES_INFORMATION = 12
+_STATUS_NO_MORE_FILES = 0x80000006
 
 
 class _UNICODE_STRING(ctypes.Structure):
@@ -74,6 +83,10 @@ class UnsafeImportPathError(ValueError):
     """Raised when a user-selected import path is not a local filesystem path."""
 
 
+class DirectoryListingTooLargeError(ValueError):
+    """Raised instead of returning a partial directory listing."""
+
+
 def _get_windows_drive_type(path: str) -> int | None:
     """Return ``GetDriveTypeW`` for a drive-letter path, when available.
 
@@ -89,8 +102,10 @@ def _get_windows_drive_type(path: str) -> int | None:
     return int(ctypes.windll.kernel32.GetDriveTypeW(f"{drive}\\"))  # type: ignore[attr-defined]
 
 
-def _read_windows_local_no_reparse(path: str, max_bytes: int) -> bytes:
-    """Atomically open and read a local Windows file without following reparses.
+def _open_windows_local_no_reparse(
+    path: str, *, directory: bool = False, require_single_link: bool = False
+) -> ctypes.c_void_p:
+    """Atomically open a local Windows file or directory without reparses.
 
     This is deliberately the first filesystem operation after lexical/device
     checks: a component-by-component pre-scan would itself be vulnerable to a
@@ -101,15 +116,20 @@ def _read_windows_local_no_reparse(path: str, max_bytes: int) -> bytes:
     ``STATUS_REPARSE_POINT_ENCOUNTERED`` (0xC000050B) if it sees one. This is
     stronger than ``FILE_OPEN_REPARSE_POINT``, which only controls processing
     of the final component. ``FILE_OPEN`` plus
-    ``FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT`` opens only an
-    existing regular file with synchronous read semantics.
+    ``FILE_NON_DIRECTORY_FILE`` or ``FILE_DIRECTORY_FILE`` selects the object
+    type, with ``FILE_SYNCHRONOUS_IO_NONALERT`` for synchronous I/O. The caller
+    owns the native handle and must close it or transfer ownership to the CRT.
+
+    Single-link reads also deny write/delete sharing for the lifetime of this
+    handle and check its link count before and after reading. This blocks
+    conflicting writer opens/removal of the opened name and detects persistent
+    added aliases. Other link names may still change; the checks do not prove
+    historical namespace ownership or the contents' provenance.
 
     Microsoft references:
     https://learn.microsoft.com/windows/win32/api/ntdef/ns-ntdef-_object_attributes
     https://learn.microsoft.com/windows/win32/api/winternl/nf-winternl-ntcreatefile
     """
-
-    import msvcrt
 
     absolute = ntpath.normpath(ntpath.abspath(path))
     nt_path = f"\\??\\{absolute}"
@@ -149,14 +169,21 @@ def _read_windows_local_no_reparse(path: str, max_bytes: int) -> bytes:
     nt_create_file.restype = ctypes.c_long
     status = nt_create_file(
         ctypes.byref(native_handle),
-        _FILE_READ_DATA | _SYNCHRONIZE,
+        (_FILE_LIST_DIRECTORY if directory else _FILE_READ_DATA) | _SYNCHRONIZE | (
+            _FILE_READ_ATTRIBUTES if require_single_link else 0
+        ),
         ctypes.byref(object_attributes),
         ctypes.byref(io_status),
         None,
         0,
-        _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+        (
+            _FILE_SHARE_READ if require_single_link
+            else _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
+        ),
         _FILE_OPEN,
-        _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_NON_DIRECTORY_FILE,
+        _FILE_SYNCHRONOUS_IO_NONALERT | (
+            _FILE_DIRECTORY_FILE if directory else _FILE_NON_DIRECTORY_FILE
+        ),
         None,
         0,
     )
@@ -173,6 +200,19 @@ def _read_windows_local_no_reparse(path: str, max_bytes: int) -> bytes:
 
     if native_handle.value is None:
         raise OSError("NtCreateFile succeeded without returning a file handle")
+    return native_handle
+
+
+def _read_windows_local_no_reparse(
+    path: str, max_bytes: int, *, require_single_link: bool = False
+) -> bytes:
+    """Read from the no-reparse handle; preserve the opt-in alias checks."""
+
+    import msvcrt
+
+    native_handle = _open_windows_local_no_reparse(
+        path, require_single_link=require_single_link
+    )
 
     try:
         descriptor = msvcrt.open_osfhandle(
@@ -187,7 +227,123 @@ def _read_windows_local_no_reparse(path: str, max_bytes: int) -> bytes:
         os.close(descriptor)
         raise
     with handle:
-        return handle.read(max_bytes + 1)
+        if require_single_link:
+            _require_single_link_regular_file(handle.fileno())
+        payload = handle.read(max_bytes + 1)
+        if require_single_link:
+            _require_single_link_regular_file(handle.fileno())
+        return payload
+
+
+def _query_windows_directory_names(
+    native_handle: ctypes.c_void_p, max_entries: int
+) -> list[str]:
+    """Enumerate the opened object, never its replaceable pathname.
+
+    Request one FILE_NAMES_INFORMATION entry per synchronous query. This
+    bounds calls as well as memory, without needing unbounded buffer growth or
+    treating a truncated/overflow result as a complete listing.
+
+    https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntquerydirectoryfile
+    https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_names_information
+    """
+
+    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)  # type: ignore[attr-defined]
+    query = ntdll.NtQueryDirectoryFile
+    query.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.POINTER(_IO_STATUS_BLOCK), ctypes.c_void_p, ctypes.c_ulong,
+        ctypes.c_int, ctypes.c_ubyte, ctypes.POINTER(_UNICODE_STRING),
+        ctypes.c_ubyte,
+    ]
+    query.restype = ctypes.c_long
+    buffer = ctypes.create_string_buffer(64 * 1024)
+    names: list[str] = []
+    name_bytes = 0
+    # Allow "." and "..", plus the query proving exhaustion (or overflow).
+    for index in range(max_entries + 3):
+        io_status = _IO_STATUS_BLOCK()
+        status = query(
+            native_handle, None, None, None, ctypes.byref(io_status),
+            buffer, len(buffer), _FILE_NAMES_INFORMATION, True, None, index == 0,
+        )
+        if ctypes.c_ulong(status).value == _STATUS_NO_MORE_FILES:
+            return names
+        if status != 0:
+            raise OSError(f"Directory query failed (NTSTATUS {status & 0xffffffff:#x})")
+        size = io_status.Information
+        if not 12 <= size <= len(buffer):
+            raise OSError("Directory query returned an incomplete entry")
+        next_offset, _file_index, name_length = struct.unpack_from("<III", buffer)
+        if next_offset or name_length == 0 or name_length % 2 or name_length > size - 12:
+            raise OSError("Directory query returned an invalid filename entry")
+        name = buffer[12:12 + name_length].decode("utf-16-le", errors="surrogatepass")
+        if name in {".", ".."}:
+            continue
+        if any(char in name for char in ("/", "\\", "\0", ":")):
+            raise UnsafeImportPathError("Directory entry must be a leaf filename")
+        name_bytes += name_length
+        if len(names) >= max_entries or name_bytes > MAX_DIRECTORY_NAME_BYTES:
+            raise DirectoryListingTooLargeError("Directory listing exceeds its limit")
+        names.append(name)
+    raise DirectoryListingTooLargeError("Directory listing exceeds its query limit")
+
+
+def _list_posix_directory_names(path: str, max_entries: int) -> list[str]:
+    """Pin each ancestor without following links, then enumerate the final fd."""
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parts = Path(path).parts
+    descriptor = os.open(parts[0], flags)
+    try:
+        for part in parts[1:]:
+            child = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        names = []
+        name_bytes = 0
+        with os.scandir(descriptor) as entries:
+            for entry in entries:
+                name_bytes += len(os.fsencode(entry.name))
+                if len(names) >= max_entries or name_bytes > MAX_DIRECTORY_NAME_BYTES:
+                    raise DirectoryListingTooLargeError("Directory listing exceeds its limit")
+                names.append(entry.name)
+        return names
+    finally:
+        os.close(descriptor)
+
+
+def list_guarded_directory(
+    path: str | Path, *, max_entries: int = MAX_DIRECTORY_ENTRIES
+) -> list[Path]:
+    """Return bounded local child paths without traversing directory reparses.
+
+    Windows opens the root with OBJ_DONT_REPARSE before any enumeration and
+    queries that same handle. A later root/ancestor path substitution cannot
+    redirect discovery. The returned paths are names, not trusted file handles:
+    callers still need guarded reads. Overflow rejects the entire listing.
+    """
+
+    if max_entries < 0:
+        raise ValueError("Directory entry limit must be nonnegative")
+    checked_path = require_local_import_path(path)
+    if os.name == "nt":
+        native_handle = _open_windows_local_no_reparse(checked_path, directory=True)
+        try:
+            names = _query_windows_directory_names(native_handle, max_entries)
+        finally:
+            ctypes.windll.kernel32.CloseHandle(native_handle)  # type: ignore[attr-defined]
+    else:
+        names = _list_posix_directory_names(checked_path, max_entries)
+    return [Path(checked_path) / name for name in names]
+
+
+def _require_single_link_regular_file(descriptor: int) -> None:
+    """Check the opened object, rather than a replaceable pathname."""
+
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise UnsafeImportPathError("File must be regular and have exactly one link")
 
 
 def require_local_import_path(path: str | Path) -> str:
@@ -257,6 +413,7 @@ def read_guarded_text(
     *,
     max_bytes: int = MAX_IMPORT_BYTES,
     local_only: bool = False,
+    require_single_link: bool = False,
 ) -> str:
     """Read at most ``max_bytes + 1`` bytes from one file handle.
 
@@ -265,17 +422,28 @@ def read_guarded_text(
     check. ``local_only`` is explicit because app-owned readers may live in a
     user-configured location while user-selected import sources must not be
     network paths.
+
+    ``require_single_link`` opts into rejecting aliases via the opened file's
+    link count. It implies the local-path policy and, on Windows, uses the
+    no-reparse native open with read-only sharing until the read completes.
+    This does not establish provenance of the file's contents.
     """
 
     checked_path = os.fspath(path)
-    if local_only:
+    if local_only or require_single_link:
         checked_path = require_local_import_path(path)
-    if local_only and os.name == "nt":
-        payload = _read_windows_local_no_reparse(checked_path, max_bytes)
+    if (local_only or require_single_link) and os.name == "nt":
+        payload = _read_windows_local_no_reparse(
+            checked_path, max_bytes, require_single_link=require_single_link
+        )
     else:
         source = Path(checked_path)
         with source.open("rb") as handle:
+            if require_single_link:
+                _require_single_link_regular_file(handle.fileno())
             payload = handle.read(max_bytes + 1)
+            if require_single_link:
+                _require_single_link_regular_file(handle.fileno())
     if len(payload) > max_bytes:
         raise ImportFileTooLargeError(
             f"Import file is too large (limit {max_bytes} bytes): {path}"
@@ -288,6 +456,7 @@ def read_guarded_json(
     *,
     max_bytes: int = MAX_IMPORT_BYTES,
     local_only: bool = False,
+    require_single_link: bool = False,
 ) -> Any:
     """Read and parse a JSON file behind the size and depth guards.
 
@@ -304,7 +473,10 @@ def read_guarded_json(
     ``json.loads`` from ``RecursionError``.
     """
 
-    raw = read_guarded_text(path, max_bytes=max_bytes, local_only=local_only)
+    raw = read_guarded_text(
+        path, max_bytes=max_bytes, local_only=local_only,
+        require_single_link=require_single_link,
+    )
     if _max_json_depth(raw) > MAX_IMPORT_JSON_DEPTH:
         raise ValueError(f"Import file JSON nesting is too deep: {path}")
     return json.loads(raw)

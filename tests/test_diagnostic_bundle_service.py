@@ -850,9 +850,11 @@ class GenerateBundleZipTests(unittest.TestCase):
         self.assertIn(CLAIM_BOUNDARY_PARAGRAPH, report_md)
 
     def test_zip_write_into_bad_target_returns_none(self) -> None:
-        # Writing into a non-existent disk produces an OSError. Target a
-        # path whose parent can't be created.
-        target = Path("Z:/non_existent_drive/diagnostic_bundle.zip")
+        # A regular file cannot be the output directory. Keep the failing
+        # target entirely inside the test-owned temporary directory.
+        blocked_parent = self.root / "not_a_directory"
+        blocked_parent.write_text("fixture", encoding="utf-8")
+        target = blocked_parent / "diagnostic_bundle.zip"
         result = self.service.generate_bundle_zip(target)
         self.assertIsNone(result)
 

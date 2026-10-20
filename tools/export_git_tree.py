@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import ast
 import ctypes
+import functools
 import hashlib
 import json
 import os
@@ -29,16 +30,52 @@ GENERATED_ROOTS = {".venv-zd", "build", "dist", "local-install", "zd_data", ".py
                    ".mypy_cache", ".ruff_cache", ".release-wheelhouse", ".release-tools"}
 
 
+@functools.lru_cache(maxsize=None)
+def trusted_git(expected: str | None = None) -> str:
+    """Authenticate a protected installation without consulting PATH or Git."""
+    if os.name == "nt":
+        system = ctypes.create_unicode_buffer(32768)
+        if not ctypes.windll.kernel32.GetSystemDirectoryW(system, len(system)):
+            raise ctypes.WinError()
+        powershell = Path(system.value) / "WindowsPowerShell/v1.0/powershell.exe"
+        command = [str(powershell), "-NoProfile", "-NonInteractive", "-File",
+                   str(Path(__file__).with_name("release_git.ps1"))]
+        if expected:
+            command += ["-ExpectedPath", expected]
+        result = subprocess.run(command, capture_output=True, env={
+            key: value for key, value in _git_env().items() if key.upper() != "PSMODULEPATH"})
+        if result.returncode:
+            detail = " ".join(result.stderr.decode(errors="replace").split())[:2000]
+            raise ExportError(f"Trusted release Git authentication failed (exit {result.returncode}): {detail}")
+        candidate = result.stdout.decode("utf-8-sig").strip()
+        if not Path(candidate).is_absolute():
+            raise ExportError("Trusted release Git did not return an absolute path")
+        return candidate
+    # Source-only checks also run on hosted Linux. Use a root-owned system Git;
+    # there is no test flag, PATH fallback or unprotected executable override.
+    candidate = Path("/usr/bin/git").resolve(strict=True)
+    if expected and Path(expected) != candidate:
+        raise ExportError("Release Git must be the protected system executable")
+    for item in (candidate, *candidate.parents):
+        info = item.stat()
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            raise ExportError("Release Git system installation is writable by an unprivileged user")
+    return str(candidate)
+
+
 def _git_env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
     env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_CONFIG_NOSYSTEM="1",
-               GIT_CONFIG_GLOBAL=os.devnull, GIT_OPTIONAL_LOCKS="0")
+               GIT_CONFIG_GLOBAL=os.devnull, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0",
+               GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL=":")
     return env
 
 
 def _git(repo: Path, *args: str, data: bytes | None = None) -> bytes:
-    result = subprocess.run(["git", "--no-replace-objects", "-c", "core.fsmonitor=false",
-                             "-c", f"core.hooksPath={os.devnull}", "-C", str(repo), *args],
+    result = subprocess.run([trusted_git(), "--no-pager", "--no-replace-objects", "-c", "core.fsmonitor=false",
+                             "-c", f"core.hooksPath={os.devnull}", "-c", f"core.attributesFile={os.devnull}",
+                             "-c", "core.untrackedCache=false", "-c", "protocol.allow=never",
+                             "-C", str(repo), *args],
                             input=data, capture_output=True, env=_git_env())
     if result.returncode:
         raise ExportError(f"git {args[0]} failed: {result.stderr.decode(errors='replace').strip()}")
@@ -157,7 +194,10 @@ def _blobs(repo: Path, entries: list[tuple[str, str, str]]):
     offset = 0
     for mode, oid, relative in entries:
         end = payload.index(b"\n", offset)
-        actual, kind, size = payload[offset:end].decode("ascii").split()
+        header = payload[offset:end].decode("ascii").split()
+        if len(header) != 3:
+            raise ExportError(f"Raw Git blob unavailable: {relative}")
+        actual, kind, size = header
         size = int(size)
         start = end + 1
         blob = payload[start:start + size]
@@ -265,7 +305,30 @@ def export_tree(repo: Path, commit: str, destination: Path, guard: PathGuard) ->
     return manifest
 
 
-def verify_snapshot(source: Path, manifest: dict[str, str]) -> None:
+def verify_inventory(source: Path, manifest: dict[str, str], *, after_build: bool = False) -> None:
+    """Refuse extra inputs, including empty directories and ignored files."""
+    expected_directories = {parent.as_posix() for name in manifest
+                            for parent in PurePosixPath(name).parents if parent.as_posix() != "."}
+    pending = [source]
+    while pending:
+        for path in pending.pop().iterdir():
+            info = _ordinary(path)
+            relative = path.relative_to(source).as_posix()
+            if after_build and relative in {"build", "dist"} and stat.S_ISDIR(info.st_mode):
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                if relative not in expected_directories:
+                    raise ExportError(f"Unexpected exported source directory: {relative}")
+                pending.append(path)
+            elif info.st_nlink != 1:
+                raise ExportError(f"Hardlinked exported source is forbidden: {relative}")
+            elif relative not in manifest:
+                raise ExportError(f"Unexpected exported source file: {relative}")
+
+
+def verify_snapshot(source: Path, manifest: dict[str, str], *, exact: bool = True) -> None:
+    if exact:
+        verify_inventory(source, manifest)
     for relative, expected in manifest.items():
         path = _safe_destination(source, relative)
         for parent in path.parents:
@@ -275,6 +338,22 @@ def verify_snapshot(source: Path, manifest: dict[str, str]) -> None:
         _ordinary(path)
         if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
             raise ExportError(f"Exported source changed: {relative}")
+
+
+def verify_source(repo: Path, source: Path, commit: str) -> None:
+    """Bind the direct worker's complete raw tree to an immutable Git commit."""
+    if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", commit):
+        raise ExportError("Worker requires an immutable full commit ID")
+    repo, source = _absolute(repo), _absolute(source)
+    with PathGuard() as guard:
+        guard.add(repo)
+        guard.add(source)
+        if _git(repo, "rev-parse", "--verify", f"{commit}^{{commit}}").decode().strip() != commit:
+            raise ExportError("Worker identity does not match the commit object")
+        manifest = {relative: hashlib.sha256(blob).hexdigest()
+                    for _, _, relative, blob in _blobs(repo, _tree_entries(repo, commit))}
+        verify_snapshot(source, manifest)
+        guard.check()
 
 
 def _output_files(root: Path, guard: PathGuard):
@@ -292,8 +371,9 @@ def _output_files(root: Path, guard: PathGuard):
 def verify_build_identity(source: Path, commit: str, manifest: dict[str, str],
                           raw_version: bytes | None = None) -> str:
     """Only version metadata may differ from the raw commit after packaging."""
+    verify_inventory(source, manifest, after_build=True)
     unchanged = {name: digest for name, digest in manifest.items() if name != "zd_app/version.py"}
-    verify_snapshot(source, unchanged)
+    verify_snapshot(source, unchanged, exact=False)
     version_path = source / "zd_app" / "version.py"
     _ordinary(version_path)
     tree = ast.parse(version_path.read_text(encoding="utf-8-sig"))
@@ -380,6 +460,7 @@ def run_build(repo: Path, destination: Path, python: Path) -> None:
             "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
             str(source / "tools" / "build_release.ps1"), "-FromVerifiedSnapshot",
             "-BuildPython", str(python), "-ExpectedCommit", commit,
+            "-SourceRepository", str(repo), "-GitExecutable", trusted_git(),
             "-InnoToolchainRoot", str(repo / ".release-tools"),
         ], cwd=source, env=env)
         if result.returncode:
@@ -405,8 +486,17 @@ def main() -> int:
     parser.add_argument("--destination", type=Path)
     parser.add_argument("--python", type=Path)
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--git", help="Expected authenticated system Git executable")
+    parser.add_argument("--verify-source", type=Path)
+    parser.add_argument("--commit")
     args = parser.parse_args()
-    if args.check:
+    if args.git:
+        trusted_git(args.git)
+    if args.verify_source:
+        if not args.commit:
+            parser.error("source verification requires --commit")
+        verify_source(args.repo, args.verify_source, args.commit)
+    elif args.check:
         print(assert_clean_tree(args.repo))
     else:
         if not args.destination or not args.python:

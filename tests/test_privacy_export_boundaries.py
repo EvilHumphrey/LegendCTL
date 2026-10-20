@@ -16,6 +16,9 @@ from zd_app.services.module_passport import ModulePassportService
 from zd_app.storage._import_guards import MAX_IMPORT_BYTES
 
 
+HEALTH_REPORT_STEM = "zd_health_report_2026-10-20_120000"
+
+
 class ExportBoundaryTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
@@ -27,7 +30,7 @@ class ExportBoundaryTests(unittest.TestCase):
             base_dir=self.root / "bundles", health_report_dir=self.reports
         )
 
-    def report(self, stem="health", payload=None):
+    def report(self, stem=HEALTH_REPORT_STEM, payload=None):
         (self.reports / f"{stem}.md").write_text("# Health\n", encoding="utf-8")
         if payload is not None:
             (self.reports / f"{stem}.json").write_text(payload, encoding="utf-8")
@@ -46,7 +49,7 @@ class ExportBoundaryTests(unittest.TestCase):
         target = self.root / "export.zip"
         self.assertEqual(self.service.generate_bundle_zip(target), target)
         with zipfile.ZipFile(target) as archive:
-            text = archive.read("health_reports/health.json").decode()
+            text = archive.read(f"health_reports/{HEALTH_REPORT_STEM}.json").decode()
             result = json.loads(text)
         self.assertNotIn("secretuser", text)
         self.assertNotIn("UNIT-PRIVATE", text)
@@ -71,25 +74,54 @@ class ExportBoundaryTests(unittest.TestCase):
                 target = self.root / "export.zip"
                 self.assertEqual(self.service.generate_bundle_zip(target), target)
                 with zipfile.ZipFile(target) as archive:
-                    self.assertNotIn("health_reports/health.json", archive.namelist())
+                    self.assertNotIn(f"health_reports/{HEALTH_REPORT_STEM}.json", archive.namelist())
                     self.assertIn("JSON sibling unreadable", archive.read("report.md").decode())
-                    self.assertIn("health_reports/health.md", archive.namelist())
+                    self.assertIn(f"health_reports/{HEALTH_REPORT_STEM}.md", archive.namelist())
 
-    def test_real_health_filenames_colliding_after_sanitation_preserve_target(self):
+    def test_noncanonical_health_filenames_colliding_after_sanitation_are_excluded(self):
+        self.report(payload="{}")
         for stem in ("VID_413D&PID_2104#UNIT-A", "VID_413D&PID_2104#UNIT-B"):
-            self.report(stem)
-        self.assert_failed_export_preserves_target()
-        with self.assertRaises(ValueError):
-            self.service.preview_bundle_manifest()
-
-    def test_filename_instance_tail_removed_and_extension_preserved(self):
-        self.report("VID_413D&PID_2104#UNIT-PRIVATE")
+            self.report(stem, payload='{"private": "EXCLUDED-PRIVATE-CONTENT"}')
+            (self.reports / f"{stem}.md").write_text("EXCLUDED-PRIVATE-CONTENT", encoding="utf-8")
         target = self.root / "export.zip"
         self.assertEqual(self.service.generate_bundle_zip(target), target)
+        manifest = self.service.preview_bundle_manifest()
         with zipfile.ZipFile(target) as archive:
-            self.assertIn("health_reports/VID_413D&PID_2104.md", archive.namelist())
-            self.assertNotIn("UNIT-PRIVATE", "\n".join(archive.namelist()))
-        self.assertEqual(self.service.preview_bundle_manifest().member_paths, tuple(archive.namelist()))
+            self.assertEqual(tuple(archive.namelist()), manifest.member_paths)
+            self.assertEqual(
+                {name for name in archive.namelist() if name.startswith("health_reports/")},
+                {f"health_reports/{HEALTH_REPORT_STEM}.{ext}" for ext in ("md", "json")},
+            )
+            self.assertNotIn("UNIT-", repr(manifest))
+            for name in archive.namelist():
+                self.assertNotIn("EXCLUDED-PRIVATE-CONTENT", archive.read(name).decode())
+
+    def test_final_member_filename_collisions_after_sanitation_preserve_target(self):
+        # Canonical source-name admission now excludes these on disk. A future
+        # producer must still be unable to introduce sanitized ZIP collisions.
+        members = [
+            _BundleMember(f"health_reports/VID_413D&PID_2104#{tail}.md", "# Health\n", "health_report")
+            for tail in ("UNIT-A", "UNIT-B")
+        ]
+        with patch.object(self.service, "_bundle_members", return_value=members):
+            self.assert_failed_export_preserves_target()
+            with self.assertRaises(ValueError):
+                self.service.preview_bundle_manifest()
+
+    def test_member_filename_instance_tail_removed_and_extension_preserved(self):
+        # Exercise final member sanitation directly; imported health filenames
+        # containing identifiers are rejected before this boundary.
+        for tail in ("UNIT-PRIVATE", "UNIT`PRIVATE"):
+            with self.subTest(tail=tail):
+                members = self.service._validated_bundle_members([
+                    _BundleMember(f"health_reports/VID_413D&PID_2104#{tail}.{ext}", text, "health_report")
+                    for ext, text in (("md", "# Health\n"), ("json", "{}"))
+                ])
+                self.assertEqual(
+                    tuple(member.path for member in members),
+                    ("health_reports/VID_413D&PID_2104.md", "health_reports/VID_413D&PID_2104.json"),
+                )
+                self.assertNotIn("PRIVATE", repr(members))
 
     def assert_failed_export_preserves_target(self):
         for exists in (False, True):
@@ -174,16 +206,16 @@ class ReviewedPrivacyBypassTests(unittest.TestCase):
         for identifier in identifiers:
             with self.subTest(identifier=identifier):
                 self.report(payload=json.dumps({"nested": [{"device": identifier}]}))
-                (self.reports / "health.md").write_text(identifier, encoding="utf-8")
+                (self.reports / f"{HEALTH_REPORT_STEM}.md").write_text(identifier, encoding="utf-8")
                 target = self.root / "qualified.zip"
                 self.assertEqual(self.service.generate_bundle_zip(target), target)
                 with zipfile.ZipFile(target) as archive:
-                    for member in ("health_reports/health.md", "health_reports/health.json"):
+                    for member in (f"health_reports/{HEALTH_REPORT_STEM}.md", f"health_reports/{HEALTH_REPORT_STEM}.json"):
                         with self.subTest(member=member):
                             text = archive.read(member).decode()
                             self.assertNotIn("PRIVATEHASH", text)
                             self.assertIn("vid_413d&pid_2104", text.lower())
-                    parsed = json.loads(archive.read("health_reports/health.json"))
+                    parsed = json.loads(archive.read(f"health_reports/{HEALTH_REPORT_STEM}.json"))
                     self.assertIn("vid_413d&pid_2104", parsed["nested"][0]["device"].lower())
 
     def test_qualifier_recognition_keeps_adjacent_ordinary_status(self):
@@ -248,11 +280,11 @@ class IdentifierCharacterBoundaryTests(unittest.TestCase):
                 self.report(payload=json.dumps({"nested": [{"id": identifier}]}))
                 # Already-formatted imported Markdown gets the same privacy
                 # priority; a punctuation character is not proof of a boundary.
-                (self.reports / "health.md").write_text("`" + identifier + "`", encoding="utf-8")
+                (self.reports / f"{HEALTH_REPORT_STEM}.md").write_text("`" + identifier + "`", encoding="utf-8")
                 target = self.root / "punctuation.zip"
                 self.assertEqual(self.service.generate_bundle_zip(target), target)
                 with zipfile.ZipFile(target) as archive:
-                    for name in ("health_reports/health.md", "health_reports/health.json"):
+                    for name in (f"health_reports/{HEALTH_REPORT_STEM}.md", f"health_reports/{HEALTH_REPORT_STEM}.json"):
                         with self.subTest(boundary=name):
                             text = archive.read(name).decode()
                             self.assertNotIn("PRIVATE", text)
@@ -263,14 +295,22 @@ class IdentifierCharacterBoundaryTests(unittest.TestCase):
                         self.assertNotIn("PRIVATE", text)
                         self.assertIn("VID_413D&PID_2104", text)
 
-    def test_backtick_filename_tail_is_removed_in_zip_and_preview(self):
-        self.report("VID_413D&PID_2104#UNIT`PRIVATE", payload="{}")
+    def test_noncanonical_backtick_filename_is_excluded_in_zip_and_preview(self):
+        self.report(payload="{}")
+        stem = "VID_413D&PID_2104#UNIT`PRIVATE"
+        self.report(stem, payload='{"private": "EXCLUDED-PRIVATE-CONTENT"}')
+        (self.reports / f"{stem}.md").write_text("EXCLUDED-PRIVATE-CONTENT", encoding="utf-8")
         target = self.root / "filename.zip"
         self.assertEqual(self.service.generate_bundle_zip(target), target)
         with zipfile.ZipFile(target) as archive:
             with self.subTest(boundary="zip"):
                 self.assertNotIn("PRIVATE", repr(archive.namelist()))
-                self.assertIn("health_reports/VID_413D&PID_2104.md", archive.namelist())
+                self.assertEqual(
+                    {name for name in archive.namelist() if name.startswith("health_reports/")},
+                    {f"health_reports/{HEALTH_REPORT_STEM}.{ext}" for ext in ("md", "json")},
+                )
+                for name in archive.namelist():
+                    self.assertNotIn("EXCLUDED-PRIVATE-CONTENT", archive.read(name).decode())
             with self.subTest(boundary="preview"):
                 paths = self.service.preview_bundle_manifest().member_paths
                 self.assertNotIn("PRIVATE", repr(paths))

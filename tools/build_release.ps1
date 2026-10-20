@@ -5,7 +5,9 @@ param(
     [switch]$FromVerifiedSnapshot,
     [string]$BuildPython,
     [string]$ExpectedCommit,
-    [string]$InnoToolchainRoot
+    [string]$InnoToolchainRoot,
+    [string]$SourceRepository,
+    [string]$GitExecutable
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,18 +52,21 @@ function Invoke-NativeCommand {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
+. (Join-Path $PSScriptRoot 'release_git.ps1')
+$releaseGit = Resolve-TrustedReleaseGit -ExpectedPath $GitExecutable
 
 $python = if ($FromVerifiedSnapshot) { $BuildPython } else { Join-Path $repoRoot ".venv-zd\Scripts\python.exe" }
 if (-not $FromVerifiedSnapshot) {
-    if ($BuildPython -or $ExpectedCommit -or $InnoToolchainRoot) { throw "Snapshot parameters are internal to the release builder." }
+    if ($BuildPython -or $ExpectedCommit -or $InnoToolchainRoot -or $SourceRepository -or $GitExecutable) { throw "Snapshot parameters are internal to the release builder." }
     if (-not $ArtifactDestination) { $ArtifactDestination = Join-Path $repoRoot "dist" }
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
         throw "Expected venv at .venv-zd; run tools\setup_dev_env.ps1 first."
     }
-    Invoke-NativeCommand -Label "commit-bound release build" -ScriptBlock { & $python -I -S (Join-Path $PSScriptRoot "export_git_tree.py") --repo $repoRoot --destination $ArtifactDestination --python $python }
+    Invoke-NativeCommand -Label "commit-bound release build" -ScriptBlock { & $python -I -S (Join-Path $PSScriptRoot "export_git_tree.py") --repo $repoRoot --destination $ArtifactDestination --python $python --git $releaseGit }
     return
 }
-if ($ArtifactDestination -or $ExpectedCommit -notmatch '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' -or -not [IO.Path]::IsPathRooted($BuildPython)) {
+if ($ArtifactDestination -or $ExpectedCommit -notmatch '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' -or
+    -not [IO.Path]::IsPathRooted($BuildPython) -or -not $SourceRepository -or -not [IO.Path]::IsPathRooted($SourceRepository)) {
     throw "Invalid isolated build identity or toolchain."
 }
 if (Test-Path -LiteralPath (Join-Path $repoRoot ".git")) {
@@ -70,6 +75,9 @@ if (Test-Path -LiteralPath (Join-Path $repoRoot ".git")) {
 if (-not (Test-Path $python)) {
     Write-Error "Expected venv at .venv-zd; run ``tools\setup_dev_env.ps1`` first."
 }
+# Independently prove the worker's exact file inventory and raw bytes. A caller
+# supplied hash or manifest is never source authority, and HEAD is not used.
+Invoke-NativeCommand -Label "raw worker source identity" -ScriptBlock { & $python -I -S (Join-Path $PSScriptRoot "export_git_tree.py") --repo $SourceRepository --verify-source $repoRoot --commit $ExpectedCommit --git $releaseGit }
 $releaseLock = Join-Path $repoRoot "requirements-release.lock"
 $lockMarker = Join-Path (Split-Path -Parent (Split-Path -Parent $python)) ".legendctl-release-lock.sha256"
 if (-not (Test-Path -LiteralPath $releaseLock) -or -not (Test-Path -LiteralPath $lockMarker)) {
@@ -139,9 +147,9 @@ try {
         throw "Isolated source unexpectedly contains build outputs. Refusing replacement."
     }
 
-    Invoke-NativeCommand -Label "PyInstaller" -ScriptBlock { & $python -I -m PyInstaller --noconfirm pyinstaller_main_zd.spec }
+    Invoke-NativeCommand -Label "PyInstaller" -ScriptBlock { & $python -I -B -m PyInstaller --noconfirm pyinstaller_main_zd.spec }
 
-    Invoke-NativeCommand -Label "trust manifest" -ScriptBlock { & $python -I tools\generate_trust_manifest.py --dist-root dist\ZDUltimateLegend --repo-root . --source-commit $ExpectedCommit }
+    Invoke-NativeCommand -Label "trust manifest" -ScriptBlock { & $python -I -B tools\generate_trust_manifest.py --dist-root dist\ZDUltimateLegend --repo-root . --source-commit $ExpectedCommit }
 
     $srcDir = Join-Path $repoRoot "dist\ZDUltimateLegend"
     $dstDir = Join-Path $repoRoot "dist\ZDUltimateLegend-v$version"

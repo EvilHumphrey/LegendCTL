@@ -69,7 +69,11 @@ from zd_app.storage.module_passport_models import (
     ModuleFingerprint,
     ModulePassport,
 )
-from zd_app.storage._import_guards import read_guarded_json
+from zd_app.storage._import_guards import (
+    list_guarded_directory,
+    read_guarded_json,
+    read_guarded_text,
+)
 from zd_app.version import __build_commit__, __version__
 
 
@@ -86,6 +90,9 @@ BUNDLE_DIRNAME = "diagnostic_bundles"
 DEFAULT_HEALTH_REPORT_LIMIT = 5
 DEFAULT_WEAR_LEDGER_DAYS = 90
 DEFAULT_RECENT_SERVICE_NOTES = 10
+_HEALTH_REPORT_MARKDOWN_NAME = re.compile(
+    r"zd_health_report_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}\.md"
+)
 
 
 # Format constants the Markdown renderer leans on. Centralised so tests
@@ -598,16 +605,20 @@ class DiagnosticBundleService:
     def _list_recent_health_reports(self, *, limit: int) -> list[Path]:
         """Return paths to the most-recent N exported Health Report files.
 
-        We sort by modification time descending and prefer ``.md`` files
+        We sort by canonical filename descending and select ``.md`` files
         when both ``.md`` and ``.json`` exist for the same stamp (the UI
         renders the Markdown summary above; the ZIP packs both siblings).
         Returns an empty list when the directory is missing or unreadable.
         """
 
         directory = self._health_report_dir
-        if directory is None or not directory.exists():
+        if directory is None:
             return []
         try:
+            # Pin and enumerate the directory through the shared no-reparse
+            # guard. Path-based glob/scandir would follow a root or ancestor
+            # junction before the later per-file guard could reject it.
+            entries = list_guarded_directory(directory)
             # The Health Report export writes
             # ``zd_health_report_<YYYY-MM-DD_HHMMSS>.{md,json}`` (see
             # ``ui/screens/health_report.py:_save_report``), so a
@@ -617,13 +628,16 @@ class DiagnosticBundleService:
             # in ways the filename timestamp doesn't, so the filename is
             # the more reliable source of truth.
             md_files = sorted(
-                directory.glob("*.md"),
+                (
+                    path for path in entries
+                    if _HEALTH_REPORT_MARKDOWN_NAME.fullmatch(path.name)
+                ),
                 key=lambda p: p.name,
                 reverse=True,
             )
-        except OSError:
+        except (OSError, ValueError):
             logger.exception(
-                "DiagnosticBundleService: failed to glob %r", str(directory)
+                "DiagnosticBundleService: failed to list %r", str(directory)
             )
             return []
         return md_files[: max(0, int(limit))]
@@ -641,13 +655,17 @@ class DiagnosticBundleService:
             "lines": [],
         }
         json_sibling = path.with_suffix(".json")
-        if not json_sibling.exists():
+        try:
+            payload = sanitize_shareable_json(
+                read_guarded_json(
+                    json_sibling, local_only=True, require_single_link=True
+                )
+            )
+        except FileNotFoundError:
             result["lines"] = [
                 "(JSON sibling not found — Markdown-only export)",
             ]
             return result
-        try:
-            payload = sanitize_shareable_json(read_guarded_json(json_sibling))
         except (OSError, TypeError, ValueError, RecursionError):
             logger.exception(
                 "DiagnosticBundleService: failed to read health report JSON %r",
@@ -1141,7 +1159,9 @@ class DiagnosticBundleService:
                             f"{self._sanitize_member_path(md_path.name)}"
                         ),
                         text=self._sanitize_path(
-                            md_path.read_text(encoding="utf-8")
+                            read_guarded_text(
+                                md_path, local_only=True, require_single_link=True
+                            )
                         ),
                         class_key="health_report",
                         metadata={
@@ -1150,49 +1170,52 @@ class DiagnosticBundleService:
                         },
                     )
                 )
-            except OSError:
+            except (OSError, ValueError):
                 logger.exception(
                     "DiagnosticBundleService: failed to read MD %r",
                     str(md_path),
                 )
                 continue
             json_sibling = md_path.with_suffix(".json")
-            if json_sibling.exists():
-                try:
-                    payload = read_guarded_json(json_sibling)
-                    sanitized_payload = sanitize_shareable_json(payload)
-                    members.append(
-                        _BundleMember(
-                            path=(
-                                "health_reports/"
-                                f"{self._sanitize_member_path(json_sibling.name)}"
-                            ),
-                            # Sanitize structurally here so preview assembly
-                            # remains best-effort for malformed siblings. The
-                            # final ZIP choke repeats this before writing.
-                            text=json.dumps(
-                                sanitized_payload,
-                                indent=2,
-                                ensure_ascii=False,
-                                sort_keys=True,
-                            ),
-                            class_key="health_report",
-                            metadata={
-                                "format": "json",
-                                "report_stem": md_path.stem,
-                            },
-                        )
+            try:
+                payload = read_guarded_json(
+                    json_sibling, local_only=True, require_single_link=True
+                )
+                sanitized_payload = sanitize_shareable_json(payload)
+                members.append(
+                    _BundleMember(
+                        path=(
+                            "health_reports/"
+                            f"{self._sanitize_member_path(json_sibling.name)}"
+                        ),
+                        # Sanitize structurally here so preview assembly
+                        # remains best-effort for malformed siblings. The
+                        # final ZIP choke repeats this before writing.
+                        text=json.dumps(
+                            sanitized_payload,
+                            indent=2,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        class_key="health_report",
+                        metadata={
+                            "format": "json",
+                            "report_stem": md_path.stem,
+                        },
                     )
-                except (
-                    OSError,
-                    TypeError,
-                    ValueError,
-                    RecursionError,
-                ):
-                    logger.exception(
-                        "DiagnosticBundleService: failed to sanitize JSON %r",
-                        str(json_sibling),
-                    )
+                )
+            except FileNotFoundError:
+                pass
+            except (
+                OSError,
+                TypeError,
+                ValueError,
+                RecursionError,
+            ):
+                logger.exception(
+                    "DiagnosticBundleService: failed to sanitize JSON %r",
+                    str(json_sibling),
+                )
         return members
 
 

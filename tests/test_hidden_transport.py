@@ -36,7 +36,7 @@ class HiddenTransportTests(unittest.TestCase):
 
             self.assertEqual(matches, [sample_path])
 
-    def test_wait_for_openable_hid_paths_uses_log_cache_when_enumeration_is_empty(self) -> None:
+    def test_wait_for_openable_hid_paths_refuses_log_cache_when_enumeration_is_empty(self) -> None:
         original_filter = hht.filter_hid_paths
         original_known = hht.known_hidden_paths_from_logs
         original_try_open = hht.try_open_hid_path
@@ -48,7 +48,7 @@ class HiddenTransportTests(unittest.TestCase):
 
             matches = hht.wait_for_openable_hid_paths(0x20BC, 0x5080, timeout_s=0.0)
 
-            self.assertEqual(matches, [sample_path])
+            self.assertEqual(matches, [])
         finally:
             hht.filter_hid_paths = original_filter
             hht.known_hidden_paths_from_logs = original_known
@@ -70,7 +70,7 @@ class HiddenTransportTests(unittest.TestCase):
 
             self.assertEqual(probe.visible_paths, (visible_path, shared_path))
             self.assertEqual(probe.known_candidate_paths, (cached_path, shared_path))
-            self.assertEqual(probe.reachable_paths, (shared_path,))
+            self.assertEqual(probe.reachable_paths, ())
             self.assertEqual(probe.source_for_path(visible_path), "setupapi")
             self.assertEqual(probe.source_for_path(cached_path), "log_cache")
             self.assertEqual(probe.source_for_path(shared_path), "setupapi+log_cache")

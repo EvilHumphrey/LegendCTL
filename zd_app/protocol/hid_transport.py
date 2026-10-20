@@ -15,7 +15,9 @@ import argparse
 import ctypes as c
 import json
 import logging
+import os
 import queue
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -52,6 +54,7 @@ __all__ = [
     "HiddenInterfaceEvent",
     "HiddenInterfaceWatcher",
     "HiddenTransportProbe",
+    "HiddenCaptureLimitError",
     "INVALID_HANDLE_VALUE",
     "MAX_DEVICE_ID_LEN",
     "OFFICIAL_HIDDEN_OPEN_PROFILES",
@@ -63,6 +66,7 @@ __all__ = [
     "enumerate_hid_paths",
     "event_driven_open_hidden_transport",
     "filter_hid_paths",
+    "hid_path_matches",
     "kernel32",
     "known_hidden_paths_from_logs",
     "main",
@@ -73,6 +77,7 @@ __all__ = [
     "setupapi",
     "try_open_hid_path",
     "try_open_hid_profile",
+    "unique_visible_hidden_path",
     "wait_for_hid_paths",
     "wait_for_hidden_transport",
     "wait_for_openable_hid_paths",
@@ -123,6 +128,7 @@ class HiddenTransportProbe:
     visible_paths: tuple[str, ...]
     known_candidate_paths: tuple[str, ...]
     reachable_paths: tuple[str, ...]
+    discovery_error: str | None = None
 
     @property
     def candidate_paths(self) -> tuple[str, ...]:
@@ -306,17 +312,53 @@ def enumerate_hid_paths() -> list[str]:
 
 
 def filter_hid_paths(vendor_id: int | None = None, product_id: int | None = None) -> list[str]:
-    vendor_token = f"vid_{vendor_id:04x}" if vendor_id is not None else None
-    product_token = f"pid_{product_id:04x}" if product_id is not None else None
-    matches: list[str] = []
-    for path in enumerate_hid_paths():
-        lower = path.lower()
-        if vendor_token and vendor_token not in lower:
-            continue
-        if product_token and product_token not in lower:
-            continue
-        matches.append(path)
-    return matches
+    paths = enumerate_hid_paths()
+    if vendor_id is None and product_id is None:
+        return paths
+    return [
+        path for path in paths
+        if hid_path_matches(path, vendor_id, product_id)
+    ]
+
+
+def hid_path_matches(path: str, vendor_id: int | None, product_id: int | None) -> bool:
+    """Match device tokens in the HID device component, never arbitrary substrings."""
+    if not isinstance(path, str) or "\x00" in path:
+        return False
+    parts = path.lower().split("#")
+    if len(parts) < 3 or parts[0] != "\\\\?\\hid" or not parts[2]:
+        return False
+    tokens = parts[1].split("&")
+    for label, expected in (("vid", vendor_id), ("pid", product_id)):
+        values = [token for token in tokens if token.startswith(label + "_")]
+        if len(values) != 1 or not re.fullmatch(label + r"_[0-9a-f]{4}", values[0]):
+            return False
+        if expected is not None and values[0] != f"{label}_{expected:04x}":
+            return False
+    return True
+
+
+def unique_visible_hidden_path(probe: HiddenTransportProbe) -> str | None:
+    """A cached or reachable-only path never grants authority to open a device."""
+    if probe.discovery_error:
+        return None
+    paths = {
+        path.casefold(): path for path in probe.visible_paths
+        if hid_path_matches(path, 0x20BC, 0x5080)
+    }
+    return next(iter(paths.values())) if len(paths) == 1 else None
+
+
+MAX_CAPTURE_FILES = 32
+MAX_CAPTURE_DIRECTORY_ENTRIES = 256
+MAX_CAPTURE_FILE_BYTES = 1024 * 1024
+MAX_CAPTURE_TOTAL_BYTES = 4 * 1024 * 1024
+MAX_CAPTURE_LINE_BYTES = 64 * 1024
+MAX_CAPTURE_LINES = 32768
+
+
+class HiddenCaptureLimitError(ValueError):
+    """Discovery is incomplete and must not authorize any device open."""
 
 
 def known_hidden_paths_from_logs(
@@ -324,43 +366,71 @@ def known_hidden_paths_from_logs(
     vendor_id: int | None = None,
     product_id: int | None = None,
 ) -> list[str]:
-    vendor_token = f"vid_{vendor_id:04x}" if vendor_id is not None else None
-    product_token = f"pid_{product_id:04x}" if product_id is not None else None
     matches: list[str] = []
     seen: set[str] = set()
     base = Path(log_dir)
     if not base.exists():
         return []
 
-    for capture_path in sorted(base.glob("*.jsonl")):
+    capture_paths = []
+    # Path.glob() materializes a directory's entries before yielding matches
+    # on Python 3.12. Bound the streaming inventory, including unrelated names,
+    # before sorting or opening any capture.
+    try:
+        with os.scandir(base) as entries:
+            for entry_count, entry in enumerate(entries, start=1):
+                if entry_count > MAX_CAPTURE_DIRECTORY_ENTRIES:
+                    raise HiddenCaptureLimitError("Hidden capture discovery exceeded its directory-entry budget.")
+                if not entry.name.casefold().endswith(".jsonl"):
+                    continue
+                capture_paths.append(base / entry.name)
+                if len(capture_paths) > MAX_CAPTURE_FILES:
+                    raise HiddenCaptureLimitError("Hidden capture discovery exceeded its file budget.")
+    except OSError as exc:
+        raise HiddenCaptureLimitError("Hidden capture discovery could not read the capture directory.") from exc
+    total_bytes = 0
+    line_count = 0
+    for capture_path in sorted(capture_paths):
         try:
-            lines = capture_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            with capture_path.open("rb") as stream:
+                file_bytes = 0
+                while True:
+                    # At most one bounded line, including the overflow sentinel,
+                    # is allocated. Account actual bytes, not a racy file stat.
+                    raw_line = stream.readline(min(
+                        MAX_CAPTURE_LINE_BYTES,
+                        MAX_CAPTURE_FILE_BYTES - file_bytes,
+                        MAX_CAPTURE_TOTAL_BYTES - total_bytes,
+                    ) + 1)
+                    if not raw_line:
+                        break
+                    file_bytes += len(raw_line)
+                    total_bytes += len(raw_line)
+                    line_count += 1
+                    if (
+                        len(raw_line) > MAX_CAPTURE_LINE_BYTES
+                        or file_bytes > MAX_CAPTURE_FILE_BYTES
+                        or total_bytes > MAX_CAPTURE_TOTAL_BYTES
+                        or line_count > MAX_CAPTURE_LINES
+                    ):
+                        raise HiddenCaptureLimitError("Hidden capture discovery exceeded its read budget.")
+                    if not raw_line.startswith(b"{"):
+                        continue
+                    try:
+                        payload = json.loads(raw_line)
+                    except (ValueError, RecursionError):
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    path = payload.get("path")
+                    if not hid_path_matches(path, vendor_id, product_id):
+                        continue
+                    key = path.casefold()
+                    if key not in seen:
+                        seen.add(key)
+                        matches.append(path)
         except OSError:
             continue
-        for raw_line in lines:
-            if not raw_line.startswith("{"):
-                continue
-            try:
-                payload = json.loads(raw_line)
-            except (ValueError, RecursionError):
-                # RecursionError is a RuntimeError, NOT a ValueError, so the
-                # old json.JSONDecodeError-only catch let a deeply-nested line
-                # in a local capture file escape this reader and crash whichever
-                # caller asked for the paths. Reading these logs needs no device
-                # write at all, so a corrupt capture file was enough.
-                continue
-            path = payload.get("path")
-            if not isinstance(path, str):
-                continue
-            lower = path.lower()
-            if vendor_token and vendor_token not in lower:
-                continue
-            if product_token and product_token not in lower:
-                continue
-            if path in seen:
-                continue
-            seen.add(path)
-            matches.append(path)
     return matches
 
 
@@ -369,18 +439,10 @@ def candidate_hid_paths(
     product_id: int | None = None,
     log_dir: str | Path = "logs",
 ) -> list[str]:
-    candidates: list[str] = []
-    seen: set[str] = set()
-    for source in (
-        filter_hid_paths(vendor_id=vendor_id, product_id=product_id),
-        known_hidden_paths_from_logs(log_dir=log_dir, vendor_id=vendor_id, product_id=product_id),
-    ):
-        for path in source:
-            if path in seen:
-                continue
-            seen.add(path)
-            candidates.append(path)
-    return candidates
+    # Captures remain diagnostic evidence; only present enumeration can
+    # contribute actionable candidates. Still validate discovery budgets.
+    known_hidden_paths_from_logs(log_dir=log_dir, vendor_id=vendor_id, product_id=product_id)
+    return _merge_unique_paths(filter_hid_paths(vendor_id=vendor_id, product_id=product_id))
 
 
 def probe_hidden_transport(
@@ -388,10 +450,22 @@ def probe_hidden_transport(
     product_id: int | None = None,
     log_dir: str | Path = "logs",
     desired_access: int = GENERIC_READ | GENERIC_WRITE,
+    operation_guard: Callable[[], bool] | None = None,
 ) -> HiddenTransportProbe:
+    if operation_guard is not None and operation_guard() is not True:
+        return HiddenTransportProbe((), (), (), "Hidden operation admission changed.")
     visible_paths = tuple(filter_hid_paths(vendor_id=vendor_id, product_id=product_id))
-    known_candidate_paths = tuple(known_hidden_paths_from_logs(log_dir=log_dir, vendor_id=vendor_id, product_id=product_id))
-    reachable_paths = tuple(openable_hid_paths(list(_merge_unique_paths(visible_paths, known_candidate_paths)), desired_access=desired_access))
+    try:
+        known_candidate_paths = tuple(known_hidden_paths_from_logs(log_dir=log_dir, vendor_id=vendor_id, product_id=product_id))
+    except HiddenCaptureLimitError as exc:
+        return HiddenTransportProbe(visible_paths, (), (), str(exc))
+    unique_paths = _merge_unique_paths(visible_paths)
+    if len(unique_paths) == 1:
+        current_paths = _merge_unique_paths(filter_hid_paths(vendor_id=vendor_id, product_id=product_id))
+        if {path.casefold() for path in current_paths} != {unique_paths[0].casefold()}:
+            return HiddenTransportProbe(visible_paths, known_candidate_paths, (), "Hidden endpoint changed during discovery.")
+    kwargs = {"operation_guard": operation_guard} if operation_guard is not None else {}
+    reachable_paths = tuple(openable_hid_paths(unique_paths, desired_access=desired_access, **kwargs)) if len(unique_paths) == 1 else ()
     return HiddenTransportProbe(
         visible_paths=visible_paths,
         known_candidate_paths=known_candidate_paths,
@@ -406,16 +480,19 @@ def wait_for_hidden_transport(
     poll_interval_s: float = 0.25,
     log_dir: str | Path = "logs",
     desired_access: int = GENERIC_READ | GENERIC_WRITE,
+    operation_guard: Callable[[], bool] | None = None,
 ) -> HiddenTransportProbe:
+    kwargs = {"operation_guard": operation_guard} if operation_guard is not None else {}
     deadline = time.time() + max(0.0, timeout_s)
     last_probe = probe_hidden_transport(
         vendor_id=vendor_id,
         product_id=product_id,
         log_dir=log_dir,
         desired_access=desired_access,
+        **kwargs,
     )
     while True:
-        if last_probe.reachable_paths:
+        if last_probe.reachable_paths or last_probe.discovery_error:
             return last_probe
         if time.time() >= deadline:
             return last_probe
@@ -425,6 +502,7 @@ def wait_for_hidden_transport(
             product_id=product_id,
             log_dir=log_dir,
             desired_access=desired_access,
+            **kwargs,
         )
 
 
@@ -449,9 +527,9 @@ def _merge_unique_paths(*collections: tuple[str, ...] | list[str]) -> list[str]:
     seen: set[str] = set()
     for collection in collections:
         for path in collection:
-            if path in seen:
+            if path.casefold() in seen:
                 continue
-            seen.add(path)
+            seen.add(path.casefold())
             merged.append(path)
     return merged
 
@@ -499,9 +577,11 @@ def try_open_hid_profile(path: str, profile: HidOpenProfile) -> dict[str, int | 
     }
 
 
-def openable_hid_paths(paths: list[str], desired_access: int = GENERIC_READ | GENERIC_WRITE) -> list[str]:
+def openable_hid_paths(paths: list[str], desired_access: int = GENERIC_READ | GENERIC_WRITE, *, operation_guard=None) -> list[str]:
     matches: list[str] = []
     for path in paths:
+        if operation_guard is not None and operation_guard() is not True:
+            return []
         result = try_open_hid_path(path, desired_access)
         if result.get("ok"):
             matches.append(path)
@@ -735,6 +815,8 @@ class HiddenInterfaceWatcher:
         *,
         queue_maxsize: int = 256,
     ):
+        self.vendor_id = vendor_id
+        self.product_id = product_id
         self._vendor_token = f"vid_{vendor_id:04x}"
         self._product_token = f"pid_{product_id:04x}"
         self._events: "queue.Queue[HiddenInterfaceEvent]" = queue.Queue(
@@ -821,10 +903,7 @@ class HiddenInterfaceWatcher:
                 return drained
 
     def _matches(self, path: str) -> bool:
-        if not path:
-            return False
-        lower = path.lower()
-        return self._vendor_token in lower and self._product_token in lower
+        return hid_path_matches(path, self.vendor_id, self.product_id)
 
     def _on_event(self, action: str, path: str) -> None:
         """Internal seam. Called by the real callback and by unit tests."""
