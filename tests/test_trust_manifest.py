@@ -147,6 +147,26 @@ class TrustManifestGeneratorTests(unittest.TestCase):
                 self.assertEqual(record["build_commit"], _COMMIT)
                 self.assertEqual(record["build_commit_short"], _COMMIT)
 
+    def test_explicit_verified_abbreviation_preserves_private_build_label(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repo, dist = self._mini_tree(Path(temporary))
+            with patch.object(self.tool, "_git", side_effect=AssertionError("must not query ambient Git")):
+                path = self.tool.generate_manifest(
+                    repo_root=repo, dist_root=dist, scanner_repo_root=_REPO_ROOT,
+                    source_commit=_COMMIT, source_commit_short=_SHORT_COMMIT,
+                )
+                record = json.loads(path.read_text())
+                self.assertEqual(_COMMIT, record["build_commit"])
+                self.assertEqual(_SHORT_COMMIT, record["build_commit_short"])
+                for invalid in ("abc", "1234567", _COMMIT + "a"):
+                    with self.subTest(invalid=invalid), self.assertRaisesRegex(
+                        self.tool.ManifestBuildError, "source identity"
+                    ):
+                        self.tool.generate_manifest(
+                            repo_root=repo, dist_root=dist, scanner_repo_root=_REPO_ROOT,
+                            source_commit=_COMMIT, source_commit_short=invalid,
+                        )
+
     def test_generator_fails_closed_for_source_scan_problems(self) -> None:
         cases = {
             "network": lambda repo: (repo / "zd_app" / "clean.py").write_text(

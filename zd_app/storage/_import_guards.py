@@ -16,6 +16,7 @@ import ctypes
 import json
 import ntpath
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ _OBJ_CASE_INSENSITIVE = 0x00000040
 _OBJ_DONT_REPARSE = 0x00001000
 _STATUS_REPARSE_POINT_ENCOUNTERED = 0xC000050B
 _FILE_READ_DATA = 0x00000001
+_FILE_READ_ATTRIBUTES = 0x00000080
 _SYNCHRONIZE = 0x00100000
 _FILE_SHARE_READ = 0x00000001
 _FILE_SHARE_WRITE = 0x00000002
@@ -89,7 +91,9 @@ def _get_windows_drive_type(path: str) -> int | None:
     return int(ctypes.windll.kernel32.GetDriveTypeW(f"{drive}\\"))  # type: ignore[attr-defined]
 
 
-def _read_windows_local_no_reparse(path: str, max_bytes: int) -> bytes:
+def _read_windows_local_no_reparse(
+    path: str, max_bytes: int, *, require_single_link: bool = False
+) -> bytes:
     """Atomically open and read a local Windows file without following reparses.
 
     This is deliberately the first filesystem operation after lexical/device
@@ -103,6 +107,12 @@ def _read_windows_local_no_reparse(path: str, max_bytes: int) -> bytes:
     of the final component. ``FILE_OPEN`` plus
     ``FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT`` opens only an
     existing regular file with synchronous read semantics.
+
+    Single-link reads also deny write/delete sharing for the lifetime of this
+    handle and check its link count before and after reading. This blocks
+    conflicting writer opens/removal of the opened name and detects persistent
+    added aliases. Other link names may still change; the checks do not prove
+    historical namespace ownership or the contents' provenance.
 
     Microsoft references:
     https://learn.microsoft.com/windows/win32/api/ntdef/ns-ntdef-_object_attributes
@@ -149,12 +159,17 @@ def _read_windows_local_no_reparse(path: str, max_bytes: int) -> bytes:
     nt_create_file.restype = ctypes.c_long
     status = nt_create_file(
         ctypes.byref(native_handle),
-        _FILE_READ_DATA | _SYNCHRONIZE,
+        _FILE_READ_DATA | _SYNCHRONIZE | (
+            _FILE_READ_ATTRIBUTES if require_single_link else 0
+        ),
         ctypes.byref(object_attributes),
         ctypes.byref(io_status),
         None,
         0,
-        _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
+        (
+            _FILE_SHARE_READ if require_single_link
+            else _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE
+        ),
         _FILE_OPEN,
         _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_NON_DIRECTORY_FILE,
         None,
@@ -187,7 +202,20 @@ def _read_windows_local_no_reparse(path: str, max_bytes: int) -> bytes:
         os.close(descriptor)
         raise
     with handle:
-        return handle.read(max_bytes + 1)
+        if require_single_link:
+            _require_single_link_regular_file(handle.fileno())
+        payload = handle.read(max_bytes + 1)
+        if require_single_link:
+            _require_single_link_regular_file(handle.fileno())
+        return payload
+
+
+def _require_single_link_regular_file(descriptor: int) -> None:
+    """Check the opened object, rather than a replaceable pathname."""
+
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise UnsafeImportPathError("File must be regular and have exactly one link")
 
 
 def require_local_import_path(path: str | Path) -> str:
@@ -257,6 +285,7 @@ def read_guarded_text(
     *,
     max_bytes: int = MAX_IMPORT_BYTES,
     local_only: bool = False,
+    require_single_link: bool = False,
 ) -> str:
     """Read at most ``max_bytes + 1`` bytes from one file handle.
 
@@ -265,17 +294,28 @@ def read_guarded_text(
     check. ``local_only`` is explicit because app-owned readers may live in a
     user-configured location while user-selected import sources must not be
     network paths.
+
+    ``require_single_link`` opts into rejecting aliases via the opened file's
+    link count. It implies the local-path policy and, on Windows, uses the
+    no-reparse native open with read-only sharing until the read completes.
+    This does not establish provenance of the file's contents.
     """
 
     checked_path = os.fspath(path)
-    if local_only:
+    if local_only or require_single_link:
         checked_path = require_local_import_path(path)
-    if local_only and os.name == "nt":
-        payload = _read_windows_local_no_reparse(checked_path, max_bytes)
+    if (local_only or require_single_link) and os.name == "nt":
+        payload = _read_windows_local_no_reparse(
+            checked_path, max_bytes, require_single_link=require_single_link
+        )
     else:
         source = Path(checked_path)
         with source.open("rb") as handle:
+            if require_single_link:
+                _require_single_link_regular_file(handle.fileno())
             payload = handle.read(max_bytes + 1)
+            if require_single_link:
+                _require_single_link_regular_file(handle.fileno())
     if len(payload) > max_bytes:
         raise ImportFileTooLargeError(
             f"Import file is too large (limit {max_bytes} bytes): {path}"
@@ -288,6 +328,7 @@ def read_guarded_json(
     *,
     max_bytes: int = MAX_IMPORT_BYTES,
     local_only: bool = False,
+    require_single_link: bool = False,
 ) -> Any:
     """Read and parse a JSON file behind the size and depth guards.
 
@@ -304,7 +345,10 @@ def read_guarded_json(
     ``json.loads`` from ``RecursionError``.
     """
 
-    raw = read_guarded_text(path, max_bytes=max_bytes, local_only=local_only)
+    raw = read_guarded_text(
+        path, max_bytes=max_bytes, local_only=local_only,
+        require_single_link=require_single_link,
+    )
     if _max_json_depth(raw) > MAX_IMPORT_JSON_DEPTH:
         raise ValueError(f"Import file JSON nesting is too deep: {path}")
     return json.loads(raw)
