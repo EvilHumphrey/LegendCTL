@@ -517,6 +517,33 @@ Build identity: report what this process can observe.
                 self.assertIn("imports socket", shared)
                 self.assertIn("webbrowser.open", shared)
 
+    def test_static_scan_normalized_identifier_path_is_sanitized_at_both_exports(self) -> None:
+        marker = "SYNTHETIC-PRIVATE"
+        identifier = "VID_413D&PID_2104&MI_02"
+        benign = "models/AVID_413D&PID_2104/REV-A.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested = root / "HID" / identifier / (marker + ".py")
+            nested.parent.mkdir(parents=True)
+            nested.write_text("import socket\n", encoding="utf-8")
+            ordinary = root / benign
+            ordinary.parent.mkdir(parents=True)
+            ordinary.write_text("import socket\n", encoding="utf-8")
+            result = trust_self_check.build_trust_self_check(
+                package_root=root, entry_module_path=root / "absent.py", now=_NOW,
+            )
+        self.assertIn(
+            "HID/" + identifier + "/" + marker + ".py",
+            tuple(finding.relative_path for finding in result.network_import_findings),
+        )
+        self.assertIn(marker, _row(result, "network").evidence)
+        for shared in (result.to_text(), result.to_markdown()):
+            with self.subTest(shared=shared[:50]):
+                self.assertNotIn(marker, shared)
+                self.assertIn("VID_413D&PID_2104", shared)
+                self.assertIn(benign, shared)
+                self.assertIn("imports socket", shared)
+
     def test_final_export_keeps_benign_text_markup_and_safe_interface_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = trust_self_check.build_trust_self_check(

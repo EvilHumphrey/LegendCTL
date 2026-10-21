@@ -2007,6 +2007,7 @@ class ShareableArtifactSanitizerTests(unittest.TestCase):
         for raw in (
             r"HID\VID_413D&PID_2104&MI_02",
             r"USB\VID_413D&PID_2104&MI_02",
+            "HID/VID_413D&PID_2104&MI_02",
             "VID_413D&PID_2104&MI_02",
             "VID_413D&PID_2104&REV_0001&MI_02&IG_00",
         ):
@@ -2023,7 +2024,7 @@ class ShareableArtifactSanitizerTests(unittest.TestCase):
         )
 
     def test_mi_qualified_instance_tails_still_redact_all_legal_punctuation(self) -> None:
-        for separator in ("\\", "#"):
+        for separator in ("\\", "#", "/"):
             for tail in ("SYNTHETIC!UNIT|TAIL`END", "SYNTHETIC@UNIT(END)[FINAL]"):
                 raw = r"HID\VID_413D&PID_2104&MI_02" + separator + tail
                 for clean in (redact_inline_instance_ids, sanitize_shareable_text):
@@ -2036,6 +2037,17 @@ class ShareableArtifactSanitizerTests(unittest.TestCase):
             for clean in (redact_inline_instance_ids, sanitize_shareable_text):
                 with self.subTest(prefix=prefix, clean=clean.__name__):
                     self.assertEqual(clean(raw), raw)
+
+    def test_normalized_slash_instance_path_is_redacted(self) -> None:
+        for prefix in ("", "HID/", "USB/", "scan/HID/"):
+            for qualifiers in ("", "&MI_02", "&REV_0001&MI_02&IG_00"):
+                raw = prefix + "VID_413D&PID_2104" + qualifiers + "/SYNTHETIC-PRIVATE.py"
+                for clean in (redact_inline_instance_ids, sanitize_shareable_text):
+                    with self.subTest(raw=raw, clean=clean.__name__):
+                        self.assertEqual(clean(raw), prefix + "VID_413D&PID_2104")
+        benign = "models/AVID_413D&PID_2104/REV-A.py"
+        self.assertEqual(redact_inline_instance_ids(benign), benign)
+        self.assertEqual(sanitize_shareable_text(benign), benign)
 
     def test_token_boundary_keeps_delimited_and_escaped_ids_redacted(self) -> None:
         identifier = "VID_413D&PID_2104&REV_0001&MI_02#SYNTHETIC!UNIT|TAIL`END"

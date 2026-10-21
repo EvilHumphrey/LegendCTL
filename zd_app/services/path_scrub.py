@@ -927,7 +927,8 @@ _INSTANCE_ID_INLINE_RE = re.compile(
     # Interface qualifiers include MI, IG, Col and REV, and can be combined.
     # Recognize qualifier chains only with a following instance separator/tail;
     # do not maintain an incomplete allowlist of hardware qualifier spellings.
-    # Requiring ``\\`` or ``#`` before the per-unit segment keeps ordinary
+    # Requiring ``\\``, ``#`` or a normalized ``/`` before the per-unit segment
+    # (Path.as_posix() emits the latter for retained scan filenames) keeps ordinary
     # ``VID_xxxx&PID_xxxx&status=failed`` text intact. Once an instance segment
     # begins, consume the full legal Windows ID character range: 0x21..0x7f
     # excluding comma (IRP_MN_QUERY_ID). Pipe, backtick and other punctuation
@@ -937,7 +938,7 @@ _INSTANCE_ID_INLINE_RE = re.compile(
     # https://learn.microsoft.com/windows-hardware/drivers/kernel/irp-mn-query-id
     # A standalone interface hardware ID (for example &MI_02 with no instance
     # separator) is model-level evidence and must retain its qualifier.
-    r"(?:(?:&[0-9A-Za-z_]+)*[\\#][\x21-\x2b\x2d-\x7f]+)?",
+    r"(?:(?:&[0-9A-Za-z_]+)*[\\/#][\x21-\x2b\x2d-\x7f]+)?",
     re.IGNORECASE,
 )
 
