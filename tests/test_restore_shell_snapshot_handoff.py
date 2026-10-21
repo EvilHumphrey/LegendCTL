@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from tests.r2_shell_test_helpers import empty_snapshot, make_shell
-from tests.test_restore_points_screen import _rp
+from tests.test_restore_points_screen import _acknowledge_identity, _rp
 from zd_app.i18n import set_locale, t
 from zd_app.services._log_entry import LogEntry, render_log_message
 from zd_app.services.device_service import DeviceService
@@ -23,6 +23,11 @@ from zd_app.storage.restore_point_models import PreparedRestore, RestoreResult, 
 from zd_app.ui import app_shell as app_shell_module
 from zd_app.ui.app_shell import AppShell, threaded_hid_executor
 from zd_app.ui.screens import restore_points
+
+
+class _HandoffRestoreService(SimpleNamespace):
+    def prepared_session_matches_cached(self, prepared):
+        return prepared.session_admission is self.session
 
 
 class RestoreShellSnapshotHandoffTests(unittest.TestCase):
@@ -52,12 +57,17 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
                 fields={name: source.coverage.fields[name] for name in ("polling_rate", "step_size")},
             ),
         )
+        session = object()
         self.prepared = PreparedRestore.from_restore_point(
             source, preview=_build_restore_preview(source, self.old, {}),
+            session_admission=session,
         )
-        service = SimpleNamespace(restore=MagicMock(return_value=self.restore_result(readback)))
+        service = _HandoffRestoreService(
+            restore=MagicMock(return_value=self.restore_result(readback)), session=session,
+        )
 
-        def restore(prepared, *, acknowledge_write_only_paddles, presence_guard):
+        def restore(prepared, *, acknowledge_identity_unknown, acknowledge_write_only_paddles, presence_guard):
+            self.assertIs(acknowledge_identity_unknown, True)
             self.assert_prepared_call(prepared, acknowledge_write_only_paddles, presence_guard)
             return service.restore.return_value
 
@@ -85,6 +95,7 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
             presence_key=shell._controller_presence_key(),
             presence_generation=shell._controller_presence_generation,
         )
+        _acknowledge_identity(shell)
         return shell, service
 
     def restore_result(self, readback, **changes):
@@ -191,7 +202,8 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
     def test_exception_after_possible_write_does_not_restore_old_cache(self) -> None:
         shell, service = self.make_shell(self.new)
 
-        def fail_after_write(prepared, *, acknowledge_write_only_paddles, presence_guard):
+        def fail_after_write(prepared, *, acknowledge_identity_unknown, acknowledge_write_only_paddles, presence_guard):
+            self.assertIs(acknowledge_identity_unknown, True)
             self.assert_prepared_call(prepared, acknowledge_write_only_paddles, presence_guard)
             self.assertIsNone(shell.last_controller_snapshot)
             raise RuntimeError("fixture failure after partial write")
@@ -247,7 +259,8 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
             observed_threads.append(("publish", threading.get_ident()))
             publish(*args)
 
-        def restore(prepared, *, acknowledge_write_only_paddles, presence_guard):
+        def restore(prepared, *, acknowledge_identity_unknown, acknowledge_write_only_paddles, presence_guard):
+            self.assertIs(acknowledge_identity_unknown, True)
             self.assert_prepared_call(prepared, acknowledge_write_only_paddles, presence_guard)
             observed_threads.append(("restore", threading.get_ident()))
             self.assertIsNone(shell.last_controller_snapshot)
@@ -285,7 +298,34 @@ class RestoreShellSnapshotHandoffTests(unittest.TestCase):
         self.assertIsNone(shell.last_controller_snapshot)
         self.assertIsNone(shell.last_snapshot_identity)
         self.assertIsNone(shell.restore_points_screen_state.result)
-        self.assertEqual(shell.restore_points_screen_state.view, restore_points.VIEW_CONFIRM)
+        self.assertEqual(shell.restore_points_screen_state.view, restore_points.VIEW_DETAIL)
+
+    def test_same_path_service_restart_before_completion_discards_readback_and_footer(self):
+        shell, service, values = self.footer_shell()
+        pending = []
+        shell._hid_executor = lambda job, done: pending.append((job, done))
+        shell_presence = shell._controller_presence_key()
+        shell_generation = shell._controller_presence_generation
+        restore_points._execute_restore(shell)
+        job, done = pending.pop()
+        result = job()
+        service.restore.assert_called_once()
+        # A session can expire without a visible unplug/replug or shell tick.
+        # Its cached token matcher must protect the already queued completion.
+        service.session = object()
+        self.assertEqual(shell._controller_presence_key(), shell_presence)
+        self.assertEqual(shell._controller_presence_generation, shell_generation)
+        done(result)
+        shell._drain_hid_job_completions()
+
+        state = shell.restore_points_screen_state
+        self.assertIsNone(shell.last_controller_snapshot)
+        self.assertIsNone(shell.last_snapshot_identity)
+        self.assertIsNone(state.result)
+        self.assertIsNone(state.prepared_restore)
+        self.assertFalse(state.identity_unknown_acknowledged)
+        self.assertEqual(state.view, restore_points.VIEW_DETAIL)
+        self.assertIn(t("apply.device_changed_after_write"), values["footer_status_text"])
 
     def test_same_controller_write_only_paddles_survive_cache_retirement(self) -> None:
         shell, service = self.make_shell(self.new)

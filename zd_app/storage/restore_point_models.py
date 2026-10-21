@@ -317,6 +317,8 @@ class PreparedRestore:
     preview: RestorePreview
     excluded_fields: tuple[str, ...]
     write_only_paddle_slots: tuple[str, ...]
+    # Ephemeral endpoint-session proof; never serialized or shown as unit identity.
+    session_admission: object | None = field(default=None, repr=False, compare=False)
 
     @classmethod
     def from_restore_point(
@@ -326,6 +328,7 @@ class PreparedRestore:
         preview: RestorePreview,
         excluded_fields: tuple[str, ...] = (),
         write_only_paddle_slots: tuple[str, ...] = (),
+        session_admission: object | None = None,
     ) -> "PreparedRestore":
         payload_json = json.dumps(
             restore_point_to_dict(restore_point),
@@ -341,6 +344,7 @@ class PreparedRestore:
             preview=preview,
             excluded_fields=tuple(sorted(set(excluded_fields))),
             write_only_paddle_slots=tuple(write_only_paddle_slots),
+            session_admission=session_admission,
         )
 
     def materialize(self) -> RestorePoint:

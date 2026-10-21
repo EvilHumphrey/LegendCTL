@@ -440,6 +440,7 @@ class RestorePointService:
         self,
         prepared: PreparedRestore,
         *,
+        acknowledge_identity_unknown: bool = False,
         acknowledge_write_only_paddles: bool = False,
         presence_guard: Callable[[], bool] | None = None,
     ) -> RestoreResult:
@@ -460,6 +461,11 @@ class RestorePointService:
         preview.  The service deliberately does not accept a restore-point id:
         reloading an id here would reopen a confirmation-to-write race.
 
+        Every supported restore format lacks trustworthy per-unit identity.
+        ``acknowledge_identity_unknown`` must be literal ``True`` before any
+        capture, device read, or write. It acknowledges intent to apply to the
+        connected compatible controller; it does not establish unit identity.
+
         A prepared restore containing write-only back-paddle bindings also
         requires the confirmation UI's dedicated acknowledgement to be the
         literal boolean ``True``.  Enforcing that at this final service
@@ -471,6 +477,35 @@ class RestorePointService:
 
         if not isinstance(prepared, PreparedRestore):
             raise TypeError("restore() requires a PreparedRestore")
+        if acknowledge_identity_unknown is not True:
+            raise PermissionError("unknown controller identity requires explicit acknowledgement")
+        _require_restore_presence(presence_guard, writes_may_have_occurred=False)
+        if not self.prepared_session_is_current(prepared):
+            raise ControllerPresenceChangedError(writes_may_have_occurred=False)
+
+        def session_guard() -> bool:
+            return (
+                _presence_guard_allows(presence_guard)
+                and self.prepared_session_is_current(prepared)
+            )
+
+        return self._run_in_prepared_session(
+            prepared,
+            lambda: self._restore_in_session(
+                prepared,
+                acknowledge_write_only_paddles=acknowledge_write_only_paddles,
+                presence_guard=session_guard,
+            ),
+        )
+
+    def _restore_in_session(
+        self,
+        prepared: PreparedRestore,
+        *,
+        acknowledge_write_only_paddles: bool,
+        presence_guard: Callable[[], bool],
+    ) -> RestoreResult:
+        _require_restore_presence(presence_guard, writes_may_have_occurred=False)
         target_rp = prepared.materialize()
         excluded = set(prepared.excluded_fields)
         filtered, attempted_fields = _filter_snapshot_for_restore(
@@ -655,6 +690,36 @@ class RestorePointService:
             )
         return result
 
+    def prepared_session_is_current(self, prepared: PreparedRestore) -> bool:
+        """Check endpoint-session continuity, never historical physical identity."""
+
+        current = getattr(type(self._settings_service), "session_admission_is_current", None)
+        if not callable(current):
+            return True  # Non-device test services expose no admission capability.
+        return (
+            prepared.session_admission is not None
+            and current(self._settings_service, prepared.session_admission)
+        )
+
+    def prepared_session_matches_cached(self, prepared: PreparedRestore) -> bool:
+        """Cheap display invalidation only; restore authorizes with a fresh check."""
+
+        current = getattr(type(self._settings_service), "session_admission_matches_cached", None)
+        if callable(current):
+            return prepared.session_admission is not None and current(
+                self._settings_service, prepared.session_admission
+            )
+        return not callable(getattr(type(self._settings_service), "session_admission_is_current", None))
+
+    def _run_in_prepared_session(self, prepared: PreparedRestore, callback):
+        runner = getattr(type(self._settings_service), "run_session_operation", None)
+        current = getattr(type(self._settings_service), "session_admission_is_current", None)
+        if not callable(current):
+            return callback()
+        if not callable(runner) or not self.prepared_session_is_current(prepared):
+            raise ControllerPresenceChangedError(writes_may_have_occurred=False)
+        return runner(self._settings_service, prepared.session_admission, callback)
+
     # -- pre-restore preview -------------------------------------------------
 
     def prepare_restore(
@@ -669,6 +734,23 @@ class RestorePointService:
         change the canonical payload held by the returned object.
         """
 
+        admission = None
+        admit = getattr(type(self._settings_service), "admit_read_batch", None)
+        current = getattr(type(self._settings_service), "session_admission_is_current", None)
+        runner = getattr(type(self._settings_service), "run_session_operation", None)
+        if callable(current):
+            if not callable(admit) or not callable(runner):
+                raise ControllerPresenceChangedError(writes_may_have_occurred=False)
+            admission = admit(self._settings_service)
+            if admission is None or not current(self._settings_service, admission):
+                raise ControllerPresenceChangedError(writes_may_have_occurred=False)
+
+        def prepare():
+            return self._prepare_restore_in_session(rp_id, excluded_fields, admission)
+
+        return runner(self._settings_service, admission, prepare) if callable(current) else prepare()
+
+    def _prepare_restore_in_session(self, rp_id, excluded_fields, admission) -> PreparedRestore:
         excluded = set(excluded_fields or ())
         target_rp = self._store.load(rp_id)
         current_snapshot, _read_success, read_errors = self._do_fresh_read()
@@ -688,12 +770,16 @@ class RestorePointService:
             for slot in MacroSlot
             if slot in (filtered.back_paddle_bindings or {})
         )
-        return PreparedRestore.from_restore_point(
+        prepared = PreparedRestore.from_restore_point(
             target_rp,
             preview=preview,
             excluded_fields=tuple(excluded),
             write_only_paddle_slots=paddle_slots,
+            session_admission=admission,
         )
+        if not self.prepared_session_is_current(prepared):
+            raise ControllerPresenceChangedError(writes_may_have_occurred=False)
+        return prepared
 
     def compute_restore_preview(self, rp_id: str) -> RestorePreview:
         """Compute a pre-restore preview comparing the captured RP snapshot

@@ -28,7 +28,7 @@ import dearpygui.dearpygui as dpg
 
 from tests.r2_shell_test_helpers import empty_snapshot, make_shell
 from tests.test_live_verify import _FakeXInputService, _live_snap
-from tests.test_restore_points_screen import _rp as _restore_point_fixture
+from tests.test_restore_points_screen import _acknowledge_identity, _rp as _restore_point_fixture
 from zd_app import i18n
 from zd_app.models import DeviceState
 from zd_app.services.device_service import (
@@ -359,6 +359,7 @@ class RestoreExecutionGateTests(unittest.TestCase):
             selected_rp_id=prepared.restore_point_id,
             prepared_restore=prepared,
         )
+        _acknowledge_identity(shell)
         return shell, rp_service, prepared
 
     def test_restore_refused_on_generic_xinput(self) -> None:
@@ -379,6 +380,7 @@ class RestoreExecutionGateTests(unittest.TestCase):
             rp_screen._execute_restore(shell)
         rp_service.restore.assert_called_once_with(
             prepared,
+            acknowledge_identity_unknown=True,
             acknowledge_write_only_paddles=False,
             presence_guard=unittest.mock.ANY,
         )

@@ -157,7 +157,7 @@ def build(shell) -> None:
             label=t("footer.read"),
             tag="right_rail_read",
             width=-1,
-            callback=lambda: shell.refresh_from_controller(),
+            callback=lambda: shell.read_current_connection(),
         )
         dpg.add_button(
             label=t("nav.health_report"),

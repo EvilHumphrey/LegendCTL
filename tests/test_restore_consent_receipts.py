@@ -41,7 +41,7 @@ class ConsentRaceTests(unittest.TestCase):
             b = replace(a, snapshot=replace(a.snapshot, polling_rate=PollingRate.HZ_8000))
             store.save(b)
             with patch.object(service._apply_coordinator, "apply_snapshot", wraps=service._apply_coordinator.apply_snapshot) as apply:
-                result = service.restore(prepared)
+                result = service.restore(prepared, acknowledge_identity_unknown=True)
             self.assertEqual(apply.call_args.args[0].polling_rate, a.snapshot.polling_rate)
             self.assertEqual(store.load(a.id).snapshot.polling_rate, b.snapshot.polling_rate)
             self.assertIsNone(store.load(a.id).last_restore_attempt)
@@ -66,7 +66,7 @@ class ConsentRaceTests(unittest.TestCase):
                         save(b)
                     return save(source)
                 store.save = racing_save
-            service.restore(prepared)
+            service.restore(prepared, acknowledge_identity_unknown=True)
             loaded = store.load(a.id)
             self.assertEqual(loaded.title, "Replacement")
             self.assertIsNone(loaded.last_restore_attempt)
@@ -84,7 +84,7 @@ class ConsentRaceTests(unittest.TestCase):
                 with patch.object(service, "capture", wraps=service.capture) as capture:
                     refused = False
                     try:
-                        service.restore(prepared, **kwargs)
+                        service.restore(prepared, acknowledge_identity_unknown=True, **kwargs)
                     except PermissionError:
                         refused = True
                     self.assertTrue(refused, "restore accepted an undisclosed write-only operation")
@@ -100,7 +100,7 @@ class ConsentRaceTests(unittest.TestCase):
             payload["coverage"]["fields"]["motion_settings"]["writable"] = True
             payload["coverage"]["fields"]["polling_rate"]["writable"] = False
             path.write_text(json.dumps(payload), "utf-8")
-            result = service.restore(_prepare(service, a.id))
+            result = service.restore(_prepare(service, a.id), acknowledge_identity_unknown=True)
             names = {f.field_name for f in result.fields}
             self.assertNotIn("motion_settings", names)
             self.assertIn("polling_rate", names)
@@ -193,7 +193,7 @@ class AttemptSidecarTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             service, _, store = _make_service(tmpdir=tmp, settings_stub=_full_populated_stub())
             rp = service.capture(_basic_trigger(), device_identity=_identity())
-            result = service.restore(service.prepare_restore(rp.id))
+            result = service.restore(service.prepare_restore(rp.id), acknowledge_identity_unknown=True)
             self.assertEqual(store.load(rp.id).last_restore_attempt.label, result.label)
             sidecar = store._attempt_path(rp.id)
             for contents in ("{", "[]", " " * (1024 * 1024 + 1), '{"source_sha256": "wrong"}'):
@@ -216,7 +216,7 @@ class AttemptSidecarTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             service, _, store = _make_service(tmpdir=tmp, settings_stub=_full_populated_stub())
             rp = service.capture(_basic_trigger(), device_identity=_identity())
-            service.restore(service.prepare_restore(rp.id))
+            service.restore(service.prepare_restore(rp.id), acknowledge_identity_unknown=True)
             unrelated = Path(tmp) / "unrelated.attempt"
             unrelated.write_text("preserve", "utf-8")
             sidecar = store._attempt_path(rp.id)
@@ -240,7 +240,7 @@ class PreparedPayloadTests(unittest.TestCase):
             self.assertEqual(prepared.write_only_paddle_slots, ())
             self.assertNotIn("polling_rate", {f.field_name for f in prepared.preview.fields})
             stub.write_calls.clear()
-            service.restore(prepared)
+            service.restore(prepared, acknowledge_identity_unknown=True)
             self.assertNotIn("polling", stub.write_calls)
             self.assertNotIn("back_paddle_M1", stub.write_calls)
 
@@ -253,7 +253,7 @@ class PreparedPayloadTests(unittest.TestCase):
             prepared = replace(service.prepare_restore(rp.id), write_only_paddle_slots=())
             with patch.object(service, "capture") as capture:
                 with self.assertRaisesRegex(ValueError, "disclosure"):
-                    service.restore(prepared, acknowledge_write_only_paddles=True)
+                    service.restore(prepared, acknowledge_identity_unknown=True, acknowledge_write_only_paddles=True)
                 capture.assert_not_called()
 
     def test_admission_runner_refusal_has_no_writer_receipts(self):

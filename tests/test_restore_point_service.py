@@ -497,6 +497,7 @@ def _prepare_and_restore(
     prepared = service.prepare_restore(rp_id, excluded_fields=excluded_fields)
     return service.restore(
         prepared,
+        acknowledge_identity_unknown=True,
         acknowledge_write_only_paddles=bool(prepared.write_only_paddle_slots),
         presence_guard=presence_guard,
     )
@@ -965,7 +966,202 @@ class CoverageMapInferenceTests(unittest.TestCase):
             self.assertGreater(rp.coverage.captured_supported_count, 0)
 
 
+class _SessionSettingsStub(_StubSettingsService):
+    """Concrete admission seam: no device access, one opaque endpoint epoch."""
+
+    def __init__(self):
+        self.__dict__.update(_full_populated_stub().__dict__)
+        self.session = object()
+        self.bound_session = None
+
+    def admit_read_batch(self):
+        return self.bound_session if self.bound_session is not None else self.session
+
+    admit_write_operation = admit_read_batch
+
+    def session_admission_is_current(self, token):
+        return token is self.session
+
+    session_admission_matches_cached = session_admission_is_current
+
+    def run_session_operation(self, token, callback):
+        previous = self.bound_session
+        self.bound_session = previous if previous is not None else token
+        try:
+            return callback()
+        finally:
+            self.bound_session = previous
+
+    run_write_operation = run_session_operation
+
+
+class RestoreSessionPinningTests(unittest.TestCase):
+    def _prepare(self, tmp):
+        stub = _SessionSettingsStub()
+        service, _, store = _make_service(tmpdir=tmp, settings_stub=stub)
+        captured = service.capture(_basic_trigger(), device_identity=_identity())
+        return service, stub, store, captured
+
+    def test_preview_is_bound_before_reads_and_token_is_not_persisted_or_represented(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, stub, _, captured = self._prepare(tmp)
+            read = service._do_fresh_read
+
+            def pinned_read():
+                self.assertIs(stub.bound_session, stub.session)
+                return read()
+
+            with patch.object(service, "_do_fresh_read", side_effect=pinned_read):
+                prepared = service.prepare_restore(captured.id)
+            self.assertIs(prepared.session_admission, stub.session)
+            self.assertNotIn("session_admission", prepared.payload_json)
+            self.assertNotIn(repr(stub.session), repr(prepared))
+            self.assertIsNone(stub.bound_session)
+
+    def test_rollover_during_preview_refuses_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, stub, _, captured = self._prepare(tmp)
+            read = service._do_fresh_read
+
+            def rollover():
+                result = read()
+                stub.session = object()
+                return result
+
+            with patch.object(service, "_do_fresh_read", side_effect=rollover):
+                with self.assertRaises(ControllerPresenceChangedError):
+                    service.prepare_restore(captured.id)
+
+    def test_missing_admission_refuses_before_preview_reads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, stub, _, captured = self._prepare(tmp)
+            stub.session = None
+            with patch.object(service, "_do_fresh_read") as read:
+                with self.assertRaises(ControllerPresenceChangedError):
+                    service.prepare_restore(captured.id)
+                read.assert_not_called()
+
+    def test_stale_unpinned_and_foreign_prepared_refuse_before_device_effects(self):
+        for mutation in ("rollover", "missing", "foreign"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+                service, stub, _, captured = self._prepare(tmp)
+                prepared = service.prepare_restore(captured.id)
+                if mutation == "rollover":
+                    stub.session = object()
+                elif mutation == "missing":
+                    prepared = replace(prepared, session_admission=None)
+                else:
+                    service._settings_service = _SessionSettingsStub()
+                with (
+                    patch.object(service, "capture") as capture,
+                    patch.object(service, "_do_fresh_read") as read,
+                    patch.object(service._apply_coordinator, "apply_snapshot") as apply,
+                ):
+                    with self.assertRaises(ControllerPresenceChangedError) as error:
+                        service.restore(prepared, acknowledge_identity_unknown=True)
+                    self.assertFalse(error.exception.writes_may_have_occurred)
+                    capture.assert_not_called()
+                    read.assert_not_called()
+                    apply.assert_not_called()
+
+    def test_original_token_spans_capture_coordinator_and_readback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, stub, _, captured = self._prepare(tmp)
+            prepared = service.prepare_restore(captured.id)
+            read = service._do_fresh_read
+            apply = service._apply_coordinator.apply_snapshot
+            reads = []
+
+            def pinned_read():
+                self.assertIs(stub.bound_session, prepared.session_admission)
+                reads.append(True)
+                return read()
+
+            def pinned_apply(snapshot):
+                self.assertIs(stub.bound_session, prepared.session_admission)
+                return apply(snapshot)
+
+            with (
+                patch.object(service, "_do_fresh_read", side_effect=pinned_read),
+                patch.object(service._apply_coordinator, "apply_snapshot", side_effect=pinned_apply),
+            ):
+                result = service.restore(prepared, acknowledge_identity_unknown=True)
+            self.assertGreater(result.attempted, 0)
+            self.assertEqual(len(reads), 2)
+            self.assertIsNone(stub.bound_session)
+
+    def test_rollover_during_safety_capture_cannot_persist_or_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, stub, store, captured = self._prepare(tmp)
+            prepared = service.prepare_restore(captured.id)
+            before_ids = {rp.id for rp in store.list()[0]}
+            read = service._do_fresh_read
+
+            def rollover():
+                result = read()
+                stub.session = object()
+                return result
+
+            with (
+                patch.object(service, "_do_fresh_read", side_effect=rollover),
+                patch.object(service._apply_coordinator, "apply_snapshot") as apply,
+            ):
+                with self.assertRaises(ControllerPresenceChangedError) as error:
+                    service.restore(prepared, acknowledge_identity_unknown=True)
+                self.assertFalse(error.exception.writes_may_have_occurred)
+                apply.assert_not_called()
+            self.assertEqual({rp.id for rp in store.list()[0]}, before_ids)
+
+    def test_rollover_after_apply_refuses_readback_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            service, stub, store, captured = self._prepare(tmp)
+            prepared = service.prepare_restore(captured.id)
+            apply = service._apply_coordinator.apply_snapshot
+
+            def rollover(snapshot):
+                result = apply(snapshot)
+                stub.session = object()
+                return result
+
+            with patch.object(service._apply_coordinator, "apply_snapshot", side_effect=rollover):
+                with self.assertRaises(ControllerPresenceChangedError) as error:
+                    service.restore(prepared, acknowledge_identity_unknown=True)
+                self.assertTrue(error.exception.writes_may_have_occurred)
+            self.assertIsNone(store.load(captured.id).last_restore_attempt)
+
+
 class RestoreFlowTests(unittest.TestCase):
+    def test_unknown_identity_requires_literal_true_before_any_device_effect(self) -> None:
+        for schema_version in (1, 2):
+            with self.subTest(schema=schema_version), tempfile.TemporaryDirectory() as tmp:
+                service, stub, store = _make_service(tmpdir=tmp, settings_stub=_full_populated_stub())
+                captured = service.capture(_basic_trigger(), device_identity=_identity())
+                store.save(replace(captured, schema_version=schema_version))
+                prepared = service.prepare_restore(captured.id)
+                stub.write_calls.clear()
+                before_ids = {rp.id for rp in store.list()[0]}
+                with (
+                    patch.object(service, "capture") as capture,
+                    patch.object(service, "_do_fresh_read") as read,
+                    patch.object(service._apply_coordinator, "apply_snapshot") as apply,
+                ):
+                    for invalid in (False, None, "true", "false", 1, 0, [], object()):
+                        with self.subTest(ack=repr(invalid)), self.assertRaisesRegex(
+                            PermissionError, "unknown controller identity"
+                        ):
+                            service.restore(
+                                prepared,
+                                acknowledge_identity_unknown=invalid,
+                                acknowledge_write_only_paddles=True,
+                            )
+                    with self.assertRaises(PermissionError):
+                        service.restore(prepared, acknowledge_write_only_paddles=True)
+                    capture.assert_not_called()
+                    read.assert_not_called()
+                    apply.assert_not_called()
+                self.assertEqual(stub.write_calls, [])
+                self.assertEqual({rp.id for rp in store.list()[0]}, before_ids)
+
     def test_restore_rejects_unprepared_id_before_any_write(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             stub = _full_populated_stub()
@@ -997,7 +1193,7 @@ class RestoreFlowTests(unittest.TestCase):
             store.save(mutated)
             stub.write_calls.clear()
 
-            result = service.restore(prepared)
+            result = service.restore(prepared, acknowledge_identity_unknown=True)
 
             # The stub's readback remains at the originally prepared 1000 Hz.
             # Applying the substituted 8000-Hz file would produce a mismatch.
@@ -1036,6 +1232,7 @@ class RestoreFlowTests(unittest.TestCase):
                         ):
                             service.restore(
                                 prepared,
+                                acknowledge_identity_unknown=True,
                                 acknowledge_write_only_paddles=(
                                     invalid_acknowledgement  # type: ignore[arg-type]
                                 ),
@@ -1050,6 +1247,7 @@ class RestoreFlowTests(unittest.TestCase):
 
             result = service.restore(
                 prepared,
+                acknowledge_identity_unknown=True,
                 acknowledge_write_only_paddles=True,
             )
             self.assertIn("back_paddle_M1", stub.write_calls)
@@ -1103,11 +1301,10 @@ class RestoreFlowTests(unittest.TestCase):
             service, _stub, store = _make_service(tmpdir=tmp, settings_stub=stub)
             captured = service.capture(_basic_trigger(), device_identity=_identity())
             assert captured is not None
-            calls = {"n": 0}
-
             def guard() -> bool:
-                calls["n"] += 1
-                return calls["n"] < 5
+                # Refuse after observable setter dispatch, independent of the
+                # number of harmless pre-write presence checks.
+                return not stub.write_calls
 
             with self.assertRaises(ControllerPresenceChangedError) as raised:
                 _prepare_and_restore(service, captured.id, presence_guard=guard)

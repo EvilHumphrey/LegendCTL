@@ -1869,7 +1869,7 @@ class AppShell:
                         tag="footer_delete_tooltip_text",
                     )
                 dpg.add_spacer(width=SPACE_LG)
-                dpg.add_button(tag="footer_read_button", label=t("footer.read"), width=FOOTER_BUTTON_WIDTH, callback=lambda: self.refresh_from_controller())
+                dpg.add_button(tag="footer_read_button", label=t("footer.read"), width=FOOTER_BUTTON_WIDTH, callback=lambda: self.read_current_connection())
                 dpg.add_spacer(width=SPACE_LG)
                 dpg.add_button(
                     tag="footer_apply_readback_details_button",
@@ -3032,6 +3032,27 @@ class AppShell:
             self._update_apply_status(
                 t("apply.busy_long", seconds=seconds), False
             )
+
+    def read_current_connection(self) -> None:
+        """Explicit Read may admit a new session after continuity was lost.
+
+        Automatic refreshes must never clear the latch: that would let an old
+        operation resume against a replacement. Invalidate its UI ownership
+        before allowing this separate user action to perform a fresh read.
+        """
+        if not self._hid_available_or_refuse():
+            return
+        if (
+            self.settings_service is not None
+            and getattr(self.settings_service, "connection_requires_readmission", False) is True
+        ):
+            self._controller_presence_generation += 1
+            self._invalidate_cached_controller_settings()
+            self.settings_service.stop()
+            self._needs_service_restart = False
+            self._needs_hydration = False
+            self._request_presence_rebuild()
+        self.refresh_from_controller()
 
     def refresh_from_controller(
         self,
@@ -4435,6 +4456,12 @@ class AppShell:
     def _invalidate_cached_controller_settings(self, *, status: str = "") -> None:
         """Drop settings/cache state that cannot cross a controller boundary."""
 
+        rp_state = self.restore_points_screen_state
+        if rp_state is not None and rp_state.view == restore_points.VIEW_CONFIRM:
+            restore_points._invalidate_prepared_restore(rp_state)
+            rp_state.view = restore_points.VIEW_DETAIL
+            rp_state.status_text = t("restore_points.confirm.connection_expired")
+            rp_state.status_kind = "warn"
         with self._last_back_paddle_bindings_lock:
             self._last_back_paddle_bindings.clear()
             self.last_controller_snapshot = None
@@ -6660,6 +6687,10 @@ class AppShell:
         # this same tick discovers A disconnected or was replaced by B.
         self._flush_slider_throttle()
         self._tick_settings_service_tasks(now)
+        # This is a cached-token check only: never enumerate devices on every
+        # render frame. Actual endpoint presence is checked at worker I/O.
+        if restore_points.invalidate_if_session_changed(self):
+            self._request_presence_rebuild()
 
         if self._stick_preview_deadline and now >= self._stick_preview_deadline:
             self._stick_preview_deadline = 0.0
