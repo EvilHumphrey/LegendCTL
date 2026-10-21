@@ -178,7 +178,7 @@ class CustomHomePathTests(unittest.TestCase):
                                                               PureWindowsPath(self.HOME)]), \
              patch.object(path_scrub.Path, "resolve", side_effect=AssertionError("must not resolve")), \
              patch.object(path_scrub.Path, "stat", side_effect=AssertionError("must not stat")):
-            self.assertEqual(path_scrub.scrub_paths(r"C:\Users\Synthetic User"), "<HOME>")
+            self.assertEqual(path_scrub.scrub_paths(r"C:\Users\ExampleUser"), "<HOME>")
             self.assertEqual(path_scrub.scrub_paths(self.HOME), "<HOME>")
         with patch.object(path_scrub.Path, "home", side_effect=AssertionError("injection bypasses provider")):
             self.assertEqual(self.scrub(self.HOME), "<HOME>")
