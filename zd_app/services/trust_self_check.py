@@ -18,7 +18,7 @@ from zd_app import version as app_version
 from zd_app.i18n import t
 from zd_app.services.markdown_safety import escape_markdown
 from zd_app.services.model_fingerprint import ModelFingerprint, fingerprint_display_rows
-from zd_app.services.path_scrub import scrub_paths
+from zd_app.services.path_scrub import sanitize_shareable_text, scrub_paths
 from zd_app.storage._import_guards import read_guarded_json
 from zd_app.storage.settings_store import _default_user_data_dir
 
@@ -1065,7 +1065,7 @@ def _collapse_deep_placeholder_path(path: str) -> str:
 
 
 def _clean_observed_value(value: object) -> str:
-    return scrub_paths("" if value is None else str(value))
+    return sanitize_shareable_text(value)
 
 
 def _format_import_findings(findings: tuple[StaticImportFinding, ...]) -> str:

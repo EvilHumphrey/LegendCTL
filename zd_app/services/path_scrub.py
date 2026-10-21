@@ -921,7 +921,9 @@ def scrub_value(value: object, *, home_prefixes: tuple[str, ...] | None = None) 
 
 
 _INSTANCE_ID_INLINE_RE = re.compile(
-    r"(?:[A-Za-z0-9_]+\\)?VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4}"
+    # The model head must begin a token, not an embedded product/name fragment
+    # such as AVID_413D&PID_2104#REV-A. Delimiters and escaped paths still match.
+    r"(?<![A-Za-z0-9_])(?:[A-Za-z0-9_]+\\)?VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4}"
     # Interface qualifiers include MI, IG, Col and REV, and can be combined.
     # Recognize qualifier chains only with a following instance separator/tail;
     # do not maintain an incomplete allowlist of hardware qualifier spellings.
@@ -1042,15 +1044,18 @@ def _truncate_instance_id(match: "re.Match[str]") -> str:
 
 
 class PathScrubbingFormatter(logging.Formatter):
-    """A :class:`logging.Formatter` that scrubs paths from each emitted line.
+    """A :class:`logging.Formatter` that sanitizes each shareable log line.
 
     Attach it to the rotating app-log handler so the log file — which
     ``SUPPORT.md`` asks users to attach to bug reports — never records the
-    operator's home path / account username. One handler-level chokepoint
+    operator's home path / account username or per-unit device identifiers.
+    One handler-level chokepoint
     covers every log source: startup paths, service ``base_dir=%r`` lines, and
     ``logger.exception()`` output, since the scrubber runs over the *fully
     formatted* record (message + args + any appended traceback / stack frames).
     """
 
     def format(self, record: logging.LogRecord) -> str:
-        return scrub_paths(super().format(record))
+        # Keep the original identifier anchor until the composed sanitizer sees
+        # it: path-only reduction can discard VID/PID and leave a unit tail.
+        return sanitize_shareable_text(super().format(record))

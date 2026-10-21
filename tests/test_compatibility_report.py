@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -68,6 +69,43 @@ class CompatibilityReportRendererTests(unittest.TestCase):
         self.assertIn(r"Variant\|X", combined)
         self.assertIn(r"v1.24 \`\[demo\]\`", combined)
         self.assertIn("bundle.zip", combined)
+
+    def test_direct_hash_and_punctuation_instance_tails_are_share_safe(self) -> None:
+        for tail in ("SYNTHETIC!UNIT|END`FINAL", "SYNTHETIC@UNIT(END)[FINAL]"):
+            with self.subTest(tail=tail):
+                raw = "VID_413D&PID_2104#" + tail
+                report = build_compatibility_report(
+                    variant=raw, recent_events=[raw], windows_version="synthetic Windows",
+                )
+                self.assertEqual(report.variant, "VID_413D&PID_2104")
+                for shared in (report.to_markdown(), report.to_issue_body()):
+                    self.assertNotIn("SYNTHETIC", shared)
+                    self.assertNotIn("FINAL", shared)
+                    self.assertIn("VID_413D&PID_2104", shared)
+
+    def test_serializers_sanitize_supplied_rows_and_direct_report_fields(self) -> None:
+        raw = r"\\?\HID#VID_413D&PID_2104#SYNTHETIC!UNIT|TAIL`END"
+        report = build_compatibility_report(
+            checklist=(CompatibilityChecklistItem(raw, "not_tried", raw),),
+            windows_version="synthetic Windows",
+        )
+        report = replace(report, product_name=raw, recent_events=(raw,))
+        for shared in (report.to_markdown(), report.to_issue_body()):
+            with self.subTest(shared=shared[:50]):
+                self.assertNotIn("SYNTHETIC", shared)
+                self.assertNotIn("TAIL", shared)
+                self.assertIn("VID_413D&PID_2104", shared)
+
+    def test_cleaning_preserves_default_whitespace_and_markup_contract(self) -> None:
+        report = build_compatibility_report(
+            variant="  ordinary  variant\r\nnext  ", firmware="safe | [demo]",
+            windows_version="synthetic Windows",
+        )
+        self.assertEqual(report.variant, "ordinary  variant next")
+        self.assertTrue(report.firmware.startswith("safe | [demo]"))
+        self.assertIn(r"safe \| \[demo\]", report.to_markdown())
+        empty = build_compatibility_report(variant=None, windows_version="synthetic Windows")
+        self.assertEqual(empty.variant, i18n.t("compat_report.value.unknown"))
 
     def test_required_fields_and_checklist_states_render(self) -> None:
         report = build_compatibility_report(

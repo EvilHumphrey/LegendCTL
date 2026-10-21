@@ -8,10 +8,12 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from zd_app import i18n
 from zd_app.models import DeviceState
 from zd_app.services import trust_self_check
+from zd_app.services import share_card
 from zd_app.services.compatibility_report import (
     CompatibilityChecklistItem,
     build_compatibility_report,
@@ -38,6 +40,39 @@ class ShareCardRendererTests(unittest.TestCase):
         i18n._loaded.clear()
         i18n._reverse_en.clear()
         i18n.set_locale("en")
+
+    def test_instance_punctuation_is_sanitized_before_html_and_markdown_escape(self) -> None:
+        for raw in (
+            r"HID\VID_413D&PID_2104\UNIT|PRIVATE`TAIL]END)",
+            r"HID#VID_413D&PID_2104#UNIT|PRIVATE`TAIL]END)",
+            r"\\?\HID#VID_413D&PID_2104&MI_02#UNIT|PRIVATE`TAIL]END)",
+        ):
+            with self.subTest(raw=raw):
+                for rendered in (share_card._md(raw), share_card._html(raw)):
+                    self.assertIn("VID", rendered)
+                    for tail in ("UNIT", "PRIVATE", "TAIL", "END"):
+                        self.assertNotIn(tail, rendered)
+        self.assertEqual(share_card._clean(None), "")
+        self.assertEqual(share_card._clean("  first\r\nsecond\tvalue  "), "first second\tvalue")
+        self.assertEqual(share_card._html('<tag> & "value"'), "&lt;tag&gt; &amp; &quot;value&quot;")
+
+    def test_readiness_and_module_verdict_keys_merge_after_sanitizing(self) -> None:
+        raw_counts = {
+            r"HID\VID_413D&PID_2104\UNIT|ONE": 2,
+            r"HID\VID_413D&PID_2104\UNIT`TWO": 3,
+        }
+        self.assertEqual(share_card._string_int_mapping(raw_counts), {r"HID\VID_413D&PID_2104": 5})
+        summary = {
+            "readiness_check_verdicts": raw_counts,
+            "module_characterized_verdicts": raw_counts,
+        }
+        with patch.object(share_card, "_wear_summary", return_value=summary):
+            card = build_share_card(now=_NOW)
+        for rendered in (card.to_html(), card.to_markdown()):
+            self.assertNotIn("UNIT", rendered)
+            self.assertNotIn("ONE", rendered)
+            self.assertNotIn("TWO", rendered)
+            self.assertGreaterEqual(rendered.count(": 5"), 2)
 
     def test_html_is_self_contained_without_script_or_remote_refs(self) -> None:
         card = build_share_card(now=_NOW)

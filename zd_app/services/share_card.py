@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import escape as html_escape
@@ -21,9 +20,8 @@ from zd_app.services.diagnostic_bundle import (
     DiagnosticBundlePreviewManifest,
     DiagnosticBundleService,
 )
-from zd_app.services.diagnostics_service import _redact_instance_id
 from zd_app.services.markdown_safety import escape_markdown
-from zd_app.services.path_scrub import scrub_paths
+from zd_app.services.path_scrub import sanitize_shareable_text
 from zd_app.services.trust_self_check import (
     TrustSelfCheckResult,
     build_trust_self_check,
@@ -39,12 +37,6 @@ FORBIDDEN_OVERCLAIM_PHRASES = (
     "vendor-verified",
     "guaranteed",
     "pii-free",
-)
-
-_INSTANCE_ID_INLINE_RE = re.compile(
-    r"(?:[A-Za-z0-9_]+\\)?VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4}"
-    r"(?:[&\\][^\s|`\])]+)*",
-    re.IGNORECASE,
 )
 
 
@@ -648,7 +640,8 @@ def _string_int_mapping(value: object) -> dict[str, int]:
         return {}
     result: dict[str, int] = {}
     for key, count in value.items():
-        result[_clean(key)] = _int(count, 0)
+        safe_key = _clean(key)
+        result[safe_key] = result.get(safe_key, 0) + _int(count, 0)
     return result
 
 
@@ -659,14 +652,8 @@ def _int(value: object, default: int) -> int:
         return default
 
 
-def _redact_inline_instance_ids(text: str) -> str:
-    return _INSTANCE_ID_INLINE_RE.sub(lambda match: _redact_instance_id(match.group(0)), text)
-
-
 def _clean(value: object) -> str:
-    text = "" if value is None else str(value)
-    text = _redact_inline_instance_ids(text)
-    text = scrub_paths(text)
+    text = sanitize_shareable_text("" if value is None else str(value))
     return " ".join(text.replace("\r\n", "\n").replace("\r", "\n").splitlines()).strip()
 
 

@@ -22,6 +22,7 @@ from zd_app.i18n import t
 from zd_app.models import DeviceState, DiagnosticSnapshot, utc_now_iso
 from zd_app.services._log_entry import LogEntry, render_log_entry
 from zd_app.services.path_scrub import sanitize_shareable_json, sanitize_shareable_text
+from zd_app.storage._output_guards import guarded_output_directory, select_output_directory
 from zd_app.storage.settings_store import _default_user_data_dir
 
 
@@ -125,49 +126,38 @@ class DiagnosticsService:
         return payload
 
     def _safe_output_dir(self, output_dir: str) -> Path:
-        """Constrain the bundle output dir to within the user-data root.
+        """Return an admitted display path; use output_directory for actual I/O."""
+        path, _fallback = select_output_directory(output_dir, _default_user_data_dir())
+        return path
 
-        ``diagnostics_bundle_dir`` is settings-controlled; a tampered or
-        traversal value must not let the export write outside the app's own
-        data directory. If the configured path escapes the allowed root, fall
-        back to the default ``<user-data>/diagnostics`` location.
-        """
-        allowed_root = _default_user_data_dir().resolve()
-        resolved = Path(output_dir).resolve()
-        if resolved == allowed_root or allowed_root in resolved.parents:
-            return resolved
-        logger.warning(
-            "diagnostics_bundle_dir %r escaped the user-data root; "
-            "writing the bundle to the default location instead.",
-            output_dir,
-        )
-        return allowed_root / "diagnostics"
+    def output_directory(self, output_dir: str):
+        """Pin the admitted directory for an export or folder-open dispatch."""
+        return guarded_output_directory(output_dir, _default_user_data_dir())
 
     def export_bundle(self, device_state: DeviceState, last_read_ms: float | None, last_write_ms: float | None, output_dir: str) -> Path:
         snapshot = self.build_snapshot(device_state, last_read_ms, last_write_ms)
-        output_path = self._safe_output_dir(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        bundle_path = output_path / f"diagnostic_bundle_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        bundle_path.write_text(
-            json.dumps(
-                sanitize_shareable_json({
-                    "device_state": self._bundle_device_state(device_state),
-                    "snapshot": {
-                        "timestamp": snapshot.timestamp,
-                        "connection_mode": snapshot.connection_mode,
-                        "device_id": _redact_instance_id(snapshot.device_id),
-                        "firmware_version": snapshot.firmware_version,
-                        "active_profile": snapshot.active_profile,
-                        "last_packet_timestamp": snapshot.last_packet_timestamp,
-                        "last_read_duration_ms": snapshot.last_read_duration_ms,
-                        "last_write_duration_ms": snapshot.last_write_duration_ms,
-                        "event_log": snapshot.event_log,
-                    },
-                }),
-                indent=2,
-            ),
-            encoding="utf-8",
+        payload = json.dumps(
+            sanitize_shareable_json({
+                "device_state": self._bundle_device_state(device_state),
+                "snapshot": {
+                    "timestamp": snapshot.timestamp,
+                    "connection_mode": snapshot.connection_mode,
+                    "device_id": _redact_instance_id(snapshot.device_id),
+                    "firmware_version": snapshot.firmware_version,
+                    "active_profile": snapshot.active_profile,
+                    "last_packet_timestamp": snapshot.last_packet_timestamp,
+                    "last_read_duration_ms": snapshot.last_read_duration_ms,
+                    "last_write_duration_ms": snapshot.last_write_duration_ms,
+                    "event_log": snapshot.event_log,
+                },
+            }),
+            indent=2,
         )
+        with self.output_directory(output_dir) as directory:
+            bundle_path = directory.write_text(
+                f"diagnostic_bundle_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                payload,
+            )
         self.log_i18n_event("log.diagnostics.exported_bundle", path=bundle_path)
         return bundle_path
 

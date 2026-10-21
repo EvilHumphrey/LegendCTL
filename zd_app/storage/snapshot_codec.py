@@ -147,8 +147,10 @@ def _enum_value(value: Any) -> Any:
     return value.value if hasattr(value, "value") else value
 
 
-def _enum_from(enum_cls, raw: Any):
+def _enum_from(enum_cls, raw: Any, *, required: bool = False):
     if raw is None:
+        if required:
+            raise ValueError(f"{enum_cls.__name__} must not be null")
         return None
     # Reject bool before constructing the enum: ``True``/``False`` are ints in
     # Python (``True == 1``), so ``PollingRate(True)`` would silently coerce to a
@@ -246,7 +248,7 @@ def _vibration_from_dict(payload: dict[str, Any] | None) -> VibrationSettings | 
         right_trigger_motor_strength=_percent(
             payload["right_trigger_motor_strength"], "vibration.right_trigger_motor_strength"
         ),
-        mode=_enum_from(TriggerVibrationMode, payload["mode"]),
+        mode=_enum_from(TriggerVibrationMode, payload["mode"], required=True),
     )
 
 
@@ -265,9 +267,9 @@ def _motion_from_dict(payload: dict[str, Any] | None) -> MotionSettings | None:
     if payload is None:
         return None
     return MotionSettings(
-        target=_enum_from(MotionMappingTarget, payload["target"]),
+        target=_enum_from(MotionMappingTarget, payload["target"], required=True),
         trigger_key=_byte(payload["trigger_key"], "motion.trigger_key"),
-        mode=_enum_from(MotionMappingMode, payload["mode"]),
+        mode=_enum_from(MotionMappingMode, payload["mode"], required=True),
         sensitivity=_byte(payload["sensitivity"], "motion.sensitivity"),
     )
 
@@ -393,7 +395,7 @@ def _trigger_from_dict(payload: dict[str, Any] | None) -> TriggerSettings | None
     return TriggerSettings(
         range_min=range_min,
         range_max=range_max,
-        mode=_enum_from(TriggerMode, payload["mode"]),
+        mode=_enum_from(TriggerMode, payload["mode"], required=True),
     )
 
 
@@ -494,7 +496,7 @@ def _lighting_from_dict(payload: dict[str, Any]) -> LightingSettings:
         raise ValueError(f"lighting.light_on must be a bool, got {light_on!r}")
     return LightingSettings(
         light_on=light_on,
-        mode=_enum_from(LightingMode, payload["mode"]),
+        mode=_enum_from(LightingMode, payload["mode"], required=True),
         brightness_byte=_byte(payload["brightness_byte"], "lighting.brightness_byte"),
         color=_rgb_from_dict(payload["color"]),
     )

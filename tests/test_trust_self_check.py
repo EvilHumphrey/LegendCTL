@@ -475,6 +475,36 @@ Build identity: report what this process can observe.
 """
         self.assertEqual(result.to_text(), expected)
 
+    def test_observed_values_compose_privacy_without_normalizing_whitespace(self) -> None:
+        clean = trust_self_check._clean_observed_value
+        self.assertEqual(clean(None), "")
+        self.assertEqual(clean("  ordinary | [value]\r\nnext  "), "  ordinary | [value]\r\nnext  ")
+        for raw in (
+            "VID_413D&PID_2104#SYNTHETIC!UNIT|TAIL`END",
+            r"HID\VID_413D&PID_2104&MI_02\SYNTHETIC@UNIT(END)[FINAL]",
+        ):
+            with self.subTest(raw=raw):
+                safe = clean(raw)
+                self.assertIn("VID_413D&PID_2104", safe)
+                self.assertNotIn("SYNTHETIC", safe)
+                self.assertNotIn("FINAL", safe)
+
+    def test_model_string_instance_tails_are_redacted_in_both_exports(self) -> None:
+        fingerprint = ModelFingerprint(
+            product_string="VID_413D&PID_2104#SYNTHETIC!UNIT|TAIL`END",
+            manufacturer_string=r"HID\VID_413D&PID_2104\SYNTHETIC@UNIT(END)",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = trust_self_check.build_trust_self_check(
+                package_root=Path(tmp), entry_module_path=Path(tmp) / "absent.py",
+                model_fingerprint=fingerprint, now=_NOW,
+            )
+        for shared in (result.to_text(), result.to_markdown()):
+            with self.subTest(shared=shared[:50]):
+                self.assertNotIn("SYNTHETIC", shared)
+                self.assertNotIn("TAIL", shared)
+                self.assertIn("VID_413D&PID_2104", shared)
+
     def test_model_fingerprint_block_renders_fields_without_serial(self) -> None:
         fingerprint = ModelFingerprint(
             vid=0x413D,
