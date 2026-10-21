@@ -935,7 +935,9 @@ _INSTANCE_ID_INLINE_RE = re.compile(
     # the remaining tail. Sanitize before formatting where possible. For
     # copied formatted text, privacy wins over preserving ambiguous markup.
     # https://learn.microsoft.com/windows-hardware/drivers/kernel/irp-mn-query-id
-    r"(?:(?:&[0-9A-Za-z_]+)*[\\#][\x21-\x2b\x2d-\x7f]+|&MI_[0-9A-Fa-f]{2})?",
+    # A standalone interface hardware ID (for example &MI_02 with no instance
+    # separator) is model-level evidence and must retain its qualifier.
+    r"(?:(?:&[0-9A-Za-z_]+)*[\\#][\x21-\x2b\x2d-\x7f]+)?",
     re.IGNORECASE,
 )
 

@@ -18,7 +18,11 @@ from zd_app import version as app_version
 from zd_app.i18n import t
 from zd_app.services.markdown_safety import escape_markdown
 from zd_app.services.model_fingerprint import ModelFingerprint, fingerprint_display_rows
-from zd_app.services.path_scrub import sanitize_shareable_text, scrub_paths
+from zd_app.services.path_scrub import (
+    redact_inline_instance_ids,
+    sanitize_shareable_text,
+    scrub_paths,
+)
 from zd_app.storage._import_guards import read_guarded_json
 from zd_app.storage.settings_store import _default_user_data_dir
 
@@ -236,7 +240,10 @@ class TrustSelfCheckResult:
                 f"{t('model_fingerprint.write_validation_basis_label')}: "
                 f"{t('model_fingerprint.write_validation_basis_value')}"
             )
-        return "\n".join(lines).rstrip() + "\n"
+        # Retained scan filenames and direct rows can carry per-unit IDs even
+        # when builder metadata is clean. Keep the existing path-display
+        # contract: filesystem paths are scrubbed during construction.
+        return redact_inline_instance_ids("\n".join(lines).rstrip() + "\n")
 
 
 def build_trust_self_check(
@@ -2056,7 +2063,11 @@ def _rel(path: Path, root: Path) -> str:
 
 
 def _md(value: object) -> str:
-    return escape_markdown(value)
+    # Rows can contain retained relative filenames or come from direct result
+    # construction. Redact their original IDs before escaping; re-scrubbing
+    # already-rendered placeholder paths would consume following prose.
+    text = "" if value is None else str(value)
+    return escape_markdown(redact_inline_instance_ids(text))
 
 
 def _model_fingerprint_rows(

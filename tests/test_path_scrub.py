@@ -2001,6 +2001,35 @@ class ShareableArtifactSanitizerTests(unittest.TestCase):
         raw = "VID_413D&PID_2104&status=failed"
         self.assertEqual(sanitize_shareable_text(raw), raw)
 
+    def test_standalone_interface_hardware_id_keeps_safe_qualifier(self) -> None:
+        # MI identifies a shared interface, not a physical unit. The previous
+        # terminal-MI alternative stripped it even without an instance tail.
+        for raw in (
+            r"HID\VID_413D&PID_2104&MI_02",
+            r"USB\VID_413D&PID_2104&MI_02",
+            "VID_413D&PID_2104&MI_02",
+            "VID_413D&PID_2104&REV_0001&MI_02&IG_00",
+        ):
+            for clean in (redact_inline_instance_ids, sanitize_shareable_text):
+                with self.subTest(raw=raw, clean=clean.__name__):
+                    self.assertEqual(clean(raw), raw)
+        record = logging.LogRecord(
+            "t", logging.INFO, "synthetic.py", 1, "interface=%s",
+            (r"HID\VID_413D&PID_2104&MI_02",), None,
+        )
+        self.assertEqual(
+            PathScrubbingFormatter().format(record),
+            r"interface=HID\VID_413D&PID_2104&MI_02",
+        )
+
+    def test_mi_qualified_instance_tails_still_redact_all_legal_punctuation(self) -> None:
+        for separator in ("\\", "#"):
+            for tail in ("SYNTHETIC!UNIT|TAIL`END", "SYNTHETIC@UNIT(END)[FINAL]"):
+                raw = r"HID\VID_413D&PID_2104&MI_02" + separator + tail
+                for clean in (redact_inline_instance_ids, sanitize_shareable_text):
+                    with self.subTest(raw=raw, clean=clean.__name__):
+                        self.assertEqual(clean(raw), r"HID\VID_413D&PID_2104")
+
     def test_embedded_model_head_in_freeform_token_is_preserved(self) -> None:
         for prefix in ("A", "X", "9", "_", "product_AVID_", "deviceName"):
             raw = prefix + "VID_413D&PID_2104#REV-A"
