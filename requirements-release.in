@@ -17,4 +17,4 @@ urllib3==2.8.0
 # pip-audit imports pip's internal API. Keep the compatible pip release that
 # the deterministic pip-tools refresher also uses; this is part of the audited
 # build venv, not an implicit upgrader.
-pip==26.2.1
+pip==26.2.2
