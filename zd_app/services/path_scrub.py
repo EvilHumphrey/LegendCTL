@@ -17,6 +17,13 @@ drift apart again.
 
 Design
 ------
+A lazily discovered actual home prefix is recognized first, including custom
+drive/UNC homes and case-sensitive POSIX homes outside the conventional roots.
+It is removed before app/source marker preservation; an account directory may
+itself have a marker's name. Discovery and normalization are lexical only, with
+no filesystem resolution. Public helpers accept an optional ``home_prefixes``
+tuple for synthetic contexts; ordinary callers use the current account context.
+
 A username is exactly the *one path component* directly after a
 ``Users``/``home`` root, and a path component is bounded by **separators**, not
 by spaces — so a display-name username with interior spaces ("Jane Doe", or
@@ -172,6 +179,8 @@ import logging
 import math
 import re
 from collections.abc import Mapping
+from functools import lru_cache
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 
@@ -406,6 +415,145 @@ _EXT_LEN_PREFIX_RE = re.compile(r"[\\/]{2}[?.][\\/](?P<unc>UNC[\\/])?", re.IGNOR
 # structural tell that a tail component re-roots a second path
 # (:func:`_is_reroot_run`). A bare ``[\\/]+`` split would discard that.
 _SEP_SPLIT_RE = re.compile(r"([\\/]+)")
+_PathPatterns = tuple[
+    re.Pattern[str] | None, re.Pattern[str], re.Pattern[str], re.Pattern[str]
+]
+
+
+def _current_home_prefixes() -> tuple[str, ...]:
+    """Discover the current home lazily, without resolving or opening it.
+
+    Failure must not disable the generic path rules, and must not be cached:
+    a later call can recover after an unavailable account context changes.
+    """
+    try:
+        return (str(Path.home()),)
+    except Exception:
+        return ()
+
+
+def _normalized_home_prefixes(prefixes: tuple[str, ...]) -> tuple[str, ...]:
+    normalized: set[str] = set()
+    for value in prefixes:
+        if not isinstance(value, str) or not value or re.search(r'[\x00-\x1f"<>|]', value):
+            continue
+        # Pure paths perform lexical validation only: no stat, resolve, or UNC I/O.
+        extended = _EXT_LEN_PREFIX_RE.match(value)
+        if extended:
+            value = ("//" if extended.group("unc") else "") + value[extended.end():]
+        windows = bool(re.match(r"^[A-Za-z]:[\\/]", value) or value.startswith(("//", "\\\\")))
+        if windows:
+            value = value.replace("\\", "/")
+        pure = PureWindowsPath(value) if windows else PurePosixPath(value)
+        # A UNC share can itself be the account home; unlike a drive root it
+        # contains a meaningful, potentially identifying share component.
+        unc_share = windows and pure.drive.startswith("\\\\")
+        if not pure.is_absolute() or (pure == pure.parent and not unc_share) or ".." in pure.parts:
+            continue
+        if windows:
+            # Regex IGNORECASE is character-wise, unlike casefold/lower which
+            # can expand an account component (ß -> ss, İ -> i + combining dot).
+            # Canonicalize ASCII case for cache reuse without changing Unicode
+            # spelling that the matcher must still recognize verbatim.
+            value = pure.as_posix().translate(str.maketrans(
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"
+            ))
+        else:
+            value = pure.as_posix()
+        normalized.add(value)
+    return tuple(sorted(normalized, key=lambda p: (-len(p), p)))
+
+
+@lru_cache(maxsize=8)
+def _home_path_patterns(prefixes: tuple[str, ...]) -> _PathPatterns:
+    """Bound compiled patterns by the normalized context, never by first use."""
+    patterns: list[str] = []
+    for prefix in prefixes:
+        windows = bool(re.match(r"^[a-z]:/", prefix) or prefix.startswith("//"))
+        comps = [c for c in prefix.split("/") if c]
+        if windows:
+            # Backslash runs include JSON/repr escaping. Optional namespace
+            # prefixes cover both drive and UNC extended/device spellings.
+            start = r"[\\/]{2,}(?:[?.][\\/]+UNC[\\/]+)?" if prefix.startswith("//") else r"(?:[\\/]{2,}[?.][\\/]+)?"
+            join = r"[\\/]+(?:\.[\\/]+)*"
+            body = join.join(re.escape(c) + (r"[. ]*?" if not c.endswith(":") else "") for c in comps)
+            body = "(?i:" + start + body + ")"
+        else:
+            body = "(?-i:/" + r"/(?:\./)*".join(re.escape(c) for c in comps) + ")"
+        # Reject non-whitespace sibling suffixes. A space is ambiguous between
+        # prose after the bare home and a longer spaced sibling: privacy wins,
+        # so mask the known prefix and preserve the remaining prose. This is
+        # path-scoped; standalone occurrences of the account name are untouched.
+        patterns.append(body + r"(?=$|[\\/\"<>|\s,;:`)\]}]|'(?!\w))")
+    if not patterns:
+        return None, _PATH_TOKEN_RE, _PATH_ANCHOR_RE, _SECOND_PATH_ANCHOR_RE
+    home = "(?:" + "|".join(patterns) + ")"
+    custom_posix = any(p.startswith("/") and not p.startswith("//") for p in prefixes)
+    # Alternate POSIX spellings may start before the known prefix, e.g.
+    # /other/../srv/profiles/name. These are candidates only: unrelated paths
+    # pass through unless lexical normalization reaches a known home.
+    posix = r"|(?<![\\/])/(?!/)" if custom_posix else ""
+    anchor = "(?:" + home + "|" + _PATH_ANCHOR + posix + ")"
+    body = r"(?:(?!(?<![^\S\r\n\t])[^\S\r\n\t]+" + anchor + r")[^\"<>|\r\n\t])*"
+    if custom_posix:
+        # Comma/repr-separated POSIX siblings must be scanned independently,
+        # including alternate spellings which do not start with a home prefix.
+        body = r"(?:(?!(?<=[,;'()\]])/)(?!(?<![^\S\r\n\t])[^\S\r\n\t]+" + anchor + r")[^\"<>|\r\n\t])*"
+    token = r"(?<![A-Za-z0-9_])" + anchor + body
+    if custom_posix:
+        # Recognize complete URLs before looking for POSIX candidate starts
+        # within their pathname (including /./ and /../ URL components).
+        token = r"(?P<url>\b[A-Za-z][A-Za-z0-9+.-]*://[^\s\"<>|]+)|" + token
+    return (
+        re.compile(home),
+        re.compile(token, re.IGNORECASE),
+        re.compile(anchor, re.IGNORECASE),
+        re.compile(home + "|" + _SECOND_PATH_ANCHOR_RE.pattern, re.IGNORECASE),
+    )
+
+
+def _lexical_home_end(token: str, home_re: re.Pattern[str]) -> int | None:
+    """Locate a known home after lexical dot/parent normalization only.
+
+    Keep original offsets and separator runs for the reducer. Normalization
+    is a recognition step, never a replacement path or filesystem operation.
+    """
+    namespace = re.match(r"[\\/]{2,}[?.][\\/]+(?P<unc>UNC[\\/]+)?", token, re.IGNORECASE)
+    offset = namespace.end() if namespace else 0
+    path = token[offset:]
+    unc = bool(namespace and namespace.group("unc")) or path.startswith(("//", "\\\\"))
+    drive = bool(re.match(r"^[A-Za-z]:[\\/]", path))
+    windows = unc or drive
+    if not windows and not path.startswith("/"):
+        return None
+    root = "//" if unc else "" if drive else "/"
+    floor = 2 if unc else 1 if drive else 0
+    stack: list[tuple[str, int, int]] = []
+    component_re = re.compile(r"[^\\/]+" if windows else r"[^/]+")
+    for match in component_re.finditer(path):
+        comp = match.group(0)
+        dots = comp.rstrip(" ") if windows else comp
+        if dots == ".":
+            continue
+        if dots == "..":
+            if len(stack) > floor:
+                stack.pop()
+            continue
+        if windows and not comp.endswith(":"):
+            comp = comp.rstrip(". ")
+        if comp:
+            stack.append((comp, offset + match.start(), offset + match.end()))
+    canonical = root + "/".join(comp for comp, _, _ in stack)
+    home = home_re.match(canonical)
+    if home is None:
+        return None
+    cursor = len(root)
+    for comp, start, end in stack:
+        component_end = cursor + len(comp)
+        if home.end() <= component_end:
+            return end if home.end() == component_end else start + home.end() - cursor
+        cursor = component_end + 1
+    return None
 
 
 def _env_root_placeholder(comp: str) -> str | None:
@@ -545,7 +693,7 @@ def _tail_before_reanchor(
     return tail_comps
 
 
-def _reduce_single_path_token(token: str) -> str:
+def _reduce_single_path_token(token: str, home_re: re.Pattern[str] | None = None) -> str:
     """Collapse ONE filesystem path (no embedded second path) to a safe form.
 
     :func:`_reduce_path_token` has already split a multi-path token at every
@@ -553,6 +701,25 @@ def _reduce_single_path_token(token: str) -> str:
     (the component after a ``Users``/``home`` root) is never part of the return
     value. See the module docstring for the reduction order (steps 1-5).
     """
+
+    # Actual account homes need not be under Users/home. Remove their complete
+    # prefix BEFORE marker preservation: an account itself may be named zd_app
+    # or ZDUltimateLegend. Keep only validated relative diagnostic suffixes.
+    home_match = home_re.match(token) if home_re is not None else None
+    actual_home = home_match.end() if home_match is not None else None
+    if actual_home is None and home_re is not None:
+        actual_home = _lexical_home_end(token, home_re)
+    if actual_home is not None:
+        token = token[actual_home:]
+        if not token or token[0] not in "\\/":
+            # Prose after a bare home is retained only while it cannot carry
+            # another separator-introduced path (which must not bypass the
+            # structural tail checks merely because a space preceded it).
+            if "\\" in token or "/" in token:
+                return HOME_PLACEHOLDER
+            return HOME_PLACEHOLDER + token
+    elif token.startswith("/") and not token.startswith("//") and not _PATH_ANCHOR_RE.match(token):
+        return token  # a broad POSIX candidate that did not identify this home
 
     # Split on runs of separators, KEEPING the runs (``_SEP_SPLIT_RE`` captures,
     # so the result interleaves components at even indices and the separator runs
@@ -571,7 +738,13 @@ def _reduce_single_path_token(token: str) -> str:
         comps.append(comp)
         sep_runs.append(pieces[idx - 1] if idx > 0 else "")
     if not comps:
-        return token
+        return HOME_PLACEHOLDER if actual_home is not None else token
+
+    if actual_home is not None and ".." in comps:
+        return HOME_PLACEHOLDER
+    if actual_home is not None:
+        comps = _tail_before_reanchor(comps, sep_runs)
+        sep_runs = sep_runs[:len(comps)]
 
     # 1) App-data path → <APP_DATA>/<tail>. Everything up to and including the
     #    marker (home + username included) is replaced by the placeholder. The
@@ -589,6 +762,11 @@ def _reduce_single_path_token(token: str) -> str:
             return "/".join(
                 [comp] + _tail_before_reanchor(comps[i + 1:], sep_runs[i + 1:])
             )
+
+    if actual_home is not None:
+        safe_tail = _tail_before_reanchor(comps, sep_runs)
+        safe_tail = [c for c in safe_tail if c not in (".", "")]
+        return safe_tail[-1] if safe_tail else HOME_PLACEHOLDER
 
     # 3) Env-var / tilde-rooted path with NO marker → bare placeholder, tail
     #    DROPPED. A leading %USERPROFILE% / $env:APPDATA / ~ expands to a dir
@@ -641,7 +819,7 @@ def _reduce_single_path_token(token: str) -> str:
     return comps[-1]
 
 
-def _reduce_path_token(token: str) -> str:
+def _reduce_path_token(token: str, patterns: _PathPatterns | None = None) -> str:
     """Collapse one path-shaped token to a privacy-safe form.
 
     A single token can carry more than one filesystem path, merged by a
@@ -665,6 +843,7 @@ def _reduce_path_token(token: str) -> str:
     logic is unchanged.
     """
 
+    home_re, _, anchor_re, second_re = patterns or _home_path_patterns(())
     # Normalize a Windows extended-length / device prefix first, so it does not
     # leave a stray ``?``/``.`` component in the output (cosmetic; see
     # _EXT_LEN_PREFIX_RE). \\?\C:\... / \\.\C:\... -> C:\... ; \\?\UNC\srv\... -> \\srv\...
@@ -675,34 +854,57 @@ def _reduce_path_token(token: str) -> str:
     segments = []
     rest = token
     while rest:
-        anchor = _PATH_ANCHOR_RE.match(rest)
+        anchor = anchor_re.match(rest)
+        anchor_end = anchor.end() if anchor else 1
+        literal_home = home_re.match(rest) if home_re is not None else None
+        # Never repeatedly normalize the complete remaining glued-path list:
+        # a fresh drive/env anchor already ends this independent path segment.
+        generic_second = _SECOND_PATH_ANCHOR_RE.search(rest, anchor_end)
+        lexical_token = rest[:generic_second.start()] if generic_second else rest
+        lexical_home = (
+            _lexical_home_end(lexical_token, home_re)
+            if home_re is not None and literal_home is None else None
+        )
+        leading_end = max(anchor.end() if anchor else 1, lexical_home or 0)
         # Search for the NEXT fresh anchor past the leading one (``anchor.end()``
         # so the leading anchor can't re-match itself). ``second.start() >= 1``
         # always, so ``rest`` strictly shrinks each pass and the loop terminates.
-        second = _SECOND_PATH_ANCHOR_RE.search(rest, anchor.end() if anchor else 1)
+        active_second = second_re
+        if (rest.startswith("/") and not rest.startswith("//")
+                and not _PATH_ANCHOR_RE.match(rest) and home_re is not None
+                and literal_home is None and lexical_home is None):
+            # Do not treat a known-home-looking descendant of an unrelated
+            # POSIX path as a second root. Drive/env siblings still split.
+            active_second = _SECOND_PATH_ANCHOR_RE
+        second = active_second.search(rest, leading_end)
         if second is None:
-            segments.append(_reduce_single_path_token(rest))
+            segments.append(_reduce_single_path_token(rest, home_re))
             break
         cut = second.start()
-        segments.append(_reduce_single_path_token(rest[:cut]))
+        segments.append(_reduce_single_path_token(rest[:cut], home_re))
         rest = rest[cut:]
     return "".join(segments)
 
 
-def scrub_paths(text: str) -> str:
+def scrub_paths(text: str, *, home_prefixes: tuple[str, ...] | None = None) -> str:
     """Return ``text`` with every embedded filesystem path scrubbed.
 
     Non-path text is returned unchanged. Safe to run over an entire document
     (Markdown, JSON, a log line, a crash traceback) — only the path-shaped
-    spans are rewritten.
+    spans are rewritten. ``home_prefixes=None`` lazily discovers the current
+    home; an explicit tuple supplies a lexical context without discovery.
     """
 
     if not text:
         return text
-    return _PATH_TOKEN_RE.sub(lambda m: _reduce_path_token(m.group(0)), text)
+    prefixes = _current_home_prefixes() if home_prefixes is None else home_prefixes
+    patterns = _home_path_patterns(_normalized_home_prefixes(prefixes))
+    return patterns[1].sub(
+        lambda m: m.group(0) if m.lastgroup == "url" else _reduce_path_token(m.group(0), patterns), text
+    )
 
 
-def scrub_value(value: object) -> str:
+def scrub_value(value: object, *, home_prefixes: tuple[str, ...] | None = None) -> str:
     """Coerce ``value`` to ``str`` and scrub it; ``None``/empty → ``""``.
 
     Convenience wrapper for the freeform fields (notes, profile names, device
@@ -715,7 +917,7 @@ def scrub_value(value: object) -> str:
     text = str(value)
     if not text:
         return ""
-    return scrub_paths(text)
+    return scrub_paths(text, home_prefixes=home_prefixes)
 
 
 _INSTANCE_ID_INLINE_RE = re.compile(
@@ -760,7 +962,7 @@ def redact_inline_instance_ids(text: str) -> str:
     return _INSTANCE_ID_INLINE_RE.sub(_truncate_instance_id, text)
 
 
-def sanitize_shareable_text(value: object) -> str:
+def sanitize_shareable_text(value: object, *, home_prefixes: tuple[str, ...] | None = None) -> str:
     """Apply the complete privacy boundary for user-shareable text.
 
     Path scrubbing and device-instance redaction are separate operations: a
@@ -776,6 +978,9 @@ def sanitize_shareable_text(value: object) -> str:
     if not text:
         return ""
 
+    if home_prefixes is None:
+        home_prefixes = _current_home_prefixes()
+
     # Treat instance IDs as boundaries while path-scrubbing the surrounding
     # spans. Without this split, free text containing ``<absolute path> <HID
     # instance>`` can be interpreted as one spaced Windows path: the path
@@ -785,14 +990,14 @@ def sanitize_shareable_text(value: object) -> str:
     segments: list[str] = []
     cursor = 0
     for match in _INSTANCE_ID_INLINE_RE.finditer(text):
-        segments.append(scrub_paths(text[cursor:match.start()]))
+        segments.append(scrub_paths(text[cursor:match.start()], home_prefixes=home_prefixes))
         segments.append(_truncate_instance_id(match))
         cursor = match.end()
-    segments.append(scrub_paths(text[cursor:]))
+    segments.append(scrub_paths(text[cursor:], home_prefixes=home_prefixes))
     return "".join(segments)
 
 
-def sanitize_shareable_json(value: Any) -> Any:
+def sanitize_shareable_json(value: Any, *, home_prefixes: tuple[str, ...] | None = None) -> Any:
     """Recursively sanitize string values in a JSON-like structure.
 
     JSON scalar types retain their types. String mapping keys are sanitized as
@@ -801,8 +1006,10 @@ def sanitize_shareable_json(value: Any) -> Any:
     overwriting one field. Unsupported objects are never stringified.
     """
 
+    if home_prefixes is None:
+        home_prefixes = _current_home_prefixes()
     if isinstance(value, str):
-        return sanitize_shareable_text(value)
+        return sanitize_shareable_text(value, home_prefixes=home_prefixes)
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError("shareable JSON numbers must be finite")
     if value is None or isinstance(value, (bool, int, float)):
@@ -812,13 +1019,13 @@ def sanitize_shareable_json(value: Any) -> Any:
         for key, child in value.items():
             if not isinstance(key, str):
                 raise TypeError("shareable JSON mapping keys must be strings")
-            safe_key = sanitize_shareable_text(key)
+            safe_key = sanitize_shareable_text(key, home_prefixes=home_prefixes)
             if safe_key in sanitized:
                 raise ValueError("shareable JSON key collision after sanitization")
-            sanitized[safe_key] = sanitize_shareable_json(child)
+            sanitized[safe_key] = sanitize_shareable_json(child, home_prefixes=home_prefixes)
         return sanitized
     if isinstance(value, (list, tuple)):
-        return [sanitize_shareable_json(child) for child in value]
+        return [sanitize_shareable_json(child, home_prefixes=home_prefixes) for child in value]
     raise TypeError(f"unsupported shareable JSON value: {type(value).__name__}")
 
 

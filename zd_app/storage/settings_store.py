@@ -11,6 +11,7 @@ from pathlib import Path
 
 from zd_app.models import AppSettings
 from zd_app.storage._import_guards import read_guarded_json
+from zd_app.storage.atomic_write import atomic_write_bytes
 from zd_app.version import __app_id__
 
 
@@ -280,10 +281,9 @@ class SettingsStore:
         return settings
 
     def save(self, settings: AppSettings) -> None:
-        # Atomic temp-then-replace (per the subsystem's "all writes atomic"
-        # invariant, mirroring RestorePointStore/LastAppliedStore/
-        # WrapperProfileStore): a crash mid-write leaves either the previous
-        # settings.json or a ``.tmp`` straggler, never a half-written final.
+        # Keep the unique temp's exclusive descriptor through the write, so a
+        # preplanted settings.json.tmp is never opened or truncated and
+        # simultaneous saves cannot share a temporary file.
         data = settings.to_dict()
         data[SETUP_DRAWER_DISMISSED_KEY] = _coerce_setup_drawer_dismissed(
             getattr(
@@ -293,17 +293,14 @@ class SettingsStore:
             )
         )
         payload = json.dumps(data, indent=2)
-        temp_path = self.path.with_suffix(self.path.suffix + ".tmp")
-        with open(temp_path, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            try:
-                os.fsync(handle.fileno())
-            except OSError:
-                # Best-effort: fsync can be unavailable on some filesystems
-                # (e.g. Windows network shares). The replace below still runs.
-                logger.debug("fsync unavailable for %s", temp_path, exc_info=True)
-        temp_path.replace(self.path)
+        # Match the previous UTF-8 text writer's native newline translation.
+        atomic_write_bytes(
+            self.path,
+            payload.replace("\n", os.linesep).encode("utf-8"),
+            on_fsync_error=lambda temp_path: logger.debug(
+                "fsync unavailable for %s", temp_path, exc_info=True
+            ),
+        )
 
     def get_setup_drawer_dismissed(self) -> bool:
         if not self.path.exists():

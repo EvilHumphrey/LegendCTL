@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -29,10 +28,9 @@ class SetWindowTitleUnicodeTests(unittest.TestCase):
         fake = _FakeUser32(pid=1234)
 
         with patch.object(app_shell.os, "getpid", return_value=1234), patch.object(
-            app_shell.ctypes,
-            "windll",
-            SimpleNamespace(user32=fake),
-            create=True,
+            app_shell,
+            "load_system_dll",
+            return_value=fake,
         ):
             count = app_shell.set_window_title_unicode("ZD 控制中心")
 
@@ -43,10 +41,9 @@ class SetWindowTitleUnicodeTests(unittest.TestCase):
         fake = _FakeUser32(pid=99)
 
         with patch.object(app_shell.os, "getpid", return_value=99), patch.object(
-            app_shell.ctypes,
-            "windll",
-            SimpleNamespace(user32=fake),
-            create=True,
+            app_shell,
+            "load_system_dll",
+            return_value=fake,
         ):
             app_shell.set_window_title_unicode("ZD Ultimate Legend 控制中心")
 

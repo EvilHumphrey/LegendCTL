@@ -421,10 +421,11 @@ def _install_native_windows_hook(crashes_dir: Path) -> None:
         return
 
     import ctypes
+    from zd_app.system_dll import load_system_dll
     from ctypes import wintypes
 
-    kernel32 = ctypes.windll.kernel32
-    dbghelp = ctypes.windll.dbghelp
+    kernel32 = load_system_dll("kernel32")
+    dbghelp = load_system_dll("dbghelp")
 
     EXCEPTION_CONTINUE_SEARCH = 0
     GENERIC_WRITE = 0x40000000

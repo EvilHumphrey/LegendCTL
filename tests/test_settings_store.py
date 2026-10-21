@@ -220,8 +220,9 @@ class SettingsStoreCorruptionTests(unittest.TestCase):
             store.save(AppSettings(language="en"))
             original = (tmp / "settings.json").read_text(encoding="utf-8")
 
-            with mock.patch.object(
-                Path, "replace", side_effect=OSError("simulated crash mid-write")
+            with mock.patch(
+                "zd_app.storage.atomic_write.os.replace",
+                side_effect=OSError("simulated crash mid-write"),
             ):
                 with self.assertRaises(OSError):
                     store.save(AppSettings(language="zh-CN"))
@@ -231,6 +232,7 @@ class SettingsStoreCorruptionTests(unittest.TestCase):
             self.assertEqual(
                 (tmp / "settings.json").read_text(encoding="utf-8"), original
             )
+            self.assertEqual(list(tmp.glob("*.tmp")), [])
 
 
 if __name__ == "__main__":

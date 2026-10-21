@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import mock_open, patch
+from unittest.mock import patch
 
 from zd_app.models import WrapperProfile
 from zd_app.services.settings_service import (
@@ -402,29 +402,27 @@ class WrapperProfileStoreTests(unittest.TestCase):
 
 
 class AtomicSaveTests(unittest.TestCase):
-    """``save`` mirrors ``RestorePointStore.save``'s temp-file-then-replace.
-
-    The previous bare ``write_text`` could leave a
-    half-written profile if the process died mid-write. The atomic dance
-    leaves either the previous file or a ``.tmp`` straggler the ``*.json``
-    glob never picks up.
-    """
+    """Unique temporary files publish only complete profiles by replacement."""
 
     def test_save_writes_temp_then_replaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             store = WrapperProfileStore(tmpdir)
 
-            original_replace = Path.replace
+            original_replace = os.replace
             replace_calls: list[tuple[str, str]] = []
 
-            def _spy(self: Path, target):
-                replace_calls.append((self.name, Path(target).name))
-                return original_replace(self, target)
+            def _spy(source, target):
+                replace_calls.append((Path(source).name, Path(target).name))
+                return original_replace(source, target)
 
-            with patch.object(Path, "replace", _spy):
+            with patch("zd_app.storage.atomic_write.os.replace", _spy):
                 store.save(_profile("Apex Tuned", description="Ranked FPS"))
 
-            self.assertEqual(replace_calls, [("apex-tuned.json.tmp", "apex-tuned.json")])
+            self.assertEqual(len(replace_calls), 1)
+            source, target = replace_calls[0]
+            self.assertTrue(source.startswith(".apex-tuned.json."))
+            self.assertTrue(source.endswith(".tmp"))
+            self.assertEqual(target, "apex-tuned.json")
             self.assertEqual(list(Path(tmpdir).glob("*.tmp")), [])
             loaded = store.load("Apex Tuned")
             self.assertEqual(loaded.description, "Ranked FPS")
@@ -438,14 +436,29 @@ class AtomicSaveTests(unittest.TestCase):
             final_path = Path(tmpdir) / "apex-tuned.json"
             before_bytes = final_path.read_bytes()
 
-            exploding = mock_open()
-            exploding.return_value.write.side_effect = OSError("disk full mid-write")
-            with patch("zd_app.storage.wrapper_profile_store.open", exploding):
+            original_fdopen = os.fdopen
+
+            class FailingWriter:
+                def __init__(self, fd, mode):
+                    self.handle = original_fdopen(fd, mode)
+
+                def __enter__(self):
+                    return self
+
+                def write(self, data):
+                    self.handle.write(data[:10])
+                    raise OSError("disk full mid-write")
+
+                def __exit__(self, *exc):
+                    self.handle.close()
+
+            with patch("zd_app.storage.atomic_write.os.fdopen", FailingWriter):
                 with self.assertRaises(OSError):
                     store.save(_profile("Apex Tuned", description="updated"))
 
             self.assertEqual(final_path.read_bytes(), before_bytes)
             self.assertEqual(store.load("Apex Tuned").description, "original")
+            self.assertEqual(list(Path(tmpdir).glob("*.tmp")), [])
 
     def test_temp_straggler_is_invisible_to_list_profiles(self) -> None:
         """``*.json`` glob does not match ``.json.tmp`` — a crashed write's

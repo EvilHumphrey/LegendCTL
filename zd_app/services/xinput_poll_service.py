@@ -38,6 +38,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
+from zd_app.system_dll import load_system_dll
 from zd_app.services.settings_service import ControllerButtonTarget
 
 
@@ -403,12 +404,11 @@ def _load_dll():
     DirectX, ``WinDLL`` is unavailable / the loads fail; we return ``None``
     so the service sits in the unavailable state without crashing.
     """
-    WinDLL = getattr(ctypes, "WinDLL", None)
-    if WinDLL is None:
+    if getattr(ctypes, "WinDLL", None) is None:
         return None
     for name in _DLL_FALLBACK_ORDER:
         try:
-            dll = WinDLL(name)
+            dll = load_system_dll(name)
         except OSError as exc:
             logger.debug("XInput DLL %s not loadable: %s", name, exc)
             continue
