@@ -12,6 +12,7 @@ from ctypes import wintypes as w
 from typing import Any, NamedTuple
 
 from zd_app.services.xinput import describe_battery_level, get_connected_controllers
+from zd_app.system_dll import load_system_dll
 from zd_app.i18n import t
 from zd_app.models import DeviceClass, DeviceState, utc_now_iso
 from zd_app.services.model_fingerprint import collect_model_fingerprint
@@ -77,7 +78,7 @@ class _Win32:
     @classmethod
     def kernel32(cls):
         if cls._kernel32 is None:
-            cls._kernel32 = c.windll.kernel32
+            cls._kernel32 = load_system_dll("kernel32")
             cls._kernel32.GetLastError.argtypes = []
             cls._kernel32.GetLastError.restype = w.DWORD
         return cls._kernel32
@@ -85,7 +86,7 @@ class _Win32:
     @classmethod
     def setupapi(cls):
         if cls._setupapi is None:
-            cls._setupapi = c.WinDLL("setupapi")
+            cls._setupapi = load_system_dll("setupapi")
             cls._setupapi.SetupDiGetClassDevsW.argtypes = [
                 c.POINTER(_GUID),
                 w.LPCWSTR,

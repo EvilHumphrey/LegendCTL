@@ -136,14 +136,14 @@ class ReleaseLockClosureTests(unittest.TestCase):
         self.assertIn("pip-audit==2.10.1", release_input)
         self.assertIn("urllib3==2.8.0", release_input)
         self.assertIn("urllib3==2.8.0", release_lock["urllib3"])
-        self.assertIn("pip==26.2.1", release_input)
-        self.assertIn("pip==26.2.1", release_lock["pip"])
+        self.assertIn("pip==26.2.2", release_input)
+        self.assertIn("pip==26.2.2", release_lock["pip"])
         self.assertIn("pip-tools==7.6.2", tools_input)
-        self.assertIn("pip==26.2.1", tools_input)
+        self.assertIn("pip==26.2.2", tools_input)
         self.assertIn("pip-tools", lock_tools)
         self.assertIn("pip-tools==7.6.2", lock_tools["pip-tools"])
         self.assertIn("--hash=sha256:", lock_tools["pip-tools"])
-        self.assertIn("pip==26.2.1", lock_tools["pip"])
+        self.assertIn("pip==26.2.2", lock_tools["pip"])
 
     def test_release_lock_versions_match_all_recursive_build_roots(self) -> None:
         lock_versions = _locked_versions(LOCK)

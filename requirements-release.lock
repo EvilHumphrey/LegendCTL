@@ -20,9 +20,9 @@ cachecontrol==0.14.4 \
     # via
     #   cachecontrol
     #   pip-audit
-certifi==2026.7.22 \
-    --hash=sha256:62f22742b58a1a33014a2b6b706588a8d7e2a88ae7bd1a6ebe8c992928483775 \
-    --hash=sha256:741e2c3b351ddf169a738da9f2c048608ff7f2c5cc02f1ebc6b118bb090d5d55
+certifi==2026.10.19 \
+    --hash=sha256:035c1e85572b141bf1c3a3eff0e33a8eb74917522f2559075ff8d2fea780a1ae \
+    --hash=sha256:42d35340cc5b9ba78e818ddbff0c5b1c2b779de448a340fd1b989f5fa8670e1b
     # via requests
 charset-normalizer==3.4.9 \
     --hash=sha256:0327fcd59a935777d83410750c50600ee9571af2846f71ce40f25b13da1ef380 \
@@ -385,8 +385,8 @@ urllib3==2.8.0 \
     #   requests
 
 # The following packages are considered to be unsafe in a requirements file:
-pip==26.2.1 \
-    --hash=sha256:71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e
+pip==26.2.2 \
+    --hash=sha256:fd7f4dfa8190e014013b9f08f3e973f4e4c26ffd179a204895533a7254813a70
     # via
     #   -r requirements-release.in
     #   pip-api

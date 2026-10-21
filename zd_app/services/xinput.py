@@ -3,6 +3,8 @@
 import ctypes
 from ctypes import Structure, c_ubyte, c_uint, c_ushort, c_short, POINTER, byref
 
+from zd_app.system_dll import load_system_dll
+
 # ---------------------------------------------------------------------------
 # XInput button bitmask constants
 # ---------------------------------------------------------------------------
@@ -113,12 +115,11 @@ def _load_xinput():
     unconditionally at startup) with a raw traceback. (Never reached on the
     shipped Win8+ target since ``xinput1_4.dll`` ships in-box — robustness only.)
     """
-    windll = getattr(ctypes, "windll", None)
-    if windll is None:
+    if getattr(ctypes, "windll", None) is None:
         return None
     for name in ("xinput1_4", "xinput1_3", "xinput9_1_0"):
         try:
-            return getattr(windll, name)
+            return load_system_dll(name)
         except OSError:
             continue
     return None

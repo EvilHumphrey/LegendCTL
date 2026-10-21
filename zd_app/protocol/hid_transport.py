@@ -25,6 +25,8 @@ from ctypes import wintypes as w
 from pathlib import Path
 from typing import Callable
 
+from zd_app.system_dll import load_system_dll
+
 
 __all__ = [
     "CM_GET_DEVICE_INTERFACE_LIST_PRESENT",
@@ -228,9 +230,9 @@ class SP_DEVICE_INTERFACE_DATA(c.Structure):
     ]
 
 
-setupapi = c.windll.setupapi
-hid_dll = c.windll.hid
-kernel32 = c.windll.kernel32
+setupapi = load_system_dll("setupapi")
+hid_dll = load_system_dll("hid")
+kernel32 = load_system_dll("kernel32")
 
 setupapi.SetupDiGetClassDevsW.argtypes = [c.POINTER(GUID), w.LPCWSTR, w.HWND, w.DWORD]
 setupapi.SetupDiGetClassDevsW.restype = c.c_void_p
@@ -645,7 +647,7 @@ def probe_open_modes(paths: list[str]) -> list[dict[str, object]]:
 
 
 try:
-    cfgmgr32 = c.windll.cfgmgr32
+    cfgmgr32 = load_system_dll("cfgmgr32")
 except OSError:  # pragma: no cover - older Windows without cfgmgr32
     cfgmgr32 = None
 

@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from zd_app.models import WrapperProfile, utc_now_iso
 from zd_app.storage._import_guards import read_guarded_json
+from zd_app.storage.atomic_write import atomic_write_bytes
 from zd_app.storage.settings_store import initialize_user_data_dir
 
 
@@ -158,29 +159,25 @@ class WrapperProfileStore:
     def save(self, profile: WrapperProfile) -> Path:
         """Persist or overwrite a profile and update its last-modified time.
 
-        Atomic write mirroring ``RestorePointStore.save`` — write to
-        ``<slug>.json.tmp``, flush+fsync, then ``Path.replace()`` so a crash
-        mid-write leaves either the previous file or a ``.tmp`` straggler
-        (invisible to ``list_profiles``'s ``*.json`` glob), never a
-        half-written profile.
+        Write through an exclusively created unique temp's held descriptor,
+        flush+fsync, then replace the destination. A preplanted
+        ``<slug>.json.tmp`` is never opened and simultaneous saves have
+        separate temporary files. Crash stragglers remain invisible to
+        ``list_profiles``'s ``*.json`` glob.
         """
 
         slug = self._slug_or_raise(profile.name)
         profile.last_modified_at = utc_now_iso()
         path = self._path_for_slug(slug)
-        temp_path = path.with_suffix(path.suffix + TEMP_SUFFIX)
         payload = json.dumps(profile.to_dict(), indent=2)
-        with open(temp_path, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-            handle.flush()
-            try:
-                os.fsync(handle.fileno())
-            except OSError:
-                # Best-effort: fsync can be unavailable on some filesystems
-                # (e.g. Windows network shares). Replace below still happens.
-                logger.debug("fsync unavailable for %s", temp_path, exc_info=True)
-        temp_path.replace(path)
-        return path
+        # Match the previous UTF-8 text writer's native newline translation.
+        return atomic_write_bytes(
+            path,
+            payload.replace("\n", os.linesep).encode("utf-8"),
+            on_fsync_error=lambda temp_path: logger.debug(
+                "fsync unavailable for %s", temp_path, exc_info=True
+            ),
+        )
 
     def save_new(self, profile: WrapperProfile) -> Path:
         """Atomically save a collision-free new profile without overwriting.

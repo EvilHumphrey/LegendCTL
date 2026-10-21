@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 import dearpygui.dearpygui as dpg
 
+from zd_app.system_dll import load_system_dll
 from zd_app.i18n import DEFAULT_LOCALE, SUPPORTED_LOCALES, set_locale, t
 from zd_app.models import (
     AppSettings,
@@ -681,9 +682,7 @@ _GEOMETRY_LOG_SETTLE_FRAMES = 3
 
 def _primary_display_size() -> tuple[int, int] | None:
     try:
-        user32 = getattr(getattr(ctypes, "windll", None), "user32", None)
-        if user32 is None:
-            return None
+        user32 = load_system_dll("user32")
         width = int(user32.GetSystemMetrics(0))
         height = int(user32.GetSystemMetrics(1))
     except Exception:
@@ -9614,8 +9613,9 @@ def _build_sensitivity_plot_themes() -> dict[str, int]:
 def set_window_title_unicode(title: str) -> int:
     """Set this process window title through SetWindowTextW on Windows."""
 
-    user32 = getattr(getattr(ctypes, "windll", None), "user32", None)
-    if user32 is None:
+    try:
+        user32 = load_system_dll("user32")
+    except OSError:
         return 0
 
     target_pid = os.getpid()

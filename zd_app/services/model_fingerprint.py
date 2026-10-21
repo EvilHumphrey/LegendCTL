@@ -15,6 +15,7 @@ from collections.abc import Iterable, Mapping
 from ctypes import wintypes as w
 from dataclasses import dataclass, field
 
+from zd_app.system_dll import load_system_dll
 from zd_app.i18n import t
 
 
@@ -110,7 +111,7 @@ class _Win32:
     @classmethod
     def kernel32(cls):
         if cls._kernel32 is None:
-            cls._kernel32 = c.windll.kernel32
+            cls._kernel32 = load_system_dll("kernel32")
             cls._kernel32.CreateFileW.argtypes = [
                 w.LPCWSTR,
                 w.DWORD,
@@ -133,7 +134,7 @@ class _Win32:
             # HidD_* exports live in hid.dll; "hidsdi" is only the SDK header
             # name (loading WinDLL("hidsdi") raises and silently blanked every
             # HidD-derived field on real hardware — caught by operator smoke).
-            cls._hidsdi = c.WinDLL("hid")
+            cls._hidsdi = load_system_dll("hid")
             # HidD_* return Windows BOOLEAN (1 byte), NOT BOOL (4 bytes). Binding
             # them as BOOL reads 3 extra return-register bytes whose upper bytes
             # are not guaranteed zero, so a TRUE could misread as FALSE. HidP_Get-
@@ -167,7 +168,7 @@ class _Win32:
     @classmethod
     def hid(cls):
         if cls._hid is None:
-            cls._hid = c.WinDLL("hid")
+            cls._hid = load_system_dll("hid")
             cls._hid.HidP_GetCaps.argtypes = [
                 c.c_void_p,
                 c.POINTER(_HIDP_CAPS),

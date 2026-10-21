@@ -16,13 +16,6 @@ from unittest import mock
 from zd_app.services import xinput
 
 
-class _RaisingWinDLL:
-    """Stand-in for ``ctypes.windll`` where every DLL attribute fails to load."""
-
-    def __getattr__(self, name):
-        raise OSError(f"{name}.dll not found")
-
-
 class XInputDllLoadFallbackTests(unittest.TestCase):
     def test_load_returns_none_when_windll_absent(self) -> None:
         """Off-Windows ``ctypes`` has no ``windll``; load degrades to None."""
@@ -31,9 +24,7 @@ class XInputDllLoadFallbackTests(unittest.TestCase):
             self.assertIsNone(xinput._load_xinput())
 
     def test_load_returns_none_when_all_dlls_absent(self) -> None:
-        fake_ctypes = mock.Mock()
-        fake_ctypes.windll = _RaisingWinDLL()
-        with mock.patch.object(xinput, "ctypes", fake_ctypes):
+        with mock.patch.object(xinput, "load_system_dll", side_effect=OSError("not found")):
             self.assertIsNone(xinput._load_xinput())
 
 

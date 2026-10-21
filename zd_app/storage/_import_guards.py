@@ -21,6 +21,8 @@ import struct
 from pathlib import Path
 from typing import Any
 
+from zd_app.system_dll import load_system_dll
+
 MAX_IMPORT_BYTES = 1 * 1024 * 1024
 MAX_IMPORT_JSON_DEPTH = 64
 MAX_DIRECTORY_ENTRIES = 4096
@@ -99,7 +101,7 @@ def _get_windows_drive_type(path: str) -> int | None:
     drive, _tail = ntpath.splitdrive(path)
     if len(drive) != 2 or drive[1] != ":":
         return None
-    return int(ctypes.windll.kernel32.GetDriveTypeW(f"{drive}\\"))  # type: ignore[attr-defined]
+    return int(load_system_dll("kernel32").GetDriveTypeW(f"{drive}\\"))  # type: ignore[attr-defined]
 
 
 def _open_windows_local_no_reparse(
@@ -151,7 +153,7 @@ def _open_windows_local_no_reparse(
     io_status = _IO_STATUS_BLOCK()
     native_handle = ctypes.c_void_p()
 
-    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)  # type: ignore[attr-defined]
+    ntdll = load_system_dll("ntdll", use_last_error=True)  # type: ignore[attr-defined]
     nt_create_file = ntdll.NtCreateFile
     nt_create_file.argtypes = [
         ctypes.POINTER(ctypes.c_void_p),
@@ -219,7 +221,7 @@ def _read_windows_local_no_reparse(
             int(native_handle.value), os.O_RDONLY | os.O_BINARY
         )
     except BaseException:
-        ctypes.windll.kernel32.CloseHandle(native_handle)  # type: ignore[attr-defined]
+        load_system_dll("kernel32").CloseHandle(native_handle)  # type: ignore[attr-defined]
         raise
     try:
         handle = os.fdopen(descriptor, "rb")
@@ -248,7 +250,7 @@ def _query_windows_directory_names(
     https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_names_information
     """
 
-    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)  # type: ignore[attr-defined]
+    ntdll = load_system_dll("ntdll", use_last_error=True)  # type: ignore[attr-defined]
     query = ntdll.NtQueryDirectoryFile
     query.argtypes = [
         ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
@@ -332,7 +334,7 @@ def list_guarded_directory(
         try:
             names = _query_windows_directory_names(native_handle, max_entries)
         finally:
-            ctypes.windll.kernel32.CloseHandle(native_handle)  # type: ignore[attr-defined]
+            load_system_dll("kernel32").CloseHandle(native_handle)  # type: ignore[attr-defined]
     else:
         names = _list_posix_directory_names(checked_path, max_entries)
     return [Path(checked_path) / name for name in names]

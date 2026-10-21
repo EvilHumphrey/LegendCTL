@@ -34,6 +34,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional
 
+from zd_app.system_dll import load_system_dll
+
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +196,7 @@ class _Win32:
     @classmethod
     def kernel32(cls):
         if cls._kernel32 is None:
-            cls._kernel32 = c.windll.kernel32
+            cls._kernel32 = load_system_dll("kernel32")
             cls._kernel32.CreateFileW.argtypes = [
                 w.LPCWSTR, w.DWORD, w.DWORD, c.c_void_p, w.DWORD, w.DWORD, w.HANDLE
             ]
@@ -248,7 +250,7 @@ class _Win32:
             # Use a private DLL wrapper so our XUSB-class GUID argtypes
             # don't clash with hidden_hid_transport's HID-class argtypes
             # on a shared setupapi handle (a defensive private-wrapper pattern).
-            cls._setupapi = c.WinDLL("setupapi")
+            cls._setupapi = load_system_dll("setupapi")
             cls._setupapi.SetupDiGetClassDevsW.argtypes = [
                 c.POINTER(_GUID), w.LPCWSTR, w.HWND, w.DWORD,
             ]

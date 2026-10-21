@@ -32,6 +32,8 @@ from ctypes import wintypes as w
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
+from zd_app.system_dll import load_system_dll
+
 try:
     import hid
 except ModuleNotFoundError:  # pragma: no cover - runtime-only dependency on Windows
@@ -120,7 +122,7 @@ OPEN_MODES = {
     "write_only": GENERIC_WRITE,
 }
 
-kernel32 = c.windll.kernel32
+kernel32 = load_system_dll("kernel32")
 CreateFileW = kernel32.CreateFileW
 CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, c.c_void_p, w.DWORD, w.DWORD, w.HANDLE]
 CreateFileW.restype = w.HANDLE

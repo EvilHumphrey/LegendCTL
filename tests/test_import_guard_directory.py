@@ -177,7 +177,7 @@ class DirectoryQueryContractTests(unittest.TestCase):
 
         native_query = Mock(side_effect=query)
         with patch.object(
-            ctypes, "WinDLL", return_value=SimpleNamespace(NtQueryDirectoryFile=native_query)
+            guards, "load_system_dll", return_value=SimpleNamespace(NtQueryDirectoryFile=native_query)
         ):
             return guards._query_windows_directory_names(ctypes.c_void_p(1), max_entries)
 
