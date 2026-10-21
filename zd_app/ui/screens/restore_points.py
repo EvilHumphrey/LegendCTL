@@ -569,6 +569,19 @@ def _build_detail(shell, service, state: RestorePointsScreenState) -> None:
     dpg.add_text(rp.created_at, color=shell.COLORS["muted"])
     dpg.add_spacer(height=SPACE_MD)
 
+    # Explain an expired confirmation before the detail cards push recovery
+    # instructions below the fold.
+    if state.status_text:
+        dpg.add_text(
+            state.status_text,
+            tag=TAG_STATUS_TEXT,
+            color=shell.COLORS["muted"]
+            if state.status_kind == "info"
+            else shell.COLORS["warn"],
+            wrap=900,
+        )
+        dpg.add_spacer(height=SPACE_MD)
+
     # Claim-boundary paragraph at top — the "Detail view" design.
     dpg.add_text(CLAIM_BOUNDARY_PARAGRAPH, wrap=900)
     dpg.add_spacer(height=SPACE_LG)
@@ -624,17 +637,6 @@ def _build_detail(shell, service, state: RestorePointsScreenState) -> None:
             tag=TAG_DETAIL_RESTORE_BUTTON,
             width=140,
             callback=lambda: _on_open_confirm(shell, rp.id),
-        )
-
-    if state.status_text:
-        dpg.add_spacer(height=SPACE_MD)
-        dpg.add_text(
-            state.status_text,
-            tag=TAG_STATUS_TEXT,
-            color=shell.COLORS["muted"]
-            if state.status_kind == "info"
-            else shell.COLORS["warn"],
-            wrap=900,
         )
 
 

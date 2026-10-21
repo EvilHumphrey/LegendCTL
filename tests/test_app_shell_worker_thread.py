@@ -695,6 +695,7 @@ class SyncDefaultBehaviorTests(unittest.TestCase):
         service = _StubRestoreService()
         shell = _make_shell(MagicMock(), restore_point_service=service)
         shell.restore_points_screen_state = _restore_screen_state()
+        prepared = shell.restore_points_screen_state.prepared_restore
 
         _capture_widget_state(lambda: rp_screen._execute_restore(shell))
 
@@ -702,7 +703,9 @@ class SyncDefaultBehaviorTests(unittest.TestCase):
         self.assertEqual(state.view, rp_screen.VIEW_RESULT)
         self.assertIs(state.result, service.result)
         self.assertEqual(service.restore_calls, 1)
-        self.assertIs(service.last_prepared, state.prepared_restore)
+        self.assertIs(service.last_prepared, prepared)
+        self.assertIsNone(state.prepared_restore)
+        self.assertFalse(state.identity_unknown_acknowledged)
         self.assertFalse(shell._hid_job_in_flight)
 
     def test_restore_failure_runs_inline_to_list_view(self) -> None:
