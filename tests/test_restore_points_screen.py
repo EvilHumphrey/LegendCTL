@@ -269,12 +269,13 @@ class _FakeService:
         self.calls.append(("list_with_skipped", (), {}))
         return list(self._valid), list(self._skipped)
 
-    def restore(self, prepared: PreparedRestore, *, acknowledge_write_only_paddles=False, presence_guard=None):
+    def restore(self, prepared: PreparedRestore, *, acknowledge_identity_unknown=False, acknowledge_write_only_paddles=False, presence_guard=None):
         self.calls.append(
             (
                 "restore",
                 (prepared.restore_point_id,),
                 {
+                    "acknowledge_identity_unknown": acknowledge_identity_unknown,
                     "acknowledge_write_only_paddles": (
                         acknowledge_write_only_paddles
                     )
@@ -348,6 +349,18 @@ def _shell_with(
         },
         rebuild_current_screen=MagicMock(),
     )
+
+
+def _acknowledge_identity(shell) -> None:
+    """Fixture: explicitly check the reviewed confirmation before its deferred job."""
+    state = shell.restore_points_screen_state
+    previous_view = state.view
+    state.view = screen.VIEW_CONFIRM
+    screen._on_identity_ack_changed(
+        shell, True, state.prepared_restore,
+        (state.presence_key, state.presence_generation),
+    )
+    state.view = previous_view
 
 
 class _FakeContextManager:
@@ -802,11 +815,173 @@ class ConfirmViewTests(unittest.TestCase):
         self.assertIn(screen.TAG_CONFIRM_VIEW_BUTTON, tags)
         self.assertIn(screen.TAG_CONFIRM_CANCEL_BUTTON, tags)
 
+    def test_identity_warning_is_unchecked_and_blocks_callback_and_direct_execution(self):
+        for invalid in (False, None, "true", "false", 1, 0, object()):
+            with self.subTest(ack=repr(invalid)):
+                rp = _rp()
+                service = _FakeService(valid=[rp])
+                ps = self._open_confirm(service, rp.id)
+                try:
+                    state = ps.shell.restore_points_screen_state
+                    checkbox = next(x for x in ps.checkboxes if x.get("tag") == screen.TAG_CONFIRM_IDENTITY_ACK)
+                    button = next(x for x in ps.buttons if x.get("tag") == screen.TAG_CONFIRM_RESTORE_BUTTON)
+                    self.assertFalse(checkbox["default_value"])
+                    self.assertFalse(button["enabled"])
+                    self.assertIn("cannot confirm", " ".join(ps.text_strings()))
+                    self.assertIn("connected compatible controller", checkbox["label"])
+                    checkbox["callback"](screen.TAG_CONFIRM_IDENTITY_ACK, invalid, None)
+                    screen._on_confirm_restore(ps.shell)
+                    self.assertEqual(state.view, screen.VIEW_CONFIRM)
+                    self.assertEqual(state.status_text, i18n.t("restore_points.confirm.identity_unknown_ack_required"))
+                    state.view = screen.VIEW_IN_PROGRESS
+                    screen._execute_restore(ps.shell)
+                    self.assertEqual(state.view, screen.VIEW_CONFIRM)
+                    self.assertEqual([c for c in service.calls if c[0] == "restore"], [])
+                finally:
+                    ps.__exit__(None, None, None)
+
+    def test_acknowledgement_survives_only_same_confirmation_redraw(self):
+        service = _FakeService(valid=[_rp()])
+        ps = self._open_confirm(service, _rp().id)
+        try:
+            _acknowledge_identity(ps.shell)
+            state = ps.shell.restore_points_screen_state
+            prepared = state.prepared_restore
+            ps.build()
+            self.assertIs(state.prepared_restore, prepared)
+            self.assertTrue(state.identity_unknown_acknowledged)
+            self.assertTrue(next(x for x in reversed(ps.buttons) if x.get("tag") == screen.TAG_CONFIRM_RESTORE_BUTTON)["enabled"])
+            state.prepared_restore = replace(prepared)
+            ps.build()
+            self.assertFalse(state.identity_unknown_acknowledged)
+            self.assertFalse(next(x for x in reversed(ps.buttons) if x.get("tag") == screen.TAG_CONFIRM_RESTORE_BUTTON)["enabled"])
+        finally:
+            ps.__exit__(None, None, None)
+
+    def test_identity_and_paddle_checkboxes_are_independent_and_unchecking_disables_restore(self):
+        rp = _rp_with_paddle()
+        service = _FakeService(valid=[rp])
+        ps = self._open_confirm(service, rp.id)
+        try:
+            state = ps.shell.restore_points_screen_state
+            identity = next(x for x in ps.checkboxes if x.get("tag") == screen.TAG_CONFIRM_IDENTITY_ACK)
+            paddle = next(x for x in ps.checkboxes if x.get("tag") == screen.TAG_CONFIRM_PADDLE_ACK)
+            identity["callback"]("unused", True, None)
+            self.assertTrue(state.identity_unknown_acknowledged)
+            self.assertFalse(state.write_only_paddles_acknowledged)
+            paddle["callback"]("unused", True, None)
+            ps.build()
+            self.assertTrue(next(x for x in reversed(ps.buttons) if x.get("tag") == screen.TAG_CONFIRM_RESTORE_BUTTON)["enabled"])
+            identity["callback"]("unused", False, None)
+            ps.build()
+            self.assertFalse(state.identity_unknown_acknowledged)
+            self.assertTrue(state.write_only_paddles_acknowledged)
+            self.assertFalse(next(x for x in reversed(ps.buttons) if x.get("tag") == screen.TAG_CONFIRM_RESTORE_BUTTON)["enabled"])
+        finally:
+            ps.__exit__(None, None, None)
+
+    def test_old_checkbox_callbacks_cannot_acknowledge_replacement_payload(self):
+        rp = _rp_with_paddle()
+        service = _FakeService(valid=[rp])
+        ps = self._open_confirm(service, rp.id)
+        try:
+            state = ps.shell.restore_points_screen_state
+            old_callbacks = [x["callback"] for x in ps.checkboxes if x.get("tag") in (screen.TAG_CONFIRM_IDENTITY_ACK, screen.TAG_CONFIRM_PADDLE_ACK)]
+            self.assertEqual(len(old_callbacks), 2)
+            state.prepared_restore = replace(state.prepared_restore)
+            for callback in old_callbacks:
+                callback("unused", True, None)
+            self.assertFalse(state.identity_unknown_acknowledged)
+            self.assertFalse(state.write_only_paddles_acknowledged)
+        finally:
+            ps.__exit__(None, None, None)
+
+    def test_presence_generation_change_clears_identity_acknowledgement(self):
+        service = _FakeService(valid=[_rp()])
+        ps = self._open_confirm(service, _rp().id)
+        try:
+            _acknowledge_identity(ps.shell)
+            state = ps.shell.restore_points_screen_state
+            state.presence_generation = 1
+            screen._on_confirm_restore(ps.shell)
+            self.assertFalse(state.identity_unknown_acknowledged)
+            self.assertEqual(state.view, screen.VIEW_CONFIRM)
+            self.assertEqual([c for c in service.calls if c[0] == "restore"], [])
+        finally:
+            ps.__exit__(None, None, None)
+
+    def test_cancel_clears_acknowledgement_and_deferred_callback_cannot_restore(self):
+        service = _FakeService(valid=[_rp()])
+        ps = self._open_confirm(service, _rp().id)
+        try:
+            _acknowledge_identity(ps.shell)
+            screen._on_confirm_restore(ps.shell)
+            state = ps.shell.restore_points_screen_state
+            self.assertEqual(state.view, screen.VIEW_IN_PROGRESS)
+            screen._on_back_to_detail(ps.shell)
+            screen._execute_restore(ps.shell)
+            self.assertFalse(state.identity_unknown_acknowledged)
+            self.assertIsNone(state.prepared_restore)
+            self.assertEqual(state.view, screen.VIEW_DETAIL)
+            self.assertEqual([c for c in service.calls if c[0] == "restore"], [])
+        finally:
+            ps.__exit__(None, None, None)
+
+    def test_stale_session_withdraws_both_acknowledgements_without_repreparing(self):
+        class SessionService(_FakeService):
+            current = True
+
+            def prepared_session_matches_cached(self, prepared):
+                return self.current
+
+        rp = _rp_with_paddle()
+        service = SessionService(valid=[rp])
+        ps = self._open_confirm(service, rp.id)
+        try:
+            _acknowledge_identity(ps.shell)
+            state = ps.shell.restore_points_screen_state
+            screen._on_paddle_ack_changed(ps.shell, True, state.prepared_restore, (state.presence_key, state.presence_generation))
+            before = len([c for c in service.calls if c[0] == "prepare_restore"])
+            service.current = False
+            self.assertTrue(screen.invalidate_if_session_changed(ps.shell))
+            self.assertFalse(screen.invalidate_if_session_changed(ps.shell))
+            self.assertIsNone(state.prepared_restore)
+            self.assertFalse(state.identity_unknown_acknowledged)
+            self.assertFalse(state.write_only_paddles_acknowledged)
+            self.assertEqual(state.view, screen.VIEW_DETAIL)
+            self.assertEqual(state.status_text, i18n.t("restore_points.confirm.connection_expired"))
+            ps.build()
+            self.assertIn(i18n.t("restore_points.confirm.connection_expired"), ps.text_strings())
+            self.assertEqual(len([c for c in service.calls if c[0] == "prepare_restore"]), before)
+        finally:
+            ps.__exit__(None, None, None)
+
+    def test_session_expiry_while_preparing_returns_to_detail_with_read_recovery(self):
+        from zd_app.services.restore_point_service import ControllerPresenceChangedError
+
+        rp = _rp()
+        service = _FakeService(
+            valid=[rp],
+            preview_raises=ControllerPresenceChangedError(writes_may_have_occurred=False),
+        )
+        ps = self._open_confirm(service, rp.id)
+        try:
+            state = ps.shell.restore_points_screen_state
+            self.assertEqual(state.view, screen.VIEW_DETAIL)
+            self.assertIsNone(state.prepared_restore)
+            self.assertFalse(state.identity_unknown_acknowledged)
+            self.assertFalse(state.write_only_paddles_acknowledged)
+            self.assertIn(i18n.t("restore_points.confirm.connection_expired"), ps.text_strings())
+            self.assertNotIn(screen.TAG_CONFIRM_RESTORE_BUTTON, ps.button_tags())
+        finally:
+            ps.__exit__(None, None, None)
+
     def test_confirm_restore_button_transitions_to_in_progress(self) -> None:
         rp = _rp()
         service = _FakeService(valid=[rp])
         ps = self._open_confirm(service, rp.id)
         try:
+            _acknowledge_identity(ps.shell)
             for kw in ps.buttons:
                 if kw.get("tag") == screen.TAG_CONFIRM_RESTORE_BUTTON:
                     kw["callback"]()
@@ -843,6 +1018,7 @@ class ConfirmViewTests(unittest.TestCase):
         self.assertFalse(restore_button["enabled"])
         self.assertIn("cannot be read back or verified", acknowledgement["label"])
 
+        _acknowledge_identity(ps.shell)
         screen._on_confirm_restore(ps.shell)
         state = ps.shell.restore_points_screen_state
         self.assertEqual(state.view, screen.VIEW_CONFIRM)
@@ -851,7 +1027,7 @@ class ConfirmViewTests(unittest.TestCase):
             i18n.t("restore_points.confirm.paddle_ack_required"),
         )
 
-        screen._on_paddle_ack_changed(ps.shell, True)
+        screen._on_paddle_ack_changed(ps.shell, True, state.prepared_restore, (state.presence_key, state.presence_generation))
         screen._on_confirm_restore(ps.shell)
         self.assertEqual(state.view, screen.VIEW_IN_PROGRESS)
 
@@ -861,6 +1037,7 @@ class ConfirmViewTests(unittest.TestCase):
         service = _FakeService(valid=[first, second])
         ps = self._open_confirm(service, first.id)
         try:
+            _acknowledge_identity(ps.shell)
             screen._on_confirm_restore(ps.shell)
             state = ps.shell.restore_points_screen_state
             self.assertEqual(state.view, screen.VIEW_IN_PROGRESS)
@@ -1078,6 +1255,7 @@ class InProgressViewTests(unittest.TestCase):
         service = _FakeService(valid=[_rp(id=rp_id)])
         state.prepared_restore = service.prepare_restore(rp_id)
         shell = _shell_with(service, screen_state=state)
+        _acknowledge_identity(shell)
         screen._execute_restore(shell)
         self.assertEqual(shell.restore_points_screen_state.view, screen.VIEW_RESULT)
         self.assertIsNotNone(shell.restore_points_screen_state.result)
@@ -1095,6 +1273,7 @@ class InProgressViewTests(unittest.TestCase):
         state.prepared_restore = service.prepare_restore(rp_id)
         shell = _shell_with(service, screen_state=state)
         shell._consent_pending_write_allowed_or_refuse = MagicMock(return_value=False)
+        _acknowledge_identity(shell)
 
         screen._execute_restore(shell)
 
@@ -1121,6 +1300,7 @@ class InProgressViewTests(unittest.TestCase):
         )
         state.prepared_restore = service.prepare_restore(rp_id)
         shell = _shell_with(service, screen_state=state)
+        _acknowledge_identity(shell)
         screen._execute_restore(shell)
         self.assertEqual(shell.restore_points_screen_state.view, screen.VIEW_LIST)
         self.assertIn("HID timeout", shell.restore_points_screen_state.status_text)

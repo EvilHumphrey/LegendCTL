@@ -31,7 +31,7 @@ from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from tests.test_restore_points_screen import _rp as _restore_point_fixture
+from tests.test_restore_points_screen import _acknowledge_identity, _rp as _restore_point_fixture
 from zd_app.storage.restore_point_models import (
     PreparedRestore,
     RestoreFieldOutcome,
@@ -92,6 +92,10 @@ def _restore_screen_state(
         view=view,
         selected_rp_id=prepared.restore_point_id,
         prepared_restore=prepared,
+        # This fixture represents a confirmation the user explicitly checked.
+        identity_unknown_acknowledged=True,
+        _identity_ack_prepared=prepared,
+        _identity_ack_presence=(None, None),
     )
 
 
@@ -557,16 +561,21 @@ class _StubRestoreService:
         self.restore_calls = 0
         self.last_prepared = None
         self.last_acknowledgement = None
+        self.last_identity_acknowledgement = None
 
     def restore(
         self,
         prepared: PreparedRestore,
         *,
+        acknowledge_identity_unknown: bool = False,
         acknowledge_write_only_paddles: bool = False,
         presence_guard=None,
     ):
         if not isinstance(prepared, PreparedRestore):
             raise TypeError("test restore stub requires PreparedRestore")
+        if acknowledge_identity_unknown is not True:
+            raise PermissionError("test restore requires identity acknowledgement")
+        self.last_identity_acknowledgement = acknowledge_identity_unknown
         self.restore_calls += 1
         self.last_prepared = prepared
         self.last_acknowledgement = acknowledge_write_only_paddles
@@ -588,6 +597,10 @@ class _TokenAwareStubRestoreService(RestorePointService):
         self.started = threading.Event()
         self.release = threading.Event()
         self.result = _verified_restore_result()
+
+    def prepared_session_matches_cached(self, prepared):
+        # This shell-presence fixture has no SettingsService or real session.
+        return True
 
     def restore(self, rp_id, *, presence_guard=None, **_kwargs):
         if self.writes_started:
@@ -682,6 +695,7 @@ class SyncDefaultBehaviorTests(unittest.TestCase):
         service = _StubRestoreService()
         shell = _make_shell(MagicMock(), restore_point_service=service)
         shell.restore_points_screen_state = _restore_screen_state()
+        prepared = shell.restore_points_screen_state.prepared_restore
 
         _capture_widget_state(lambda: rp_screen._execute_restore(shell))
 
@@ -689,7 +703,9 @@ class SyncDefaultBehaviorTests(unittest.TestCase):
         self.assertEqual(state.view, rp_screen.VIEW_RESULT)
         self.assertIs(state.result, service.result)
         self.assertEqual(service.restore_calls, 1)
-        self.assertIs(service.last_prepared, state.prepared_restore)
+        self.assertIs(service.last_prepared, prepared)
+        self.assertIsNone(state.prepared_restore)
+        self.assertFalse(state.identity_unknown_acknowledged)
         self.assertFalse(shell._hid_job_in_flight)
 
     def test_restore_failure_runs_inline_to_list_view(self) -> None:
@@ -793,11 +809,7 @@ class ThreadedExecutorLifecycleTests(unittest.TestCase):
             restore_point_service=service,
         )
         _set_connected_identity(shell, "zd-unit-a")
-        shell.restore_points_screen_state = rp_screen.RestorePointsScreenState(
-            view=rp_screen.VIEW_IN_PROGRESS,
-            selected_rp_id=_RESTORE_POINT_ID,
-            prepared_restore=_prepared_restore(),
-        )
+        shell.restore_points_screen_state = _restore_screen_state()
 
         rp_screen._execute_restore(shell)
         self.assertTrue(service.started.wait(_GATE_TIMEOUT_S))
@@ -808,14 +820,15 @@ class ThreadedExecutorLifecycleTests(unittest.TestCase):
         _capture_widget_state(shell._drain_hid_job_completions)
 
         state = shell.restore_points_screen_state
-        self.assertEqual(state.view, rp_screen.VIEW_CONFIRM)
+        self.assertEqual(state.view, rp_screen.VIEW_DETAIL)
         self.assertIsNone(state.result)
         expected = i18n.t(
             "apply.device_changed_after_write"
             if writes_started
             else "apply.device_changed"
         )
-        self.assertEqual(state.status_text, expected)
+        recovery = i18n.t("restore_points.confirm.connection_expired")
+        self.assertEqual(state.status_text, expected + "\n" + recovery if writes_started else recovery)
         recorded = shell.device_service.record_apply_result.call_args
         self.assertIs(recorded.args[0], False)
         self.assertEqual(recorded.args[1], expected)
@@ -1121,6 +1134,7 @@ class ApplyOriginPresenceBindingTests(unittest.TestCase):
             presence_key=origin_key,
             presence_generation=origin_generation,
         )
+        _acknowledge_identity(shell)
 
         shell.device_service.state.stable_identifier = "zd-unit-b"
         shell._observe_controller_presence()
@@ -1128,8 +1142,8 @@ class ApplyOriginPresenceBindingTests(unittest.TestCase):
 
         self.assertEqual(restore.restore_calls, 0)
         state = shell.restore_points_screen_state
-        self.assertEqual(state.view, rp_screen.VIEW_CONFIRM)
-        self.assertEqual(state.status_text, i18n.t("apply.device_changed"))
+        self.assertEqual(state.view, rp_screen.VIEW_DETAIL)
+        self.assertEqual(state.status_text, i18n.t("restore_points.confirm.connection_expired"))
 
     def test_queued_apply_swap_before_worker_start_writes_nothing(self) -> None:
         snapshot = empty_snapshot(polling_rate=PollingRate.HZ_8000)

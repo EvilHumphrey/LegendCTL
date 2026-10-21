@@ -105,6 +105,7 @@ TAG_DETAIL_BACK_BUTTON = "restore_points_detail_back_button"
 TAG_DETAIL_EXPORT_BUTTON = "restore_points_detail_export_button"
 TAG_DETAIL_RESTORE_BUTTON = "restore_points_detail_restore_button"
 TAG_CONFIRM_RESTORE_BUTTON = "restore_points_confirm_restore_button"
+TAG_CONFIRM_IDENTITY_ACK = "restore_points_confirm_identity_ack"
 TAG_CONFIRM_PADDLE_ACK = "restore_points_confirm_paddle_ack"
 TAG_CONFIRM_CONTROLS_THEME = "restore_points_confirm_controls_theme"
 TAG_CONFIRM_VIEW_BUTTON = "restore_points_confirm_view_button"
@@ -184,6 +185,9 @@ class RestorePointsScreenState:
     status_kind: str = "info"
     prepared_restore: Optional[PreparedRestore] = None
     write_only_paddles_acknowledged: bool = False
+    identity_unknown_acknowledged: bool = False
+    _identity_ack_prepared: Optional[PreparedRestore] = field(default=None, repr=False)
+    _identity_ack_presence: object = field(default=None, repr=False)
     # The confirm/preview belongs to the controller that opened it. A visible
     # A preview must never recapture a fresh B token when Restore is clicked.
     presence_key: Optional[tuple[str, str, str]] = None
@@ -565,6 +569,19 @@ def _build_detail(shell, service, state: RestorePointsScreenState) -> None:
     dpg.add_text(rp.created_at, color=shell.COLORS["muted"])
     dpg.add_spacer(height=SPACE_MD)
 
+    # Explain an expired confirmation before the detail cards push recovery
+    # instructions below the fold.
+    if state.status_text:
+        dpg.add_text(
+            state.status_text,
+            tag=TAG_STATUS_TEXT,
+            color=shell.COLORS["muted"]
+            if state.status_kind == "info"
+            else shell.COLORS["warn"],
+            wrap=900,
+        )
+        dpg.add_spacer(height=SPACE_MD)
+
     # Claim-boundary paragraph at top — the "Detail view" design.
     dpg.add_text(CLAIM_BOUNDARY_PARAGRAPH, wrap=900)
     dpg.add_spacer(height=SPACE_LG)
@@ -620,17 +637,6 @@ def _build_detail(shell, service, state: RestorePointsScreenState) -> None:
             tag=TAG_DETAIL_RESTORE_BUTTON,
             width=140,
             callback=lambda: _on_open_confirm(shell, rp.id),
-        )
-
-    if state.status_text:
-        dpg.add_spacer(height=SPACE_MD)
-        dpg.add_text(
-            state.status_text,
-            tag=TAG_STATUS_TEXT,
-            color=shell.COLORS["muted"]
-            if state.status_kind == "info"
-            else shell.COLORS["warn"],
-            wrap=900,
         )
 
 
@@ -716,7 +722,30 @@ def _bind_confirm_control_theme(item: str) -> None:
     dpg.bind_item_theme(item, TAG_CONFIRM_CONTROLS_THEME)
 
 
+def invalidate_if_session_changed(shell) -> bool:
+    """Withdraw a confirmation when its cached endpoint session has expired.
+
+    This display-only check never admits a session or performs device I/O.
+    Reopening Restore is required to read a new preview and acknowledge it.
+    """
+
+    state = getattr(shell, "restore_points_screen_state", None)
+    if state is None or state.view != VIEW_CONFIRM or state.prepared_restore is None:
+        return False
+    service = getattr(shell, "restore_point_service", None)
+    if _prepared_session_matches_cached(service, state.prepared_restore):
+        return False
+    _invalidate_prepared_restore(state)
+    state.view = VIEW_DETAIL
+    state.status_text = t("restore_points.confirm.connection_expired")
+    state.status_kind = "warn"
+    return True
+
+
 def _build_confirm(shell, service, state: RestorePointsScreenState) -> None:
+    if invalidate_if_session_changed(shell):
+        _build_detail(shell, service, state)
+        return
     token_check = getattr(shell, "_controller_presence_token_is_current", None)
     preview_token_current = (
         state.presence_key is None
@@ -726,7 +755,13 @@ def _build_confirm(shell, service, state: RestorePointsScreenState) -> None:
     )
     if not preview_token_current:
         _invalidate_prepared_restore(state)
+        state.view = VIEW_DETAIL
+        state.status_text = t("restore_points.confirm.connection_expired")
+        state.status_kind = "warn"
+        _build_detail(shell, service, state)
+        return
     prepared = state.prepared_restore
+    _identity_acknowledgement_is_current(state)
     if (
         prepared is None
         and state.selected_rp_id is not None
@@ -735,13 +770,20 @@ def _build_confirm(shell, service, state: RestorePointsScreenState) -> None:
     ):
         try:
             prepared = service.prepare_restore(state.selected_rp_id)
+        except ControllerPresenceChangedError:
+            _invalidate_prepared_restore(state)
+            state.view = VIEW_DETAIL
+            state.status_text = t("restore_points.confirm.connection_expired")
+            state.status_kind = "warn"
+            _build_detail(shell, service, state)
+            return
         except Exception:  # noqa: BLE001
             logger.exception("Preparing restore confirmation failed")
             state.status_text = t("restore_points.confirm.prepare_failed")
             state.status_kind = "warn"
         else:
+            _invalidate_prepared_restore(state)
             state.prepared_restore = prepared
-            state.write_only_paddles_acknowledged = False
 
     rp: Optional[RestorePoint] = None
     if prepared is not None:
@@ -785,6 +827,18 @@ def _build_confirm(shell, service, state: RestorePointsScreenState) -> None:
             shell, preview,
             has_write_only_writes=bool(prepared.write_only_paddle_slots),
         )
+    dpg.add_spacer(height=SPACE_MD)
+    dpg.add_text(t("restore_points.confirm.identity_unknown_warning"), wrap=900)
+    dpg.add_checkbox(
+        label=t("restore_points.confirm.identity_unknown_ack"),
+        tag=TAG_CONFIRM_IDENTITY_ACK,
+        enabled=prepared is not None,
+        default_value=state.identity_unknown_acknowledged,
+        callback=lambda _sender, value, _user_data=None, *, prepared=prepared, token=(state.presence_key, state.presence_generation): (
+            _on_identity_ack_changed(shell, value, prepared, token)
+        ),
+    )
+    _bind_confirm_control_theme(TAG_CONFIRM_IDENTITY_ACK)
     if prepared is not None and prepared.write_only_paddle_slots:
         dpg.add_spacer(height=SPACE_MD)
         _build_write_only_paddle_acknowledgement(shell, state, prepared, rp)
@@ -802,9 +856,10 @@ def _build_confirm(shell, service, state: RestorePointsScreenState) -> None:
             callback=lambda: _on_confirm_restore(shell),
             enabled=(
                 prepared is not None
+                and _identity_acknowledgement_is_current(state)
                 and (
                     not prepared.write_only_paddle_slots
-                    or state.write_only_paddles_acknowledged
+                    or state.write_only_paddles_acknowledged is True
                 )
             ),
         )
@@ -904,7 +959,9 @@ def _build_write_only_paddle_acknowledgement(
         label=t("restore_points.confirm.paddle_ack"),
         tag=TAG_CONFIRM_PADDLE_ACK,
         default_value=state.write_only_paddles_acknowledged,
-        callback=lambda _sender, value: _on_paddle_ack_changed(shell, value is True),
+        callback=lambda _sender, value, _user_data=None, *, prepared=prepared, token=(state.presence_key, state.presence_generation): (
+            _on_paddle_ack_changed(shell, value, prepared, token)
+        ),
     )
     _bind_confirm_control_theme(TAG_CONFIRM_PADDLE_ACK)
 
@@ -1160,10 +1217,12 @@ def _on_confirm_restore(shell) -> None:
         and callable(token_check)
         and not token_check(state.presence_key, state.presence_generation)
     ):
+        _invalidate_prepared_restore(state)
         discard = getattr(shell, "_discard_stale_controller_operation", None)
         if callable(discard):
             discard(state.presence_key, state.presence_generation)
-        state.status_text = t("apply.device_changed")
+        state.view = VIEW_DETAIL
+        state.status_text = t("restore_points.confirm.connection_expired")
         state.status_kind = "warn"
         shell.rebuild_current_screen()
         return
@@ -1190,6 +1249,14 @@ def _on_confirm_restore(shell) -> None:
         state.status_kind = "warn"
         shell.rebuild_current_screen()
         return
+    if invalidate_if_session_changed(shell):
+        shell.rebuild_current_screen()
+        return
+    if not _identity_acknowledgement_is_current(state):
+        state.status_text = t("restore_points.confirm.identity_unknown_ack_required")
+        state.status_kind = "warn"
+        shell.rebuild_current_screen()
+        return
     if (
         prepared is not None
         and prepared.write_only_paddle_slots
@@ -1205,8 +1272,32 @@ def _on_confirm_restore(shell) -> None:
     shell.rebuild_current_screen()
 
 
-def _on_paddle_ack_changed(shell, acknowledged: bool) -> None:
+def _on_identity_ack_changed(shell, acknowledged, prepared, presence_token) -> None:
     state = _ensure_state(shell)
+    if (
+        state.view != VIEW_CONFIRM
+        or prepared is None
+        or prepared is not state.prepared_restore
+        or presence_token != (state.presence_key, state.presence_generation)
+    ):
+        return
+    state.identity_unknown_acknowledged = acknowledged is True
+    state._identity_ack_prepared = prepared if acknowledged is True else None
+    state._identity_ack_presence = presence_token if acknowledged is True else None
+    state.status_text = ""
+    state.status_kind = "info"
+    shell.rebuild_current_screen()
+
+
+def _on_paddle_ack_changed(shell, acknowledged, prepared, presence_token) -> None:
+    state = _ensure_state(shell)
+    if (
+        state.view != VIEW_CONFIRM
+        or prepared is None
+        or prepared is not state.prepared_restore
+        or presence_token != (state.presence_key, state.presence_generation)
+    ):
+        return
     state.write_only_paddles_acknowledged = acknowledged is True
     state.status_text = ""
     state.status_kind = "info"
@@ -1229,6 +1320,8 @@ def _execute_restore(shell) -> None:
     """
 
     state = _ensure_state(shell)
+    if state.view != VIEW_IN_PROGRESS:
+        return
     service = getattr(shell, "restore_point_service", None)
     prepared = state.prepared_restore
     try:
@@ -1247,6 +1340,19 @@ def _execute_restore(shell) -> None:
         shell.rebuild_current_screen()
         return
     assert prepared is not None
+    if not _identity_acknowledgement_is_current(state):
+        state.view = VIEW_CONFIRM
+        state.status_text = t("restore_points.confirm.identity_unknown_ack_required")
+        state.status_kind = "warn"
+        shell.rebuild_current_screen()
+        return
+    if not _prepared_session_matches_cached(service, prepared):
+        _invalidate_prepared_restore(state)
+        state.view = VIEW_DETAIL
+        state.status_text = t("restore_points.confirm.connection_expired")
+        state.status_kind = "warn"
+        shell.rebuild_current_screen()
+        return
     if (
         prepared.write_only_paddle_slots
         and state.write_only_paddles_acknowledged is not True
@@ -1278,6 +1384,7 @@ def _execute_restore(shell) -> None:
         shell.rebuild_current_screen()
         return
 
+    identity_acknowledged = state.identity_unknown_acknowledged
     paddle_acknowledged = state.write_only_paddles_acknowledged
     presence_key = state.presence_key
     presence_generation = state.presence_generation
@@ -1294,29 +1401,40 @@ def _execute_restore(shell) -> None:
         and callable(token_check)
         and not token_check(presence_key, presence_generation)
     ):
+        _invalidate_prepared_restore(state)
         discard = getattr(shell, "_discard_stale_controller_operation", None)
         if callable(discard):
             discard(presence_key, presence_generation)
-        state.view = VIEW_CONFIRM
-        state.status_text = t("apply.device_changed")
+        state.view = VIEW_DETAIL
+        state.status_text = t("restore_points.confirm.connection_expired")
         state.status_kind = "warn"
         state.result = None
         shell.rebuild_current_screen()
         return
 
     def presence_guard() -> bool:
-        if presence_key is None or presence_generation is None:
-            return True
-        return token_check(presence_key, presence_generation)
+        return _prepared_session_matches_cached(service, prepared) and (
+            presence_key is None
+            or presence_generation is None
+            or token_check(presence_key, presence_generation)
+        )
 
     def job():
+        if (
+            state.view != VIEW_IN_PROGRESS
+            or state.prepared_restore is not prepared
+            or not _identity_acknowledgement_is_current(state)
+        ):
+            raise PermissionError("restore confirmation is no longer current")
         return service.restore(
             prepared,
+            acknowledge_identity_unknown=identity_acknowledged,
             acknowledge_write_only_paddles=paddle_acknowledged,
             presence_guard=presence_guard,
         )
 
     def finish_presence_changed(*, writes_may_have_occurred: bool) -> None:
+        _invalidate_prepared_restore(state)
         if presence_key is not None and presence_generation is not None:
             discard_name = (
                 "_discard_stale_controller_operation_after_write"
@@ -1326,11 +1444,12 @@ def _execute_restore(shell) -> None:
             discard = getattr(shell, discard_name, None)
             if callable(discard):
                 discard(presence_key, presence_generation)
-        state.view = VIEW_CONFIRM
-        state.status_text = t(
-            "apply.device_changed_after_write"
+        state.view = VIEW_DETAIL
+        recovery = t("restore_points.confirm.connection_expired")
+        state.status_text = (
+            t("apply.device_changed_after_write") + "\n" + recovery
             if writes_may_have_occurred
-            else "apply.device_changed"
+            else recovery
         )
         state.status_kind = "warn"
         state.result = None
@@ -1377,6 +1496,7 @@ def _execute_restore(shell) -> None:
         if not presence_guard():
             finish_presence_changed(writes_may_have_occurred=True)
             return
+        _invalidate_prepared_restore(state)
         _record_restore_footer_result(shell, outcome)
         state.view = VIEW_RESULT
         state.result = outcome
@@ -1663,9 +1783,31 @@ def _back_to_list(shell, *, status: str, status_kind: str) -> None:
     shell.rebuild_current_screen()
 
 
+def _prepared_session_matches_cached(service, prepared: PreparedRestore) -> bool:
+    check = getattr(type(service), "prepared_session_matches_cached", None)
+    return not callable(check) or check(service, prepared)
+
+
+def _identity_acknowledgement_is_current(state: RestorePointsScreenState) -> bool:
+    current = (
+        state.identity_unknown_acknowledged is True
+        and state.prepared_restore is not None
+        and state._identity_ack_prepared is state.prepared_restore
+        and state._identity_ack_presence == (state.presence_key, state.presence_generation)
+    )
+    if not current:
+        state.identity_unknown_acknowledged = False
+        state._identity_ack_prepared = None
+        state._identity_ack_presence = None
+    return current
+
+
 def _invalidate_prepared_restore(state: RestorePointsScreenState) -> None:
     state.prepared_restore = None
     state.write_only_paddles_acknowledged = False
+    state.identity_unknown_acknowledged = False
+    state._identity_ack_prepared = None
+    state._identity_ack_presence = None
 
 
 def _load_selected(service, state: RestorePointsScreenState) -> Optional[RestorePoint]:

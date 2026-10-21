@@ -38,6 +38,173 @@ _SECOND_PATH = (
 _SECOND_HANDLE = 0x7272
 
 
+class TestFreshEndpointContinuity(unittest.TestCase):
+    def assert_latched(self, service, rec) -> None:
+        self.assertTrue(service._identity_change_latched)
+        self.assertTrue(service.connection_requires_readmission)
+        self.assertIsNone(service.target_path)
+        rec.paths = [_FAKE_PATH]
+        self.assertIsNone(service.admit_read_batch())
+        self.assertIsNone(service.admit_write_operation())
+        service.stop()
+        self.assertFalse(service.connection_requires_readmission)
+        self.assertIsNotNone(service.admit_read_batch())
+
+    def test_cached_read_and_write_refuse_replacement_without_io_failure(self) -> None:
+        for read in (False, True):
+            with self.subTest(read=read):
+                rec = _Recorder()
+                service = _make_service(rec)
+                token = service.admit_read_batch() if read else service.admit_write_operation()
+                self.assertIsNotNone(token)
+                rec.events.clear()
+                rec.paths = [_SECOND_PATH]
+                if read:
+                    self.assertIsNone(service.get_polling_rate())
+                else:
+                    self.assertEqual(service.set_polling_rate(PollingRate.HZ_8000).outcome,
+                                     WriteOutcome.DEVICE_NOT_FOUND)
+                self.assertFalse(any(e[0] in ("write_file", "read_file") for e in rec.events))
+                self.assert_latched(service, rec)
+
+    def test_cached_admissions_reject_ambiguity_even_with_admitted_path_present(self) -> None:
+        for admit in ("admit_read_batch", "admit_write_operation"):
+            with self.subTest(admit=admit):
+                rec = _Recorder()
+                service = _make_service(rec)
+                self.assertIsNotNone(getattr(service, admit)())
+                rec.paths = [_FAKE_PATH, _SECOND_PATH]
+                self.assertIsNone(getattr(service, admit)())
+                self.assert_latched(service, rec)
+
+    def test_empty_or_failed_enumeration_invalidates_working_cached_handle(self) -> None:
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                rec = _Recorder()
+                service = _make_service(rec)
+                token = service.admit_write_operation()
+                rec.paths = []
+                if fail:
+                    def failed_enumeration():
+                        raise OSError("enumeration unavailable")
+                    service._enumerate_paths = failed_enumeration
+                self.assertFalse(service.session_admission_is_current(token))
+                service._enumerate_paths = rec.enumerate_paths
+                self.assert_latched(service, rec)
+
+    def test_same_unit_collection_reorder_and_case_keep_exact_admitted_endpoint(self) -> None:
+        collection = _FAKE_PATH.replace("mi_02", "mi_02&col02")
+        rec = _Recorder(paths=[_FAKE_PATH, collection])
+        service = _make_service(rec)
+        token = service.admit_read_batch()
+        rec.paths = [collection, _FAKE_PATH.upper()]
+        self.assertTrue(service.session_admission_is_current(token))
+        result = service.run_session_operation(
+            token, lambda: service.set_polling_rate(PollingRate.HZ_8000),
+        )
+        self.assertEqual(result.outcome, WriteOutcome.OK)
+        self.assertIn(("open_write_handle", _FAKE_PATH), rec.events)
+        self.assertFalse(service._identity_change_latched)
+
+    def test_collection_disappearance_refuses_another_collection_of_same_unit(self) -> None:
+        rec = _Recorder()
+        service = _make_service(rec)
+        token = service.admit_read_batch()
+        rec.paths = [_FAKE_PATH.replace("mi_02", "mi_02&col02")]
+        self.assertFalse(service.session_admission_is_current(token))
+        self.assert_latched(service, rec)
+
+    def test_pre_io_lease_rechecks_after_successful_admission(self) -> None:
+        for read in (False, True):
+            with self.subTest(read=read):
+                rec = _Recorder()
+                service = _make_service(rec)
+                admission = (service._ensure_read_write_admission() if read
+                             else service._ensure_handle().admission)
+                rec.events.clear()
+                rec.paths = [_FAKE_PATH, _SECOND_PATH]
+                self.assertFalse(service._acquire_io_lease(admission))
+                self.assertFalse(any(e[0] in ("write_file", "read_file") for e in rec.events))
+                self.assert_latched(service, rec)
+
+    def test_stale_same_path_and_foreign_service_tokens_cannot_admit(self) -> None:
+        rec = _Recorder()
+        service = _make_service(rec)
+        stale = service.admit_read_batch()
+        service.stop()
+        current = service.admit_read_batch()
+        foreign = _make_service(_Recorder()).admit_read_batch()
+        for token in (stale, foreign, None):
+            with self.subTest(token=token):
+                self.assertFalse(service.session_admission_matches_cached(token))
+                before = len(rec.events)
+                result = service.run_session_operation(token, lambda: (
+                    service.admit_read_batch(), service.admit_write_operation(),
+                    service.get_polling_rate(),
+                ))
+                self.assertEqual(result, (None, None, None))
+                self.assertEqual(len(rec.events), before)
+        self.assertTrue(service.session_admission_matches_cached(current))
+
+    def test_bound_read_and_nested_write_cannot_rebind_after_transition(self) -> None:
+        rec = _Recorder()
+        service = _make_service(rec)
+        original = service.admit_read_batch()
+
+        def operation():
+            service.stop()
+            rec.paths = [_SECOND_PATH]
+            # Simulate another operation admitting B on another thread.
+            current = []
+            worker = threading.Thread(target=lambda: current.append(service.admit_read_batch()))
+            worker.start()
+            worker.join(timeout=1.0)
+            self.assertFalse(worker.is_alive())
+            self.assertIsNotNone(current[0])
+            rec.events.clear()
+            self.assertIsNone(service.admit_write_operation())
+            self.assertIsNone(service.get_polling_rate())
+            result = service.run_write_operation(
+                current[0], lambda: service.set_polling_rate(PollingRate.HZ_8000),
+            )
+            self.assertEqual(result.outcome, WriteOutcome.DEVICE_NOT_FOUND)
+            self.assertEqual(rec.events, [])
+
+        service.run_session_operation(original, operation)
+        self.assertIsNotNone(service.admit_write_operation())
+
+    def test_reentrant_enumeration_cannot_return_new_session_to_old_admission(self) -> None:
+        rec = _Recorder()
+        service = _make_service(rec)
+        original = service.admit_read_batch()
+
+        def transition():
+            service._enumerate_paths = rec.enumerate_paths
+            service.stop()
+            rec.paths = [_SECOND_PATH]
+            service.admit_read_batch()
+            return [_FAKE_PATH]
+
+        service._enumerate_paths = transition
+        result = service.run_session_operation(original, service.admit_write_operation)
+        self.assertIsNone(result)
+        self.assertFalse(service._identity_change_latched)
+        # The reentrant opener also inherits the old binding and must abstain.
+        self.assertIsNone(service.target_path)
+        self.assertIsNotNone(service.admit_read_batch())
+        self.assertEqual(service.target_path, _SECOND_PATH)
+
+    def test_cached_matcher_is_io_free_and_current_check_enumerates(self) -> None:
+        rec = _Recorder()
+        service = _make_service(rec)
+        token = service.admit_read_batch()
+        rec.events.clear()
+        self.assertTrue(service.session_admission_matches_cached(token))
+        self.assertEqual(rec.events, [])
+        self.assertTrue(service.session_admission_is_current(token))
+        self.assertEqual(rec.events, [("enumerate_paths",)])
+
+
 class TestIoAdmissionAndLeases(unittest.TestCase):
     def test_stale_write_admission_refuses_first_io_after_handle_reuse(self) -> None:
         rec = _Recorder(paths=[_FAKE_PATH], open_result=(_HANDLE, 0))

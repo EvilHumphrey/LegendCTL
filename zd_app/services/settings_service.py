@@ -682,10 +682,11 @@ class ControllerSnapshot:
 
 @dataclass(frozen=True)
 class ControllerSessionAdmission:
-    """Immutable controller identity epoch for one multi-call operation."""
+    """Immutable current-connection epoch for one multi-call operation."""
 
     generation: int
-    target_path: str
+    target_path: str = field(repr=False)
+    _owner: object = field(default=None, repr=False)
 
 
 def empty_controller_snapshot() -> ControllerSnapshot:
@@ -1769,6 +1770,7 @@ class SettingsService:
         self._handle_lock = threading.Lock()
         self._lifecycle_lock = threading.RLock()
         self._operation_local = threading.local()
+        self._session_owner = object()
         self._session_generation = 0
         self._active_io_leases: dict[int, int] = {}
         self._retired_io_handles: set[int] = set()
@@ -1787,6 +1789,12 @@ class SettingsService:
     def target_path(self) -> Optional[str]:
         with self._handle_lock:
             return self._target_path
+
+    @property
+    def connection_requires_readmission(self) -> bool:
+        """Whether continuity was lost and explicit stop/restart is required."""
+        with self._handle_lock:
+            return self._identity_change_latched
 
     @property
     def is_started(self) -> bool:
@@ -1826,18 +1834,74 @@ class SettingsService:
         return ControllerSessionAdmission(
             generation=admission.generation,
             target_path=admission.target_path,
+            _owner=self._session_owner,
         )
+
+    def _session_admission_matches_locked(
+        self, admission: ControllerSessionAdmission,
+    ) -> bool:
+        return (
+            isinstance(admission, ControllerSessionAdmission)
+            and admission._owner is self._session_owner
+            and not self._identity_change_latched
+            and self._session_generation == admission.generation
+            and _mi02_paths_match(self._target_path, admission.target_path)
+        )
+
+    def _bound_session_matches_locked(self) -> bool:
+        return (
+            not hasattr(self._operation_local, "session_admission")
+            or self._session_admission_matches_locked(self._operation_local.session_admission)
+        )
+
+    def session_admission_matches_cached(
+        self, admission: ControllerSessionAdmission,
+    ) -> bool:
+        """Cheap epoch/owner check for display invalidation, without enumeration."""
+        with self._handle_lock:
+            return self._session_admission_matches_locked(admission)
+
+    def _enumerate_current_target(
+        self, target_path: Optional[str], generation: int,
+    ) -> Optional[list[str]]:
+        """Prove an admitted endpoint is still unique and present.
+
+        Caller holds the lifecycle lock, never the handle lock. A failed fresh
+        observation invalidates the session, even if cached handles still work.
+        """
+        try:
+            paths = self._enumerate_paths()
+        except Exception:
+            logger.warning("Could not enumerate current MI_02 endpoints", exc_info=True)
+            paths = []
+        with self._handle_lock:
+            if (
+                self._identity_change_latched
+                or self._session_generation != generation
+                or not _mi02_paths_match(self._target_path, target_path)
+            ):
+                return None
+        if target_path is not None and (
+            _mi02_paths_are_ambiguous(paths)
+            or not any(_mi02_paths_match(path, target_path) for path in _unique_mi02_paths(paths))
+        ):
+            self._latch_identity_change(
+                None, expected_generation=generation, expected_target_path=target_path,
+            )
+            return None
+        return paths
 
     def session_admission_is_current(
         self,
         admission: ControllerSessionAdmission,
     ) -> bool:
-        with self._handle_lock:
-            return (
-                not self._identity_change_latched
-                and self._session_generation == admission.generation
-                and _mi02_paths_match(self._target_path, admission.target_path)
-            )
+        with self._lifecycle_lock:
+            with self._handle_lock:
+                if not self._session_admission_matches_locked(admission):
+                    return False
+            if self._enumerate_current_target(admission.target_path, admission.generation) is None:
+                return False
+            return self.session_admission_matches_cached(admission)
 
     def admit_read_batch(self) -> Optional[ControllerSessionAdmission]:
         admission = self._ensure_read_write_admission()
@@ -1851,35 +1915,45 @@ class SettingsService:
             return None
         return self._session_admission_from_handle(result.admission)
 
+    def run_session_operation(
+        self,
+        admission: ControllerSessionAdmission,
+        callback: Callable[[], _R],
+    ) -> _R:
+        """Bind every read/write admission to one service-owned session token.
+
+        Preserve an outer binding when a coordinator nests another operation.
+        A stale outer operation must never admit a replacement in that gap.
+        """
+        missing = object()
+        previous = getattr(self._operation_local, "session_admission", missing)
+        if previous is missing:
+            self._operation_local.session_admission = admission
+        try:
+            return callback()
+        finally:
+            if previous is missing:
+                del self._operation_local.session_admission
+
     def run_write_operation(
         self,
         admission: ControllerSessionAdmission,
         callback: Callable[[], _R],
     ) -> _R:
-        """Run setters with ``_ensure_handle`` pinned to one admitted session.
-
-        The coordinator's current-session precheck is useful for early aborts,
-        but it cannot itself make the later public setter atomic.  This
-        thread-local binding carries the same token into ``_ensure_handle``;
-        even a stop/start in that gap makes the setter fail closed instead of
-        independently admitting the replacement.
-        """
-
-        missing = object()
-        previous = getattr(self._operation_local, "write_admission", missing)
-        self._operation_local.write_admission = admission
-        try:
-            return callback()
-        finally:
-            if previous is missing:
-                del self._operation_local.write_admission
-            else:
-                self._operation_local.write_admission = previous
+        """Compatibility entrypoint; write coordinators honor outer read bindings."""
+        return self.run_session_operation(admission, callback)
 
     def _acquire_io_lease(self, admission: _HandleAdmission) -> bool:
         # Serialize admission with stop/latch invalidation. The lock is held
-        # only for this non-blocking bookkeeping, never around native I/O.
+        # through fresh endpoint validation and bookkeeping, never native I/O.
         with self._lifecycle_lock:
+            with self._handle_lock:
+                if not self._admission_is_current_locked(admission):
+                    return False
+                if not self._bound_session_matches_locked():
+                    return False
+            if self._enumerate_current_target(admission.target_path, admission.generation) is None:
+                return False
             with self._handle_lock:
                 if not self._admission_is_current_locked(admission):
                     return False
@@ -3603,31 +3677,8 @@ class SettingsService:
                 return _EnsureHandleResult(
                     outcome=SetPollingRateOutcome.OPEN_FAILED
                 )
-            bound_admission = getattr(
-                self._operation_local,
-                "write_admission",
-                None,
-            )
-            if bound_admission is not None:
-                if (
-                    self._write_handle is None
-                    or self._identity_change_latched
-                    or self._session_generation != bound_admission.generation
-                    or not _mi02_paths_match(
-                        self._target_path,
-                        bound_admission.target_path,
-                    )
-                ):
-                    return _EnsureHandleResult(
-                        outcome=SetPollingRateOutcome.DEVICE_NOT_FOUND
-                    )
-                admission = self._current_admission_locked(read_write=False)
-                return _EnsureHandleResult(
-                    outcome=SetPollingRateOutcome.OK,
-                    handle=self._write_handle,
-                    target_path=self._target_path,
-                    admission=admission,
-                )
+            if not self._bound_session_matches_locked():
+                return _EnsureHandleResult(outcome=SetPollingRateOutcome.DEVICE_NOT_FOUND)
             if self._identity_change_latched:
                 # A transaction already lost continuity with its admitted
                 # controller. Rebinding would let the rest of the burst land
@@ -3635,45 +3686,23 @@ class SettingsService:
                 return _EnsureHandleResult(
                     outcome=SetPollingRateOutcome.DEVICE_NOT_FOUND
                 )
-            if self._write_handle is not None:
-                admission = self._current_admission_locked(read_write=False)
-                return _EnsureHandleResult(
-                    outcome=SetPollingRateOutcome.OK,
-                    handle=self._write_handle,
-                    target_path=self._target_path,
-                    admission=admission,
-                )
             generation = self._read_write_generation
             session_generation = self._session_generation
             cached_target_path = self._target_path
 
-        # Enumeration and CreateFileW remain outside the lock: both may block.
-        enumerated_paths = self._enumerate_paths()
-        if cached_target_path is not None:
-            # A read+write handle has already admitted one exact interface for
-            # this session. The first write-only open must remain on it; running
-            # the generic chooser again could silently replace A with B.
-            target_path = next(
-                (
-                    path
-                    for path in _unique_mi02_paths(enumerated_paths)
-                    if path.casefold() == cached_target_path.casefold()
-                ),
-                None,
-            )
-            if target_path is None:
-                self._latch_identity_change(
-                    None,
-                    expected_generation=session_generation,
-                    expected_target_path=cached_target_path,
-                    require_write_handle_absent=True,
-                )
+        enumerated_paths = self._enumerate_current_target(cached_target_path, session_generation)
+        if enumerated_paths is None:
+            return _EnsureHandleResult(outcome=SetPollingRateOutcome.DEVICE_NOT_FOUND)
+        with self._handle_lock:
+            if self._write_handle is not None:
                 return _EnsureHandleResult(
-                    outcome=SetPollingRateOutcome.DEVICE_NOT_FOUND,
-                    target_path=cached_target_path,
+                    outcome=SetPollingRateOutcome.OK,
+                    handle=self._write_handle,
+                    target_path=self._target_path,
+                    admission=self._current_admission_locked(read_write=False),
                 )
-        else:
-            target_path = _choose_mi02_path(enumerated_paths)
+        # Keep the exact admitted collection even when enumeration order changes.
+        target_path = cached_target_path or _choose_mi02_path(enumerated_paths)
         if target_path is None:
             no_target_outcome = (
                 SetPollingRateOutcome.AMBIGUOUS_DEVICE
@@ -3712,7 +3741,10 @@ class SettingsService:
             )
         close_candidate: int | None = None
         with self._handle_lock:
-            if self._write_handle is not None:
+            if self._session_generation != session_generation or not self._bound_session_matches_locked():
+                close_candidate = handle
+                result = _EnsureHandleResult(outcome=SetPollingRateOutcome.OPEN_FAILED)
+            elif self._write_handle is not None:
                 if handle is not None and handle != self._write_handle:
                     close_candidate = handle
                 admission = self._current_admission_locked(read_write=False)
@@ -3785,13 +3817,19 @@ class SettingsService:
                 # replacement could both write a query there and falsely
                 # verify the prior controller's write against another unit.
                 return None
-            if self._read_write_handle is not None:
-                return self._current_admission_locked(read_write=True)
+            if not self._bound_session_matches_locked():
+                return None
             generation = self._read_write_generation
+            session_generation = self._session_generation
             cached_target_path = self._target_path
 
-        # Enumeration and CreateFileW remain outside the lock: both may block.
-        target_path = cached_target_path or _choose_mi02_path(self._enumerate_paths())
+        enumerated_paths = self._enumerate_current_target(cached_target_path, session_generation)
+        if enumerated_paths is None:
+            return None
+        with self._handle_lock:
+            if self._read_write_handle is not None:
+                return self._current_admission_locked(read_write=True)
+        target_path = cached_target_path or _choose_mi02_path(enumerated_paths)
         if target_path is None:
             with self._handle_lock:
                 if self._read_write_handle is not None:
@@ -3807,7 +3845,10 @@ class SettingsService:
         handle, err = self._open_read_write_handle(target_path)
         close_candidate: int | None = None
         with self._handle_lock:
-            if self._read_write_handle is not None:
+            if self._session_generation != session_generation or not self._bound_session_matches_locked():
+                close_candidate = handle
+                result = None
+            elif self._read_write_handle is not None:
                 if handle is not None and handle != self._read_write_handle:
                     close_candidate = handle
                 result = self._current_admission_locked(read_write=True)

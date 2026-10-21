@@ -132,7 +132,7 @@ def _orientation_card(shell) -> None:
                         tag="home_orientation_read",
                         width=190,
                         height=36,
-                        callback=lambda: shell.refresh_from_controller(),
+                        callback=lambda: shell.read_current_connection(),
                     )
                     dpg.add_button(
                         label=t("home.orientation.open_live_verify"),
@@ -373,7 +373,7 @@ def _actions_card(shell) -> None:
                         label=t("home.orientation.read_settings"),
                         width=190,
                         height=36,
-                        callback=lambda: shell.refresh_from_controller(),
+                        callback=lambda: shell.read_current_connection(),
                     )
                     dpg.add_button(
                         label=t("home.orientation.open_live_verify"),
@@ -510,7 +510,7 @@ def _setup_drawer_read_step(shell) -> None:
         tag="home_setup_drawer_read_now",
         width=150,
         height=32,
-        callback=lambda: shell.refresh_from_controller(),
+        callback=lambda: shell.read_current_connection(),
     )
     dpg.add_spacer(height=4, tag="home_setup_drawer_read_after_button_spacer")
 

@@ -147,6 +147,11 @@ _HANDLE = 0x5151
 _READ_WRITE_HANDLE = 0x6161
 
 
+def _io_events(events: list[tuple]) -> list[tuple]:
+    """Native call order; fresh endpoint enumerations are tested separately."""
+    return [event for event in events if event[0] != "enumerate_paths"]
+
+
 class _Recorder:
     def __init__(
         self,
@@ -899,8 +904,8 @@ class TestSensitivityPayload(unittest.TestCase):
             "001055aa51060000323264640000" + ("00" * 51),
         )
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file"],
         )
 
     # --- Dormant 8-point (category 0x86) builder, gated off / not wired ------
@@ -1621,17 +1626,19 @@ class TestWriteRetryIdentityPinning(unittest.TestCase):
         self.assertEqual(result.outcome, SetPollingRateOutcome.OK)
         self.assertIn(("open_write_handle", _FAKE_PATH), rec.events)
 
-    def test_write_target_pins_first_read_handle_to_same_path(self) -> None:
+    def test_write_target_refuses_first_read_handle_when_path_disappears(self) -> None:
         rec = _Recorder(paths=[_FAKE_PATH])
         service = _make_service(rec)
         self.assertEqual(service.start(), SetPollingRateOutcome.OK)
         rec.paths = [self._SECOND_UNIT]
-        rec.open_read_write_result = (None, 1167)
 
         self.assertIsNone(service.get_polling_rate())
 
-        self.assertIn(("open_read_write_handle", _FAKE_PATH), rec.events)
+        self.assertNotIn(("open_read_write_handle", _FAKE_PATH), rec.events)
         self.assertNotIn(("open_read_write_handle", self._SECOND_UNIT), rec.events)
+        self.assertFalse(any(event[0] == "write_file" for event in rec.events))
+        self.assertTrue(service.connection_requires_readmission)
+        self.assertIsNone(service.target_path)
 
     def test_stop_waits_while_cached_target_enumeration_is_in_flight(self) -> None:
         enumerate_entered = threading.Event()
@@ -1877,6 +1884,7 @@ class TestSettingsServiceLifecycle(unittest.TestCase):
             [
                 ("enumerate_paths",),
                 ("open_write_handle", _FAKE_PATH),
+                ("enumerate_paths",),
             ],
         )
 
@@ -1931,8 +1939,8 @@ class TestSetPollingRate(unittest.TestCase):
         self.assertEqual(result.payload_hex, "001055aa511100060202" + ("00" * 55))
         self.assertTrue(service.is_started)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file"],
         )
 
     def test_set_reuses_cached_handle_for_multiple_writes(self) -> None:
@@ -1945,11 +1953,11 @@ class TestSetPollingRate(unittest.TestCase):
         self.assertEqual(first.outcome, SetPollingRateOutcome.OK)
         self.assertEqual(second.outcome, SetPollingRateOutcome.OK)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file", "write_file"],
         )
-        self.assertEqual(rec.events[2][1], _HANDLE)
-        self.assertEqual(rec.events[3][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[1][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[2][1], _HANDLE)
 
     def test_set_when_no_device_returns_device_not_found_and_does_not_write(self) -> None:
         rec = _Recorder(paths=[])
@@ -2002,8 +2010,8 @@ class TestSetPollingRate(unittest.TestCase):
         self.assertEqual(result.outcome, SetPollingRateOutcome.OK_WITH_RETRY)
         self.assertEqual(result.bytes_written, HID_FEATURE_REPORT_SIZE)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file", "sleep", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file", "sleep", "write_file"],
         )
         self.assertIn(("sleep", WRITE_RETRY_DELAY_S), rec.events)
 
@@ -2021,8 +2029,8 @@ class TestSetPollingRate(unittest.TestCase):
         self.assertEqual(result.outcome, SetPollingRateOutcome.WRITE_FAILED)
         self.assertEqual(result.bytes_written, HID_FEATURE_REPORT_SIZE - 1)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file", "sleep", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file", "sleep", "write_file"],
         )
 
     def test_retry_bytes_written_reports_successful_attempt_only(self) -> None:
@@ -2078,16 +2086,16 @@ class TestGetPollingRate(unittest.TestCase):
 
         self.assertEqual(service.get_polling_rate(), PollingRate.HZ_8000)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_read_write_handle", "write_file", "read_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_read_write_handle", "write_file", "read_file"],
         )
-        self.assertEqual(rec.events[2][1], _READ_WRITE_HANDLE)
+        self.assertEqual(_io_events(rec.events)[1][1], _READ_WRITE_HANDLE)
         self.assertEqual(
-            rec.events[2][2],
+            _io_events(rec.events)[1][2],
             build_read_query_payload(CATEGORY_POLLING_RATE, POLLING_RATE_SUBCOMMAND),
         )
         self.assertEqual(
-            rec.events[3],
+            _io_events(rec.events)[2],
             ("read_file", _READ_WRITE_HANDLE, HID_FEATURE_REPORT_SIZE, 1000),
         )
 
@@ -2147,21 +2155,19 @@ class TestGetPollingRate(unittest.TestCase):
 
         self.assertIn(("close_handle", _READ_WRITE_HANDLE), rec.events)
         self.assertEqual(
-            [event[0] for event in rec.events],
+            [event[0] for event in _io_events(rec.events)],
             [
-                "enumerate_paths",
                 "open_read_write_handle",
                 "write_file",
                 "close_handle",
-                "enumerate_paths",
                 "open_read_write_handle",
                 "write_file",
                 "read_file",
             ],
         )
-        self.assertEqual(rec.events[2][1], _READ_WRITE_HANDLE)
-        self.assertEqual(rec.events[6][1], 0x7171)
-        self.assertEqual(rec.events[7][1], 0x7171)
+        self.assertEqual(_io_events(rec.events)[1][1], _READ_WRITE_HANDLE)
+        self.assertEqual(_io_events(rec.events)[4][1], 0x7171)
+        self.assertEqual(_io_events(rec.events)[5][1], 0x7171)
 
     def test_read_response_discards_stale_category_before_match(self) -> None:
         rec = _Recorder(read_results=[
@@ -2181,8 +2187,8 @@ class TestGetPollingRate(unittest.TestCase):
         self.assertEqual(response[5], CATEGORY_POLLING_RATE)
         self.assertEqual(response[7], PollingRate.HZ_4000.value)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_read_write_handle", "write_file", "read_file", "read_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_read_write_handle", "write_file", "read_file", "read_file"],
         )
 
     def test_read_response_discards_write_ack_then_returns_read_response(self) -> None:
@@ -2204,8 +2210,8 @@ class TestGetPollingRate(unittest.TestCase):
         self.assertEqual(response[5], CATEGORY_POLLING_RATE)
         self.assertEqual(response[7], PollingRate.HZ_4000.value)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_read_write_handle", "write_file", "read_file", "read_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_read_write_handle", "write_file", "read_file", "read_file"],
         )
 
     def test_read_response_times_out_if_only_write_acks(self) -> None:
@@ -2269,8 +2275,8 @@ class TestSetStepSize(unittest.TestCase):
             build_step_size_payload(STEP_SIZE_VALUE_DEFAULT).hex(),
         )
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file"],
         )
 
     def test_set_when_no_device_returns_device_not_found(self) -> None:
@@ -2305,11 +2311,11 @@ class TestGetStepSize(unittest.TestCase):
 
         self.assertEqual(service.get_step_size(), STEP_SIZE_VALUE_DEFAULT)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_read_write_handle", "write_file", "read_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_read_write_handle", "write_file", "read_file"],
         )
         self.assertEqual(
-            rec.events[2][2],
+            _io_events(rec.events)[1][2],
             build_read_query_payload(CATEGORY_STEP_SIZE, STEP_SIZE_SUBCOMMAND),
         )
 
@@ -2803,7 +2809,7 @@ class TestGetVibration(unittest.TestCase):
             VibrationSettings(15, 16, 17, 18, TriggerVibrationMode.NATIVE),
         )
         self.assertEqual(
-            rec.events[2][2],
+            _io_events(rec.events)[1][2],
             build_read_query_payload(CATEGORY_VIBRATION, VIBRATION_SUBCOMMAND),
         )
 
@@ -2847,7 +2853,7 @@ class TestGetMotionSettings(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            rec.events[2][2],
+            _io_events(rec.events)[1][2],
             build_read_query_payload(CATEGORY_MOTION, MOTION_SUBCOMMAND),
         )
 
@@ -2920,7 +2926,7 @@ class TestGetButtonBinding(unittest.TestCase):
             ButtonMapping.controller_button(ControllerButtonTarget.A),
         )
         self.assertEqual(
-            rec.events[2][2],
+            _io_events(rec.events)[1][2],
             build_read_query_payload(CATEGORY_BUTTON_BINDING, selector=ButtonSlot.A.value),
         )
 
@@ -2952,8 +2958,8 @@ class TestGetButtonBinding(unittest.TestCase):
             ButtonMapping.controller_button(ControllerButtonTarget.B),
         )
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_read_write_handle", "write_file", "read_file", "read_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_read_write_handle", "write_file", "read_file", "read_file"],
         )
 
     def test_get_button_binding_selector_mismatch_returns_none_after_timeout(self) -> None:
@@ -3228,7 +3234,7 @@ class TestGetZoneLighting(unittest.TestCase):
             LightingSettings(True, LightingMode.FADE, 0x66, RgbColor(1, 2, 3)),
         )
         self.assertEqual(
-            rec.events[2][2],
+            _io_events(rec.events)[1][2],
             build_read_query_payload(CATEGORY_LIGHTING, selector=LightingZone.HOME.value),
         )
 
@@ -3266,8 +3272,8 @@ class TestGetZoneLighting(unittest.TestCase):
             LightingSettings(True, LightingMode.FADE, 0x77, RgbColor(1, 2, 3)),
         )
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_read_write_handle", "write_file", "read_file", "read_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_read_write_handle", "write_file", "read_file", "read_file"],
         )
 
     def test_get_zone_lighting_selector_mismatch_returns_none_after_timeout(self) -> None:
@@ -3345,7 +3351,7 @@ class TestGetDeadzones(unittest.TestCase):
 
         self.assertEqual(service.get_deadzones(), StickDeadzones(1, 2, 3, 4))
         self.assertEqual(
-            rec.events[2][2],
+            _io_events(rec.events)[1][2],
             build_read_query_payload(CATEGORY_STICK_DEADZONE, DEADZONE_SUBCOMMAND),
         )
 
@@ -3383,7 +3389,7 @@ class TestGetAxisInversion(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            rec.events[2][2],
+            _io_events(rec.events)[1][2],
             build_read_query_payload(CATEGORY_STICK_INVERSION, INVERSION_SUBCOMMAND),
         )
 
@@ -3504,7 +3510,7 @@ class TestGetTriggerSettings(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            rec.events[2][2],
+            _io_events(rec.events)[1][2],
             build_read_query_payload(CATEGORY_TRIGGER_SETTINGS, TRIGGER_SUBCOMMAND),
         )
 
@@ -3600,7 +3606,7 @@ class TestGetSensitivityCurves(unittest.TestCase):
             ),
         )
         self.assertEqual(
-            rec.events[2][2],
+            _io_events(rec.events)[1][2],
             build_read_query_payload(CATEGORY_STICK_SENSITIVITY, SENSITIVITY_SUBCOMMAND),
         )
 
@@ -3758,9 +3764,9 @@ class TestGetSensitivityCurve8Point(unittest.TestCase):
             service.get_sensitivity_curve_8point(SENSITIVITY_STICK_LEFT),
             _VERIFIED_LEFT_8POINT,
         )
-        # events[0]=enumerate, [1]=open_read_write, [2]=write_file (the query).
+        # I/O events are open_read_write followed by write_file (the query).
         self.assertEqual(
-            rec.events[2][2],
+            _io_events(rec.events)[1][2],
             build_read_query_payload(
                 CATEGORY_STICK_SENSITIVITY_8POINT,
                 SENSITIVITY_SUBCOMMAND,
@@ -4529,8 +4535,8 @@ class TestSetButtonBinding(unittest.TestCase):
         self.assertEqual(result.payload_hex, "001055aa5102000501001000" + ("00" * 53))
         self.assertTrue(service.is_started)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file"],
         )
 
     def test_set_button_binding_reuses_cached_handle(self) -> None:
@@ -4546,11 +4552,11 @@ class TestSetButtonBinding(unittest.TestCase):
         self.assertEqual(first.outcome, SetPollingRateOutcome.OK)
         self.assertEqual(second.outcome, SetButtonBindingOutcome.OK)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file", "write_file"],
         )
-        self.assertEqual(rec.events[2][1], _HANDLE)
-        self.assertEqual(rec.events[3][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[1][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[2][1], _HANDLE)
 
     def test_set_button_binding_no_device_returns_device_not_found(self) -> None:
         rec = _Recorder(paths=[])
@@ -4609,8 +4615,8 @@ class TestSetButtonBinding(unittest.TestCase):
         self.assertEqual(result.outcome, SetButtonBindingOutcome.OK_WITH_RETRY)
         self.assertEqual(result.bytes_written, HID_FEATURE_REPORT_SIZE)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file", "sleep", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file", "sleep", "write_file"],
         )
 
     def test_stop_closes_handle_even_after_button_binding_write_failure(self) -> None:
@@ -4724,9 +4730,8 @@ class TestBackPaddleBinding(unittest.TestCase):
         self.assertEqual(result.outcome, SetBackPaddleBindingOutcome.OK_WITH_RETRY)
         self.assertEqual(result.bytes_written, HID_FEATURE_REPORT_SIZE * 2)
         self.assertEqual(
-            [event[0] for event in rec.events],
+            [event[0] for event in _io_events(rec.events)],
             [
-                "enumerate_paths",
                 "open_write_handle",
                 "write_file",
                 "write_file",
@@ -4818,8 +4823,8 @@ class TestSetDeadzone(unittest.TestCase):
         self.assertEqual(result.payload_hex, "001055aa51090005000000" + ("00" * 54))
         self.assertTrue(service.is_started)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file"],
         )
 
     def test_set_deadzone_reuses_cached_handle_after_polling_and_remap(self) -> None:
@@ -4837,12 +4842,12 @@ class TestSetDeadzone(unittest.TestCase):
         self.assertEqual(remap.outcome, SetButtonBindingOutcome.OK)
         self.assertEqual(deadzone.outcome, SetDeadzoneOutcome.OK)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file", "write_file", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file", "write_file", "write_file"],
         )
-        self.assertEqual(rec.events[2][1], _HANDLE)
-        self.assertEqual(rec.events[3][1], _HANDLE)
-        self.assertEqual(rec.events[4][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[1][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[2][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[3][1], _HANDLE)
 
     def test_set_deadzone_no_device_returns_device_not_found(self) -> None:
         rec = _Recorder(paths=[])
@@ -4918,8 +4923,8 @@ class TestSetSensitivityCurve(unittest.TestCase):
         self.assertEqual(result.payload_hex, "001055aa51060000000032326464" + ("00" * 51))
         self.assertTrue(service.is_started)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file"],
         )
 
     def test_set_sensitivity_reuses_cached_handle_after_deadzone(self) -> None:
@@ -4937,11 +4942,11 @@ class TestSetSensitivityCurve(unittest.TestCase):
         self.assertEqual(deadzone.outcome, SetDeadzoneOutcome.OK)
         self.assertEqual(sensitivity.outcome, SetSensitivityCurveOutcome.OK)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file", "write_file"],
         )
-        self.assertEqual(rec.events[2][1], _HANDLE)
-        self.assertEqual(rec.events[3][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[1][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[2][1], _HANDLE)
 
     def test_set_right_sensitivity_before_start_auto_opens_and_writes(self) -> None:
         rec = _Recorder()
@@ -4961,8 +4966,8 @@ class TestSetSensitivityCurve(unittest.TestCase):
         self.assertEqual(result.payload_hex, "001055aa51060001000032326464" + ("00" * 51))
         self.assertTrue(service.is_started)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file"],
         )
 
     def test_set_sensitivity_failure_outcomes(self) -> None:
@@ -5051,8 +5056,8 @@ class TestSetAxisInversion(unittest.TestCase):
         self.assertEqual(result.payload_hex, "001055aa510700000001" + ("00" * 55))
         self.assertTrue(service.is_started)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file"],
         )
 
     def test_set_right_axis_inversion_before_start_auto_opens_and_writes(self) -> None:
@@ -5070,8 +5075,8 @@ class TestSetAxisInversion(unittest.TestCase):
         self.assertEqual(result.payload_hex, "001055aa510700010101" + ("00" * 55))
         self.assertTrue(service.is_started)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file"],
         )
 
     def test_set_axis_inversion_reuses_cached_handle_after_polling_and_sensitivity(self) -> None:
@@ -5091,12 +5096,12 @@ class TestSetAxisInversion(unittest.TestCase):
         self.assertEqual(sensitivity.outcome, SetSensitivityCurveOutcome.OK)
         self.assertEqual(inversion.outcome, SetAxisInversionOutcome.OK)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file", "write_file", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file", "write_file", "write_file"],
         )
-        self.assertEqual(rec.events[2][1], _HANDLE)
-        self.assertEqual(rec.events[3][1], _HANDLE)
-        self.assertEqual(rec.events[4][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[1][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[2][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[3][1], _HANDLE)
 
     def test_set_axis_inversion_failure_outcomes_for_both_sticks(self) -> None:
         inversion = AxisInversion(True, False)
@@ -5215,8 +5220,8 @@ class TestSetTriggerSettings(unittest.TestCase):
         self.assertEqual(result.payload_hex, "001055aa510a0000145000" + ("00" * 54))
         self.assertTrue(service.is_started)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file"],
         )
 
     def test_set_right_trigger_before_start_auto_opens_and_writes(self) -> None:
@@ -5234,8 +5239,8 @@ class TestSetTriggerSettings(unittest.TestCase):
         self.assertEqual(result.payload_hex, "001055aa510a0001006401" + ("00" * 54))
         self.assertTrue(service.is_started)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file"],
         )
 
     def test_set_trigger_reuses_cached_handle_after_remap_and_inversion(self) -> None:
@@ -5253,12 +5258,12 @@ class TestSetTriggerSettings(unittest.TestCase):
         self.assertEqual(inversion.outcome, SetAxisInversionOutcome.OK)
         self.assertEqual(trigger.outcome, SetTriggerSettingsOutcome.OK)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file", "write_file", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file", "write_file", "write_file"],
         )
-        self.assertEqual(rec.events[2][1], _HANDLE)
-        self.assertEqual(rec.events[3][1], _HANDLE)
-        self.assertEqual(rec.events[4][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[1][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[2][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[3][1], _HANDLE)
 
     def test_set_trigger_failure_outcomes_for_both_triggers(self) -> None:
         settings = TriggerSettings(10, 100, TriggerMode.LONG)
@@ -5382,8 +5387,8 @@ class TestSetVibration(unittest.TestCase):
         self.assertEqual(result.payload_hex, "001055aa510c001e32465a01" + ("00" * 53))
         self.assertTrue(service.is_started)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file"],
         )
 
     def test_set_vibration_reuses_cached_handle_after_trigger_and_remap(self) -> None:
@@ -5405,12 +5410,12 @@ class TestSetVibration(unittest.TestCase):
         self.assertEqual(remap.outcome, SetButtonBindingOutcome.OK)
         self.assertEqual(vibration.outcome, SetVibrationOutcome.OK)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file", "write_file", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file", "write_file", "write_file"],
         )
-        self.assertEqual(rec.events[2][1], _HANDLE)
-        self.assertEqual(rec.events[3][1], _HANDLE)
-        self.assertEqual(rec.events[4][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[1][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[2][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[3][1], _HANDLE)
 
     def test_set_vibration_failure_outcomes(self) -> None:
         settings = VibrationSettings(30, 50, 70, 90, TriggerVibrationMode.NATIVE)
@@ -5495,8 +5500,8 @@ class TestSetLighting(unittest.TestCase):
         self.assertEqual(result.payload_hex, "001055aa511000000101ccff0000" + ("00" * 51))
         self.assertTrue(service.is_started)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file"],
         )
 
     def test_set_lighting_reuses_cached_handle_after_vibration_and_remap(self) -> None:
@@ -5519,12 +5524,12 @@ class TestSetLighting(unittest.TestCase):
         self.assertEqual(remap.outcome, SetButtonBindingOutcome.OK)
         self.assertEqual(lighting.outcome, SetLightingOutcome.OK)
         self.assertEqual(
-            [event[0] for event in rec.events],
-            ["enumerate_paths", "open_write_handle", "write_file", "write_file", "write_file"],
+            [event[0] for event in _io_events(rec.events)],
+            ["open_write_handle", "write_file", "write_file", "write_file"],
         )
-        self.assertEqual(rec.events[2][1], _HANDLE)
-        self.assertEqual(rec.events[3][1], _HANDLE)
-        self.assertEqual(rec.events[4][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[1][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[2][1], _HANDLE)
+        self.assertEqual(_io_events(rec.events)[3][1], _HANDLE)
 
     def test_set_lighting_failure_outcomes(self) -> None:
         settings = LightingSettings(True, LightingMode.FLOW, 0x66, RgbColor(0, 255, 0))
@@ -5601,13 +5606,11 @@ class TestSettingsServiceCleanup(unittest.TestCase):
         service.set_polling_rate(PollingRate.HZ_8000)
 
         self.assertEqual(
-            [event[0] for event in rec.events],
+            [event[0] for event in _io_events(rec.events)],
             [
-                "enumerate_paths",
                 "open_write_handle",
                 "write_file",
                 "close_handle",
-                "enumerate_paths",
                 "open_write_handle",
                 "write_file",
             ],
