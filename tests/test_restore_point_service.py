@@ -77,6 +77,7 @@ from zd_app.services.settings_service import (
     TriggerVibrationMode,
     VibrationSettings,
 )
+from zd_app.storage._import_guards import MAX_IMPORT_BYTES
 from zd_app.storage.restore_point_models import (
     CaptureSource,
     CoverageState,
@@ -86,7 +87,7 @@ from zd_app.storage.restore_point_models import (
     RestoreResult,
     RestoreResultLabel,
 )
-from zd_app.storage.restore_point_store import RestorePointStore
+from zd_app.storage.restore_point_store import RestorePointStore, RestorePointStoreError
 
 
 # ---------------------------------------------------------------------------
@@ -577,6 +578,16 @@ def _identity() -> DeviceIdentity:
 
 
 class CaptureFreshReadTests(unittest.TestCase):
+    def test_oversized_capture_reports_error_without_saved_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _stub, store = _make_service(
+                tmpdir=tmp, settings_stub=_full_populated_stub()
+            )
+            with self.assertRaises(RestorePointStoreError):
+                service.capture(_basic_trigger(), title="x" * MAX_IMPORT_BYTES)
+            self.assertEqual(store.list(), ([], []))
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
     def test_fresh_read_builds_restore_point_with_fresh_capture_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service, _stub, store = _make_service(
@@ -1131,6 +1142,53 @@ class RestoreSessionPinningTests(unittest.TestCase):
 
 
 class RestoreFlowTests(unittest.TestCase):
+    def test_long_historical_title_keeps_before_restore_record_loadable(self) -> None:
+        for title in ("x" * (600 * 1024), "\U0001f3ae" * 50000, "\u754c" * 100000):
+            with self.subTest(title_kind=title[0]):
+                with tempfile.TemporaryDirectory() as tmp:
+                    service, _stub, store = _make_service(
+                        tmpdir=tmp, settings_stub=_full_populated_stub()
+                    )
+                    target = service.capture(_basic_trigger(), title=title)
+                    self.assertIsNotNone(target)
+                    source_path = next(Path(tmp).glob("*.json"))
+                    source_bytes = source_path.read_bytes()
+                    result = _prepare_and_restore(service, target.id)
+                    self.assertIsNotNone(result.before_restore_point_id)
+                    before = store.load(result.before_restore_point_id)
+                    fragment = before.title.removeprefix("Before restoring ")
+                    self.assertLessEqual(len(fragment), 256)
+                    self.assertTrue(fragment.endswith("\u2026"))
+                    self.assertTrue(title.startswith(fragment[:-1]))
+                    self.assertEqual(
+                        before.trigger.reason,
+                        f"Created automatically before restoring '{fragment}'",
+                    )
+                    self.assertEqual(store.load(target.id).title, title)
+                    self.assertEqual(source_path.read_bytes(), source_bytes)
+                    valid, skipped = store.list()
+                    self.assertEqual(skipped, [])
+                    self.assertEqual(len(valid), 2)
+                    self.assertTrue(all(
+                        path.stat().st_size <= MAX_IMPORT_BYTES
+                        for path in Path(tmp).glob("*.json")
+                    ))
+
+    def test_normal_unicode_title_is_preserved_in_before_restore_metadata(self) -> None:
+        title = "Weekend \U0001f3ae \u914d\u7f6e"
+        with tempfile.TemporaryDirectory() as tmp:
+            service, _stub, store = _make_service(
+                tmpdir=tmp, settings_stub=_full_populated_stub()
+            )
+            target = service.capture(_basic_trigger(), title=title)
+            result = _prepare_and_restore(service, target.id)
+            before = store.load(result.before_restore_point_id)
+            self.assertEqual(before.title, f"Before restoring {title}")
+            self.assertEqual(
+                before.trigger.reason,
+                f"Created automatically before restoring '{title}'",
+            )
+
     def test_unknown_identity_requires_literal_true_before_any_device_effect(self) -> None:
         for schema_version in (1, 2):
             with self.subTest(schema=schema_version), tempfile.TemporaryDirectory() as tmp:

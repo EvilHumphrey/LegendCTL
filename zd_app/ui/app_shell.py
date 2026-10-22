@@ -4552,7 +4552,7 @@ class AppShell:
             self._restart_settings_service_for_current_presence()
             self._request_presence_rebuild()
         logger.info(
-            "Profile apply refused after controller transition from %r/%s to %r/%s",
+            "Profile apply refused after controller transition from %r generation=%s to %r generation=%s",
             presence_key,
             presence_generation,
             self._controller_presence_key(),
@@ -9293,12 +9293,19 @@ class AppShell:
         self.refresh_current_screen()
 
     def export_diagnostics_bundle(self) -> None:
-        path = self.diagnostics_service.export_bundle(
-            self.device_service.state,
-            self.device_service.last_read_duration_ms,
-            self.device_service.last_write_duration_ms,
-            self.settings.diagnostics_bundle_dir,
-        )
+        try:
+            path = self.diagnostics_service.export_bundle(
+                self.device_service.state,
+                self.device_service.last_read_duration_ms,
+                self.device_service.last_write_duration_ms,
+                self.settings.diagnostics_bundle_dir,
+            )
+        except (OSError, ValueError):
+            logger.exception("Diagnostics bundle: export failed")
+            self.device_service.log_i18n_event("log.diagnostics.bundle_failed")
+            self.refresh_shell()
+            self.refresh_current_screen()
+            return
         self._last_diagnostic_bundle_path = path
         self.device_service.log_i18n_event("log.diagnostics.exported_bundle", path=path)
         self.refresh_shell()
@@ -9448,24 +9455,16 @@ class AppShell:
             self.refresh_shell()
             self.refresh_current_screen()
             return
-        requested = preferences.diagnostics_bundle_dir_open_target(configured)
         try:
-            folder = self.diagnostics_service._safe_output_dir(str(requested))
+            with self.diagnostics_service.output_directory(configured) as directory:
+                # Keep every ancestor pinned through shell dispatch. Explorer
+                # owns any later asynchronous use after startfile returns.
+                os.startfile(str(directory.path))  # type: ignore[attr-defined]
+                if directory.used_fallback:
+                    self.device_service.log_i18n_event(
+                        "log.diagnostics.open_folder_safe_fallback"
+                    )
         except Exception:  # noqa: BLE001 — opening a folder should never crash the app
-            logger.exception("Diagnostics bundle folder: safe target resolution failed")
-            self.device_service.log_i18n_event("log.diagnostics.open_folder_failed")
-            self.refresh_shell()
-            self.refresh_current_screen()
-            return
-        opened_fallback = _resolve_non_strict(folder) != _resolve_non_strict(requested)
-        try:
-            folder.mkdir(parents=True, exist_ok=True)
-            os.startfile(str(folder))  # type: ignore[attr-defined]
-            if opened_fallback:
-                self.device_service.log_i18n_event(
-                    "log.diagnostics.open_folder_safe_fallback"
-                )
-        except OSError:
             logger.exception("Diagnostics bundle folder: failed to open folder")
             self.device_service.log_i18n_event("log.diagnostics.open_folder_failed")
         finally:

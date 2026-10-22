@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import platform
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,7 +16,7 @@ from zd_app.services.device_service import DeviceService
 from zd_app.services.diagnostics_service import _redact_instance_id
 from zd_app.services.markdown_safety import escape_markdown
 from zd_app.services.model_fingerprint import ModelFingerprint, fingerprint_display_rows
-from zd_app.services.path_scrub import scrub_paths
+from zd_app.services.path_scrub import sanitize_shareable_text
 
 
 CompatibilityState = Literal[
@@ -45,12 +44,6 @@ ISSUE_TEMPLATE_FIELD_IDS: tuple[str, ...] = (
     "live-verify",
     "log",
     "notes",
-)
-
-_INSTANCE_ID_INLINE_RE = re.compile(
-    r"(?:[A-Za-z0-9_]+\\)?VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4}"
-    r"(?:[&\\][^\s|`\])]+)*",
-    re.IGNORECASE,
 )
 
 
@@ -477,15 +470,9 @@ def _apply_result_text(value: object | None) -> str:
 
 
 def _clean(value: object, default: str) -> str:
-    text = "" if value is None else str(value)
-    text = _redact_inline_instance_ids(text)
-    text = scrub_paths(text)
+    text = sanitize_shareable_text(value)
     text = " ".join(text.replace("\r\n", "\n").replace("\r", "\n").splitlines())
     return text.strip() or default
-
-
-def _redact_inline_instance_ids(text: str) -> str:
-    return _INSTANCE_ID_INLINE_RE.sub(lambda match: _redact_instance_id(match.group(0)), text)
 
 
 def _state_label(state: CompatibilityState) -> str:
@@ -497,7 +484,9 @@ def _issue_section(label_key: str, body: str) -> str:
 
 
 def _md(value: object) -> str:
-    return escape_markdown(value)
+    # Supplied checklist rows and direct report instances bypass builder
+    # cleaning. Enforce privacy on their original values before markup escaping.
+    return escape_markdown(sanitize_shareable_text(value))
 
 
 def _md_block(value: object) -> str:

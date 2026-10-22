@@ -663,6 +663,39 @@ class SnapshotLoadValidationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     snapshot_from_dict(payload)
 
+    def test_required_nested_enums_reject_null_or_missing(self) -> None:
+        paths = [
+            ("vibration", "mode"),
+            ("trigger_left", "mode"),
+            ("trigger_right", "mode"),
+            ("motion_settings", "target"),
+            ("motion_settings", "mode"),
+        ]
+        paths.extend(
+            ("lighting_zones", key, "mode")
+            for key in self._payload()["lighting_zones"]
+        )
+        for path in paths:
+            for missing in (False, True):
+                with self.subTest(path=path, missing=missing):
+                    payload = self._payload()
+                    parent = payload
+                    for key in path[:-1]:
+                        parent = parent[key]
+                    if missing:
+                        parent.pop(path[-1])
+                    else:
+                        parent[path[-1]] = None
+                    with self.assertRaises(ValueError):
+                        snapshot_from_dict(payload)
+
+    def test_absent_or_null_whole_optional_settings_remain_unavailable(self) -> None:
+        self.assertEqual(snapshot_from_dict({}), _partial_snapshot())
+        self.assertEqual(
+            snapshot_from_dict(snapshot_to_dict(_partial_snapshot())),
+            _partial_snapshot(),
+        )
+
     def test_back_paddle_malformed_binding_rejected(self) -> None:
         """P2: a back-paddle binding payload must be a mapping with an explicit
         ``target`` key. Falsy payloads (``false`` / ``""`` / ``[]`` / ``{}``)

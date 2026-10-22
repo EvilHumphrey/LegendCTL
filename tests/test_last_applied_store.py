@@ -23,9 +23,18 @@ from zd_app.services.settings_service import (
     ButtonSlot,
     ControllerButtonTarget,
     ControllerSnapshot,
+    LightingMode,
+    LightingSettings,
+    LightingZone,
     MacroSlot,
+    MotionMappingMode,
+    MotionMappingTarget,
+    MotionSettings,
     PollingRate,
+    RgbColor,
     SensitivityAnchor,
+    TriggerMode,
+    TriggerSettings,
     TriggerVibrationMode,
     VibrationSettings,
 )
@@ -155,6 +164,46 @@ class AtomicWriteTests(unittest.TestCase):
 
 
 class LoadFailurePolicyTests(unittest.TestCase):
+    def test_null_nested_enum_suppresses_real_last_applied_record(self) -> None:
+        record = _record(snapshot=_snap(
+            vibration=VibrationSettings(10, 20, 30, 40, TriggerVibrationMode.NATIVE),
+            trigger_left=TriggerSettings(0, 100, TriggerMode.LONG),
+            trigger_right=TriggerSettings(0, 100, TriggerMode.LONG),
+            motion_settings=MotionSettings(
+                MotionMappingTarget.LEFT_JOYSTICK, 6, MotionMappingMode.INSTANT, 42,
+            ),
+            lighting_zones={LightingZone.HOME: LightingSettings(
+                True, LightingMode.ALWAYS_ON, 100, RgbColor(10, 20, 30),
+            )},
+            back_paddle_bindings={MacroSlot.M1: BackPaddleBinding(None)},
+        ))
+        paths = (
+            ("vibration", "mode"),
+            ("trigger_left", "mode"),
+            ("trigger_right", "mode"),
+            ("motion_settings", "mode"),
+            ("motion_settings", "target"),
+            ("lighting_zones", str(LightingZone.HOME.value), "mode"),
+        )
+        with TemporaryDirectory() as tmp:
+            store = LastAppliedStore(base_dir=tmp)
+            store.save(record)
+            self.assertEqual(store.load(), record)
+            for path in paths:
+                with self.subTest(path=path):
+                    payload = record_to_dict(record)
+                    parent = payload["snapshot"]
+                    for key in path[:-1]:
+                        parent = parent[key]
+                    parent[path[-1]] = None
+                    with self.assertRaises(ValueError):
+                        record_from_dict(payload)
+                    store.path.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertLogs(
+                        "zd_app.storage.last_applied_store", level="WARNING"
+                    ):
+                        self.assertIsNone(store.load())
+
     def test_missing_file_loads_none(self) -> None:
         with TemporaryDirectory() as tmp:
             store = LastAppliedStore(base_dir=tmp)

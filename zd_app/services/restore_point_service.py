@@ -120,6 +120,8 @@ def _require_restore_presence(
 FRESH_READ_MAX_AGE_S = 30.0
 """Default staleness threshold per the "Staleness threshold" rule."""
 
+_BEFORE_RESTORE_TITLE_MAX_CHARS = 256
+
 
 # Static field classification (per the "Field category model" rule). Restore
 # eligibility uses ``writable`` — ``motion_settings`` is captured for record
@@ -526,14 +528,22 @@ class RestorePointService:
             )
 
         # 1. before_restore safety snapshot.
+        # Historical titles can fill most of a valid source record. Copying one
+        # twice into generated metadata must not make the new checkpoint exceed
+        # the store's read ceiling. Preserve the original record and short titles.
+        title_fragment = target_rp.title
+        if len(title_fragment) > _BEFORE_RESTORE_TITLE_MAX_CHARS:
+            title_fragment = (
+                title_fragment[:_BEFORE_RESTORE_TITLE_MAX_CHARS - 1] + "\u2026"
+            )
         before_trigger = RestorePointTrigger(
             type="before_restore",
             source_label="Before restore",
-            reason=f"Created automatically before restoring '{target_rp.title}'",
+            reason=f"Created automatically before restoring '{title_fragment}'",
         )
         before_rp = self.capture(
             before_trigger,
-            title=f"Before restoring {target_rp.title}",
+            title=f"Before restoring {title_fragment}",
             # This service reads settings, not current device metadata. The
             # target's historical identity cannot describe this fresh capture
             # after a firmware change or an intentional cross-device restore.

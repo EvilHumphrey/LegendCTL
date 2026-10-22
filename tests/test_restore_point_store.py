@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from zd_app.services.settings_service import ControllerSnapshot
+from zd_app.storage._import_guards import MAX_IMPORT_BYTES
 from zd_app.storage.restore_point_models import (
     KIND,
     SCHEMA_VERSION,
@@ -31,6 +32,7 @@ from zd_app.storage.restore_point_models import (
 from zd_app.storage.restore_point_store import (
     FILENAME_PATTERN,
     RestorePointStore,
+    RestorePointStoreError,
     filename_for,
 )
 
@@ -338,6 +340,38 @@ class ListVanishedFileTests(unittest.TestCase):
 
 
 class AtomicWriteTests(unittest.TestCase):
+    def test_save_exact_reader_byte_limit_round_trips(self) -> None:
+        for title_prefix in ("", "\u6e38\u620f\U0001f3ae"):
+            with self.subTest(title_prefix=title_prefix):
+                with tempfile.TemporaryDirectory() as tmp:
+                    store = RestorePointStore(tmp)
+                    base = _make_rp(title=title_prefix)
+                    overhead = len(json.dumps(restore_point_to_dict(base), indent=2).encode("utf-8"))
+                    rp = replace(base, title=title_prefix + "x" * (MAX_IMPORT_BYTES - overhead))
+                    path = store.save(rp)
+                    self.assertEqual(path.stat().st_size, MAX_IMPORT_BYTES)
+                    self.assertEqual(store.load(rp.id), rp)
+                    self.assertEqual(store.list(), ([rp], []))
+
+    def test_oversized_save_rejected_before_any_file_open(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = RestorePointStore(tmp)
+            original = _make_rp()
+            path = store.save(original)
+            original_bytes = path.read_bytes()
+            base = replace(original, title="")
+            overhead = len(json.dumps(restore_point_to_dict(base), indent=2).encode("utf-8"))
+            for excess in (1, 600 * 1024):
+                with self.subTest(excess=excess):
+                    rp = replace(base, title="x" * (MAX_IMPORT_BYTES - overhead + excess))
+                    with patch("builtins.open") as opened:
+                        with self.assertRaises(RestorePointStoreError):
+                            store.save(rp)
+                    opened.assert_not_called()
+                    self.assertEqual(path.read_bytes(), original_bytes)
+                    self.assertEqual(list(Path(tmp).glob("*.tmp")), [])
+                    self.assertEqual(store.load(original.id), original)
+
     def test_save_uses_temp_then_replace(self) -> None:
         """Per the "Atomic write" rule — verify the temp-file-then-replace dance.
 

@@ -7,6 +7,7 @@ import hashlib
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -474,6 +475,128 @@ Build identity: report what this process can observe.
   Observed for THIS process THIS session - not a system-wide audit.
 """
         self.assertEqual(result.to_text(), expected)
+
+    def test_direct_result_fields_and_rows_are_sanitized_in_both_exports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = trust_self_check.build_trust_self_check(
+                package_root=Path(tmp), entry_module_path=Path(tmp) / "absent.py",
+                now=_NOW,
+            )
+        raw = r"HID\VID_413D&PID_2104&MI_02\SYNTHETIC!PRIVATE|TAIL`END"
+        result = replace(
+            result, generated_at=raw, version=raw, build_commit=raw,
+            build_date=raw, run_mode=raw,
+            rows=(trust_self_check.TrustSelfCheckRow("direct", raw, raw, raw),),
+        )
+        for shared in (result.to_text(), result.to_markdown()):
+            with self.subTest(shared=shared[:50]):
+                self.assertNotIn("SYNTHETIC", shared)
+                self.assertNotIn("PRIVATE", shared)
+                self.assertNotIn("TAIL", shared)
+                self.assertEqual(shared.count("VID_413D&PID_2104"), 8)
+
+    def test_static_scan_identifier_filenames_are_sanitized_only_at_export(self) -> None:
+        marker = "SYNTHETIC-STATIC-PRIVATE"
+        filename = "HID#VID_413D&PID_2104&MI_02#" + marker + ".py"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / filename).write_text(
+                "import socket\nimport webbrowser\n"
+                "webbrowser.open('https://example.invalid')\n",
+                encoding="utf-8",
+            )
+            result = trust_self_check.build_trust_self_check(
+                package_root=root, entry_module_path=root / "absent.py", now=_NOW,
+            )
+        self.assertEqual(result.network_import_findings[0].relative_path, filename)
+        self.assertIn(marker, _row(result, "network").evidence)
+        for shared in (result.to_text(), result.to_markdown()):
+            with self.subTest(shared=shared[:50]):
+                self.assertNotIn(marker, shared)
+                self.assertIn("VID_413D&PID_2104", shared)
+                self.assertIn("imports socket", shared)
+                self.assertIn("webbrowser.open", shared)
+
+    def test_static_scan_normalized_identifier_path_is_sanitized_at_both_exports(self) -> None:
+        marker = "SYNTHETIC-PRIVATE"
+        identifier = "VID_413D&PID_2104&MI_02"
+        benign = "models/AVID_413D&PID_2104/REV-A.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested = root / "HID" / identifier / (marker + ".py")
+            nested.parent.mkdir(parents=True)
+            nested.write_text("import socket\n", encoding="utf-8")
+            ordinary = root / benign
+            ordinary.parent.mkdir(parents=True)
+            ordinary.write_text("import socket\n", encoding="utf-8")
+            result = trust_self_check.build_trust_self_check(
+                package_root=root, entry_module_path=root / "absent.py", now=_NOW,
+            )
+        self.assertIn(
+            "HID/" + identifier + "/" + marker + ".py",
+            tuple(finding.relative_path for finding in result.network_import_findings),
+        )
+        self.assertIn(marker, _row(result, "network").evidence)
+        for shared in (result.to_text(), result.to_markdown()):
+            with self.subTest(shared=shared[:50]):
+                self.assertNotIn(marker, shared)
+                self.assertIn("VID_413D&PID_2104", shared)
+                self.assertIn(benign, shared)
+                self.assertIn("imports socket", shared)
+
+    def test_final_export_keeps_benign_text_markup_and_safe_interface_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = trust_self_check.build_trust_self_check(
+                package_root=Path(tmp), entry_module_path=Path(tmp) / "absent.py",
+                now=_NOW,
+            )
+        interface = r"HID\VID_413D&PID_2104&MI_02"
+        result = replace(
+            result, version="ordinary | [demo]", rows=(
+                trust_self_check.TrustSelfCheckRow(
+                    "benign", "Normal (claim)", "Observed  evidence | [value]", interface,
+                ),
+            ),
+        )
+        plain = result.to_text()
+        markdown = result.to_markdown()
+        self.assertIn("Version: ordinary | [demo]", plain)
+        self.assertIn("Normal (claim)\n  Observed  evidence | [value]", plain)
+        self.assertIn(interface, plain)
+        self.assertIn(r"ordinary \| \[demo\]", markdown)
+        self.assertIn(r"Normal \(claim\)", markdown)
+        self.assertIn(r"Observed  evidence \| \[value\]", markdown)
+        self.assertIn(r"HID\\VID_413D&PID_2104&MI_02", markdown)
+
+    def test_observed_values_compose_privacy_without_normalizing_whitespace(self) -> None:
+        clean = trust_self_check._clean_observed_value
+        self.assertEqual(clean(None), "")
+        self.assertEqual(clean("  ordinary | [value]\r\nnext  "), "  ordinary | [value]\r\nnext  ")
+        for raw in (
+            "VID_413D&PID_2104#SYNTHETIC!UNIT|TAIL`END",
+            r"HID\VID_413D&PID_2104&MI_02\SYNTHETIC@UNIT(END)[FINAL]",
+        ):
+            with self.subTest(raw=raw):
+                safe = clean(raw)
+                self.assertIn("VID_413D&PID_2104", safe)
+                self.assertNotIn("SYNTHETIC", safe)
+                self.assertNotIn("FINAL", safe)
+
+    def test_model_string_instance_tails_are_redacted_in_both_exports(self) -> None:
+        fingerprint = ModelFingerprint(
+            product_string="VID_413D&PID_2104#SYNTHETIC!UNIT|TAIL`END",
+            manufacturer_string=r"HID\VID_413D&PID_2104\SYNTHETIC@UNIT(END)",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            result = trust_self_check.build_trust_self_check(
+                package_root=Path(tmp), entry_module_path=Path(tmp) / "absent.py",
+                model_fingerprint=fingerprint, now=_NOW,
+            )
+        for shared in (result.to_text(), result.to_markdown()):
+            with self.subTest(shared=shared[:50]):
+                self.assertNotIn("SYNTHETIC", shared)
+                self.assertNotIn("TAIL", shared)
+                self.assertIn("VID_413D&PID_2104", shared)
 
     def test_model_fingerprint_block_renders_fields_without_serial(self) -> None:
         fingerprint = ModelFingerprint(

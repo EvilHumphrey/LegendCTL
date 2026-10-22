@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 from zd_app.services.path_scrub import scrub_paths
-from zd_app.storage._import_guards import read_guarded_json
+from zd_app.storage._import_guards import MAX_IMPORT_BYTES, read_guarded_json
 from zd_app.storage.restore_point_models import (
     KIND,
     RestorePoint,
@@ -117,11 +117,18 @@ class RestorePointStore:
         filename = filename_for(rp)
         final_path = self._contained(filename)
         temp_path = final_path.with_suffix(final_path.suffix + TEMP_SUFFIX)
-        payload = json.dumps(restore_point_to_dict(rp), indent=2)
+        payload = json.dumps(restore_point_to_dict(rp), indent=2).encode("utf-8")
+        # A saved checkpoint must fit the same ceiling enforced by load/list.
+        # Check the exact bytes before opening even a temporary output file.
+        if len(payload) > MAX_IMPORT_BYTES:
+            raise RestorePointStoreError(
+                f"restore point is too large (limit {MAX_IMPORT_BYTES} bytes)"
+            )
 
         # Open/write/flush/fsync the temp before the replace so the final
         # path swap exposes only fully-written bytes.
-        with open(temp_path, "w", encoding="utf-8") as handle:
+        # Binary output prevents Windows newline expansion after the size check.
+        with open(temp_path, "wb") as handle:
             handle.write(payload)
             handle.flush()
             try:

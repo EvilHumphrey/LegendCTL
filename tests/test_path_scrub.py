@@ -18,6 +18,7 @@ from zd_app.services.path_scrub import (
     APP_DATA_PLACEHOLDER,
     HOME_PLACEHOLDER,
     PathScrubbingFormatter,
+    redact_inline_instance_ids,
     sanitize_shareable_json,
     sanitize_shareable_text,
     scrub_paths,
@@ -336,6 +337,73 @@ class PathScrubbingFormatterTests(unittest.TestCase):
         # The traceback block survives (the exception type is still reported);
         # only the home path in the exception message is reduced to a basename.
         self.assertIn("FileNotFoundError", out)
+
+    def test_real_presence_log_shapes_redact_repr_escaped_unit_ids(self) -> None:
+        previous = (
+            "connected", "zd_supported",
+            r"HID\VID_413D&PID_2104&MI_02\SYNTHETIC-OLD-UNIT",
+        )
+        current = (
+            "connected", "zd_supported",
+            r"HID\VID_413D&PID_2104&MI_02\SYNTHETIC-NEW-UNIT",
+        )
+        formats = (
+            "Discarded stale settings read for presence=%r generation=%s; "
+            "current=%r generation=%s",
+            "Discarded stale post-write controller operation for presence=%r "
+            "generation=%s; current=%r generation=%s",
+            "Profile apply refused after controller transition from %r "
+            "generation=%s to %r generation=%s",
+            # A legacy copied log still must not leak the unit tail.
+            "Profile apply refused after controller transition from %r/%s to %r/%s",
+        )
+        for message in formats:
+            with self.subTest(message=message):
+                record = logging.LogRecord(
+                    "t", logging.INFO, "synthetic.py", 1, message,
+                    (previous, 31, current, 32), None,
+                )
+                out = self._format(record)
+                self.assertNotIn("SYNTHETIC-OLD-UNIT", out)
+                self.assertNotIn("SYNTHETIC-NEW-UNIT", out)
+                self.assertEqual(out.count("VID_413D&PID_2104"), 2)
+                self.assertEqual(out.count("connected"), 2)
+                self.assertEqual(out.count("zd_supported"), 2)
+                if "generation=%s" in message:
+                    self.assertIn("generation=31", out)
+                    self.assertIn("generation=32", out)
+                # In the slash form, a closing repr quote and /generation
+                # are legal ID characters. Privacy takes precedence over
+                # retaining that ambiguous punctuation (and its suffix).
+
+    def test_ordinary_tuple_and_prose_remain_unchanged(self) -> None:
+        record = logging.LogRecord(
+            "t", logging.INFO, "synthetic.py", 1,
+            "state=%r generation=%s; retry (safe), ready [now]",
+            (("connected", "zd_supported", "xinput-slot-0"), 31), None,
+        )
+        self.assertEqual(
+            self._format(record),
+            "INFO t: " + record.getMessage(),
+        )
+
+    def test_exception_traceback_redacts_device_tail_before_path_reduction(self) -> None:
+        try:
+            raise RuntimeError(
+                r"failed \\?\HID#VID_413D&PID_2104#SYNTHETIC!UNIT|TAIL`END"
+            )
+        except RuntimeError:
+            import sys
+            record = logging.LogRecord(
+                "t", logging.ERROR, "synthetic.py", 1,
+                "probe failed", (), sys.exc_info(),
+            )
+        out = self._format(record)
+        self.assertNotIn("SYNTHETIC", out)
+        self.assertNotIn("TAIL", out)
+        self.assertIn("VID_413D&PID_2104", out)
+        self.assertIn("RuntimeError", out)
+        self.assertIn("Traceback", out)
 
 
 class MultiPathLineTests(unittest.TestCase):
@@ -1932,6 +2000,77 @@ class ShareableArtifactSanitizerTests(unittest.TestCase):
     def test_adjacent_status_text_is_not_mistaken_for_an_instance_tail(self) -> None:
         raw = "VID_413D&PID_2104&status=failed"
         self.assertEqual(sanitize_shareable_text(raw), raw)
+
+    def test_standalone_interface_hardware_id_keeps_safe_qualifier(self) -> None:
+        # MI identifies a shared interface, not a physical unit. The previous
+        # terminal-MI alternative stripped it even without an instance tail.
+        for raw in (
+            r"HID\VID_413D&PID_2104&MI_02",
+            r"USB\VID_413D&PID_2104&MI_02",
+            "HID/VID_413D&PID_2104&MI_02",
+            "VID_413D&PID_2104&MI_02",
+            "VID_413D&PID_2104&REV_0001&MI_02&IG_00",
+        ):
+            for clean in (redact_inline_instance_ids, sanitize_shareable_text):
+                with self.subTest(raw=raw, clean=clean.__name__):
+                    self.assertEqual(clean(raw), raw)
+        record = logging.LogRecord(
+            "t", logging.INFO, "synthetic.py", 1, "interface=%s",
+            (r"HID\VID_413D&PID_2104&MI_02",), None,
+        )
+        self.assertEqual(
+            PathScrubbingFormatter().format(record),
+            r"interface=HID\VID_413D&PID_2104&MI_02",
+        )
+
+    def test_mi_qualified_instance_tails_still_redact_all_legal_punctuation(self) -> None:
+        for separator in ("\\", "#", "/"):
+            for tail in ("SYNTHETIC!UNIT|TAIL`END", "SYNTHETIC@UNIT(END)[FINAL]"):
+                raw = r"HID\VID_413D&PID_2104&MI_02" + separator + tail
+                for clean in (redact_inline_instance_ids, sanitize_shareable_text):
+                    with self.subTest(raw=raw, clean=clean.__name__):
+                        self.assertEqual(clean(raw), r"HID\VID_413D&PID_2104")
+
+    def test_embedded_model_head_in_freeform_token_is_preserved(self) -> None:
+        for prefix in ("A", "X", "9", "_", "product_AVID_", "deviceName"):
+            raw = prefix + "VID_413D&PID_2104#REV-A"
+            for clean in (redact_inline_instance_ids, sanitize_shareable_text):
+                with self.subTest(prefix=prefix, clean=clean.__name__):
+                    self.assertEqual(clean(raw), raw)
+
+    def test_normalized_slash_instance_path_is_redacted(self) -> None:
+        for prefix in ("", "HID/", "USB/", "scan/HID/"):
+            for qualifiers in ("", "&MI_02", "&REV_0001&MI_02&IG_00"):
+                raw = prefix + "VID_413D&PID_2104" + qualifiers + "/SYNTHETIC-PRIVATE.py"
+                for clean in (redact_inline_instance_ids, sanitize_shareable_text):
+                    with self.subTest(raw=raw, clean=clean.__name__):
+                        self.assertEqual(clean(raw), prefix + "VID_413D&PID_2104")
+        benign = "models/AVID_413D&PID_2104/REV-A.py"
+        self.assertEqual(redact_inline_instance_ids(benign), benign)
+        self.assertEqual(sanitize_shareable_text(benign), benign)
+
+    def test_token_boundary_keeps_delimited_and_escaped_ids_redacted(self) -> None:
+        identifier = "VID_413D&PID_2104&REV_0001&MI_02#SYNTHETIC!UNIT|TAIL`END"
+        forms = (
+            identifier,
+            "HID\\" + identifier,
+            "USB\\" + identifier,
+            "\\\\?\\HID#" + identifier,
+            "'" + identifier + "'",
+            '"' + identifier + '"',
+            "id=" + identifier,
+            "#" + identifier,
+            "\\" + identifier,
+            repr("HID\\" + identifier),
+            repr(("connected", "zd_supported", "HID\\" + identifier)),
+        )
+        for raw in forms:
+            for clean in (redact_inline_instance_ids, sanitize_shareable_text):
+                with self.subTest(raw=raw, clean=clean.__name__):
+                    safe = clean(raw)
+                    self.assertIn("VID_413D&PID_2104", safe)
+                    self.assertNotIn("SYNTHETIC", safe)
+                    self.assertNotIn("TAIL", safe)
 
     def test_recursive_json_sanitizes_string_mapping_keys(self) -> None:
         raw = {

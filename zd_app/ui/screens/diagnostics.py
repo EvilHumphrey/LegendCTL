@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from uuid import uuid4
 
 import dearpygui.dearpygui as dpg
 
@@ -1274,17 +1275,18 @@ def _copy_share_card_markdown(shell) -> None:
 
 def _save_share_card(shell) -> None:
     try:
-        requested = preferences.diagnostics_bundle_dir_open_target(
-            shell.settings.diagnostics_bundle_dir
-        )
-        output_dir = shell.diagnostics_service._safe_output_dir(str(requested))
-        output_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y-%m-%d_%H%M%S")
-        html_path = output_dir / f"legendctl_evidence_card_{stamp}.html"
-        markdown_path = output_dir / f"legendctl_evidence_card_{stamp}.md"
-        card = _share_card_result(shell)
-        html_path.write_text(card.to_html(), encoding="utf-8")
-        markdown_path.write_text(card.to_markdown(), encoding="utf-8")
+        stem = f"legendctl_evidence_card_{stamp}_{uuid4().hex}"
+        with shell.diagnostics_service.output_directory(
+            shell.settings.diagnostics_bundle_dir
+        ) as directory:
+            card = _share_card_result(shell)
+            html_path = directory.write_text(
+                f"{stem}.html", card.to_html(), rename_on_collision=False,
+            )
+            markdown_path = directory.write_text(
+                f"{stem}.md", card.to_markdown(), rename_on_collision=False,
+            )
     except Exception:  # noqa: BLE001 - save action should never crash the UI
         logger.exception("Diagnostics share card export failed")
         shell.device_service.log_i18n_event("log.diagnostics.share_card_failed")

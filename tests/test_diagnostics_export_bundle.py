@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from zd_app.models import DeviceState
 from zd_app.services.diagnostics_service import DiagnosticsService, _redact_instance_id
+from zd_app.storage import _output_guards
 
 
 class RedactInstanceIdTests(unittest.TestCase):
@@ -85,6 +86,16 @@ class ExportBundlePrivacyTests(unittest.TestCase):
 
 
 class ExportBundlePathConstraintTests(unittest.TestCase):
+    def test_remote_setting_and_unsafe_default_fail_before_path_lookup(self) -> None:
+        root = str(Path.cwd() / "synthetic-root")
+        for configured, default in ((r"\\server\share\diagnostics", root), (root, r"\\server\share\app")):
+            with self.subTest(configured=configured), patch.dict(os.environ, {"ZDUL_DATA_DIR": default}), patch.object(
+                Path, "resolve", side_effect=AssertionError("resolve before admission")
+            ), patch.object(Path, "stat", side_effect=AssertionError("stat before admission")), patch.object(
+                _output_guards, "_windows_open", side_effect=AssertionError("native open before admission")
+            ), self.assertRaises(_output_guards.UnsafeOutputPathError):
+                DiagnosticsService().export_bundle(DeviceState(), None, None, configured)
+
     def test_dir_inside_user_data_root_is_honored(self) -> None:
         with tempfile.TemporaryDirectory() as data_root:
             with patch.dict(os.environ, {"ZDUL_DATA_DIR": data_root}):

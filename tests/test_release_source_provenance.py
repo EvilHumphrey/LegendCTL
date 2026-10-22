@@ -61,6 +61,89 @@ class RepositoryFixture(unittest.TestCase):
 
 @unittest.skipUnless(exporter, "raw export helper not present on this revision")
 class RawSourceTests(RepositoryFixture):
+    def test_gitlinks_are_rejected_without_status_or_nested_filter_execution(self):
+        nested = self.repo / "nested"
+        nested.mkdir()
+        git(nested, "init", "-q")
+        git(nested, "config", "user.name", "Fixture")
+        git(nested, "config", "user.email", "fixture@example.invalid")
+        (nested / ".gitattributes").write_text("tracked.txt filter=fixture\n")
+        (nested / "tracked.txt").write_text("before\n")
+        git(nested, "add", ".gitattributes", "tracked.txt")
+        git(nested, "commit", "-qm", "nested fixture")
+        nested_commit = git(nested, "rev-parse", "HEAD")
+        marker = nested / "FILTER_WAS_EXECUTED"
+        # These harmless filter commands and all Git mutations belong only to
+        # disposable fixtures. No real build or checkout is modified.
+        for kind in ("clean", "process"):
+            for location in ("index", "head", "both"):
+                with self.subTest(kind=kind, location=location):
+                    git(self.repo, "update-index", "--add", "--cacheinfo", f"160000,{nested_commit},nested")
+                    if location in {"head", "both"}:
+                        tree = git(self.repo, "write-tree")
+                        head = git(self.repo, "commit-tree", tree, "-p", self.commit_id, "-m", "gitlink fixture")
+                        git(self.repo, "update-ref", "HEAD", head)
+                    if location == "head":
+                        git(self.repo, "update-index", "--force-remove", "nested")
+                    git(nested, "config", f"filter.fixture.{kind}", "echo ran > FILTER_WAS_EXECUTED; cat")
+                    (nested / "tracked.txt").write_text("changed and longer\n")
+                    try:
+                        with patch.object(exporter, "_git", wraps=exporter._git) as queried:
+                            diagnostic = "Unsupported Git entry: nested \\(160000 commit\\)" if location == "both" else "Staged source changes"
+                            with self.assertRaisesRegex(exporter.ExportError, diagnostic):
+                                exporter.assert_clean_tree(self.repo)
+                        self.assertFalse(marker.exists())
+                        self.assertTrue(queried.call_args_list)
+                        self.assertTrue(all(call.args[0] == self.repo for call in queried.call_args_list))
+                        self.assertNotIn("status", [call.args[1] for call in queried.call_args_list])
+                    finally:
+                        git(nested, "config", "--unset", f"filter.fixture.{kind}")
+                        git(self.repo, "update-index", "--force-remove", "nested")
+                        git(self.repo, "update-ref", "HEAD", self.commit_id)
+
+    @unittest.skipUnless(os.name == "nt", "Windows late output junction boundary")
+    def test_existing_dist_and_late_junction_are_refused_without_touching_outputs(self):
+        live = self.repo / "dist"
+        live.mkdir()
+        (live / "previous.zip").write_bytes(b"previous release")
+        # Existing dist is refused before source export or any child process.
+        with patch.object(exporter.subprocess, "run", side_effect=AssertionError("must not start a process")):
+            with self.assertRaisesRegex(exporter.ExportError, "destination must be new"):
+                exporter.run_build(self.repo, live, Path(sys.executable))
+        self.assertEqual((live / "previous.zip").read_bytes(), b"previous release")
+
+        source = self.root / "new-output"
+        source.mkdir()
+        archive = source / "fixture-windows.zip"
+        archive.write_bytes(b"new release")
+        (source / "SHA256SUMS.txt").write_text(hashlib.sha256(archive.read_bytes()).hexdigest() + "  fixture-windows.zip\n")
+        self.assertEqual(exporter.assert_clean_tree(self.repo), self.commit_id)
+        # Replace the output leaf after successful source admission. The
+        # publication check must still refuse it, preserving both old outputs
+        # and the junction target instead of traversing/removing either.
+        retained = self.root / "previous-output"
+        live.rename(retained)
+        target = self.root / "outside"
+        target.mkdir()
+        sentinel = target / "keep.txt"
+        sentinel.write_bytes(b"outside sentinel")
+        completed = subprocess.run([
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+            "New-Item -ItemType Junction -Path $env:PROVENANCE_LINK -Target $env:PROVENANCE_TARGET | Out-Null"],
+            env={**os.environ, "PROVENANCE_LINK": str(live), "PROVENANCE_TARGET": str(target)},
+            capture_output=True, timeout=30)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        try:
+            with exporter.PathGuard() as guard:
+                with self.assertRaisesRegex(exporter.ExportError, "destination already exists"):
+                    exporter.publish_artifacts(source, live, self.commit_id, guard)
+            self.assertEqual(sentinel.read_bytes(), b"outside sentinel")
+            self.assertEqual(list(target.iterdir()), [sentinel])
+            self.assertEqual((retained / "previous.zip").read_bytes(), b"previous release")
+            self.assertTrue(live.is_junction())
+        finally:
+            live.rmdir()  # unlink only this disposable junction, never recurse
+
     @unittest.skipUnless(os.name == "nt", "Windows authentication diagnostics")
     def test_authentication_failure_reports_bounded_helper_reason(self):
         result = subprocess.CompletedProcess([], 7, b"", b"fixture authentication refused\n" + b"x" * 4000)
