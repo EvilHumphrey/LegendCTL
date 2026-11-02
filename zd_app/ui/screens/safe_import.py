@@ -362,6 +362,19 @@ def _render_diff(shell, result: ImportResult) -> None:
                         color=shell.COLORS["muted"],
                         wrap=700,
                     )
+        trigger_keys = {
+            change.key
+            for changes in result.categories.values()
+            for change in changes
+            if change.key.startswith(("trigger_left.", "trigger_right."))
+        }
+        if trigger_keys:
+            dpg.add_text(
+                f"  {t('safe_import.diff.trigger_pair_omission')}",
+                color=shell.COLORS["warn"],
+                wrap=700,
+                tag="safe_import_trigger_pair_omission",
+            )
         if result.blocked_fields:
             dpg.add_text(
                 f"  {t('safe_import.diff.blocked_label')}: "
@@ -518,6 +531,16 @@ def open_result(shell) -> None:
             dpg.add_text(
                 t("safe_import.result.blocked_fields", fields=", ".join(audit.blocked_field_names)),
                 color=shell.COLORS["muted"],
+                wrap=520,
+            )
+        if audit.omitted_coupled_fields:
+            omitted = ", ".join(
+                t(f"safe_import.field.{field}")
+                for field in audit.omitted_coupled_fields
+            )
+            dpg.add_text(
+                t("safe_import.result.omitted_coupled_fields", fields=omitted),
+                color=shell.COLORS["warn"],
                 wrap=520,
             )
         dpg.add_spacer(height=6)

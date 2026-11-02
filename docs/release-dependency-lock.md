@@ -25,10 +25,15 @@ Local release builds retain the supported Python 3.12 workflow:
 .\tools\build_release.ps1
 ```
 
-`setup_dev_env.ps1` makes and removes its own wheelhouse. It is the required
+`setup_dev_env.ps1` makes and safely empties its own wheelhouse. If guarded
+cleanup refuses a changed or redirected wheelhouse, it leaves that path visible
+for inspection instead of recursively deleting it. The script is the required
 bootstrap path; `build_release.ps1` deliberately does not run `pip install`.
-After refreshing the lock, rerun setup with `-Recreate` to intentionally replace
-the existing build venv. Hosted releases make a new venv for every run.
+After refreshing the lock, close processes using `.venv-zd`, inspect it, and
+move the known ordinary directory outside the checkout before rerunning setup.
+Setup never deletes or repairs an existing environment, and `-Recreate` is no
+longer supported. Do not delete or move a path that may be a redirect until its
+target and ownership are understood. Hosted releases make a new venv per run.
 Hosted releases remain on the exact Python 3.13.14 pin in
 `.github/workflows/release-build.yml`.
 

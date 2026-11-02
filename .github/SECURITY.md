@@ -51,13 +51,16 @@ The released executable is currently **unsigned** (no Authenticode code-signing
 certificate). Official release assets from v2.5.0 onward are built from the
 release tag in this repository's GitHub Actions workflow, publish
 `SHA256SUMS.txt`, and carry GitHub build-provenance attestations that can be
-checked with `gh attestation verify`. Download and updates remain manual;
+checked with `gh attestation verify`. The checksum detects mismatched or
+corrupted bytes relative to the supplied value; when both files come from the
+same release channel, it does not authenticate the publisher. The attestation
+is the separate build-origin check for attested releases. Download and updates remain manual;
 LegendCTL has no auto-updater. Code-signing via the SignPath Foundation OSS
 program is planned — see
 [docs/code-signing-policy.md](../docs/code-signing-policy.md). See the README's
 ["First-run SmartScreen, and verifying your download"](../README.md#first-run-smartscreen-and-verifying-your-download)
-section for what to expect from SmartScreen and antivirus, and how to verify the
-hash.
+section for what to expect from SmartScreen and antivirus, how to check the
+hash, and how to verify build provenance.
 
 ## How to report a vulnerability
 

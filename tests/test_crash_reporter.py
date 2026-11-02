@@ -74,6 +74,59 @@ class CrashReporterTests(unittest.TestCase):
         self.assertIn("FileNotFoundError", body)
         self.assertIn("config.json", body)
 
+    def test_crash_report_sanitizes_instance_ids_in_summary_and_traceback(self) -> None:
+        """Dated reports remove per-unit identifiers at both shareable sinks.
+
+        ``scrub_paths`` alone used to keep the stable tail after reducing a
+        HID interface path to a basename. Exercise the real report writer with
+        distinct summary/traceback identifiers, punctuation-bearing tails,
+        and a relocated home path so neither representation can bypass the
+        composed sanitizer.
+        """
+
+        crash_reporter.install_crash_handlers(self.user_data_dir)
+        summary_tail = "UNIT@SERIAL(123)"
+        traceback_tail = "7&2f3a1c2b&0&0000"
+        summary_id = rf"HID\VID_413D&PID_2104&MI_02\{summary_tail}"
+        traceback_id = (
+            rf"\\?\HID#VID_413D&PID_2104&MI_02#{traceback_tail}"
+            r"#{12345678-1234-1234-1234-123456789abc}"
+        )
+        relocated_home = Path(r"D:\Profiles\Jane Doe")
+        fake_traceback = (
+            "Traceback (most recent call last):\n"
+            rf'  File "{relocated_home}\private\frame.py", line 7, in worker\n'
+            rf"RuntimeError: controller read failed via {traceback_id}\n"
+        )
+
+        with (
+            mock.patch(
+                "zd_app.services.path_scrub.Path.home",
+                return_value=relocated_home,
+            ),
+            mock.patch.object(
+                crash_reporter.traceback,
+                "format_exception",
+                return_value=[fake_traceback],
+            ),
+        ):
+            self._trigger_excepthook(
+                RuntimeError(
+                    rf"controller read failed via {summary_id} from "
+                    rf"{relocated_home}\private\capture.json"
+                )
+            )
+
+        body = self._read_only_crash_report().read_text(encoding="utf-8")
+        self.assertNotIn(summary_tail, body)
+        self.assertNotIn(traceback_tail, body)
+        self.assertNotIn("Jane Doe", body)
+        self.assertNotIn(r"D:\Profiles", body)
+        self.assertIn("VID_413D&PID_2104", body)
+        self.assertIn("controller read failed", body)
+        self.assertIn("capture.json", body)
+        self.assertIn("frame.py", body)
+
     def test_install_crash_handlers_chains_previous_excepthook(self) -> None:
         captured: list[tuple] = []
 
@@ -256,6 +309,9 @@ class CrashReporterTests(unittest.TestCase):
         text = readme.read_text(encoding="utf-8")
         self.assertIn("NOT SHARE-SAFE", text)
         self.assertIn("_faulthandler.log", text)
+        self.assertIn("recognized VID/PID-form per-unit interface tails", text)
+        self.assertIn("REVIEW BEFORE SHARING", text)
+        self.assertIn("free-form exception text can remain", text)
 
         # The marker (and the faulthandler log) must not be treated as reports.
         unread = crash_reporter.list_unread_crash_reports(self.user_data_dir, since=None)

@@ -11,14 +11,13 @@ Sanitization
 ------------
 Reports intentionally exclude ``sys.argv``, environment variables, frame
 local variables, hostnames, and network info. The exception summary and the
-traceback block are run through the shared path scrubber
-(:func:`zd_app.services.path_scrub.scrub_paths`) before writing, so a home
-path in an exception message or a from-source frame
-(``C:\\Users\\<name>\\...``) collapses to a basename / app-relative frame
-(``zd_app/...``) and the account username never lands in the report. The
+traceback block pass through the complete shareable-text boundary
+(:func:`zd_app.services.path_scrub.sanitize_shareable_text`) before writing.
+It removes home paths and recognized VID/PID-form per-unit interface tails while
+keeping useful basenames, app-relative frames, and model-level VID/PID. Other
+free-form exception text can remain and must be reviewed before sharing. The
 Recent Activity section records ``log_i18n_event`` keys only — never
-``fmt_args`` — because ``fmt_args`` may carry profile names or other user
-input.
+``fmt_args`` — because ``fmt_args`` may carry profile names or other user input.
 """
 
 from __future__ import annotations
@@ -33,7 +32,7 @@ import threading
 import traceback
 from pathlib import Path
 
-from zd_app.services.path_scrub import scrub_paths
+from zd_app.services.path_scrub import sanitize_shareable_text
 from zd_app.version import __app_id__, __app_name__, __build_commit__, __version__
 
 
@@ -87,9 +86,11 @@ def _write_crashes_readme(crashes_dir: Path) -> None:
         "  is written at the C level during a crash and is NOT sanitized. It\n"
         "  can contain raw filesystem paths, including your Windows account\n"
         "  name (e.g. C:\\Users\\<you>\\...).\n\n"
-        "SHARE-SAFE:\n"
-        "  The dated '*.txt' crash reports here ARE sanitized - home paths are\n"
-        "  reduced to file basenames. Prefer those if you send a report.\n"
+        "SANITIZED DATED REPORTS - REVIEW BEFORE SHARING:\n"
+        "  The dated '*.txt' reports reduce home paths to file basenames and\n"
+        "  remove recognized VID/PID-form per-unit interface tails. Other\n"
+        "  free-form exception text can remain, so inspect a dated report\n"
+        "  before sending it.\n"
     )
     try:
         marker.write_text(body, encoding="utf-8")
@@ -335,13 +336,13 @@ def _format_report(
 
     if exc_type is not None:
         tb_lines = traceback.format_exception(exc_type, exc_value, exc_tb)
-        # Scrub home paths from BOTH the frame paths in the traceback and the
-        # exception summary (the exception *value* can be a path, e.g.
-        # FileNotFoundError(r"C:\\Users\\<name>\\x.json")). The shared scrubber
-        # preserves app-relative frames (``zd_app/...``) while dropping the
-        # home/username prefix.
-        tb_block = scrub_paths("".join(tb_lines).rstrip())
-        exc_summary = scrub_paths(
+        # Apply the complete shareable-text boundary to BOTH the traceback and
+        # exception summary. The exception value may contain a home path or a
+        # recognized VID/PID-form instance ID, and path-only scrubbing does not
+        # remove those per-unit tails. Useful basenames, app-relative frames,
+        # and the model-level VID/PID remain.
+        tb_block = sanitize_shareable_text("".join(tb_lines).rstrip())
+        exc_summary = sanitize_shareable_text(
             f"{getattr(exc_type, '__module__', '?')}.{exc_type.__name__}: {exc_value}"
         )
     else:

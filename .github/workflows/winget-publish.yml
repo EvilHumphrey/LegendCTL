@@ -64,6 +64,14 @@ jobs:
             throw "Refusing winget submission: '$tag' is not vMAJOR.MINOR.PATCH."
           }
 
+          $ghVersionLine = @(gh --version)[0]
+          if ($LASTEXITCODE -ne 0 -or $ghVersionLine -notmatch '^gh version ([0-9]+\.[0-9]+\.[0-9]+)\b') {
+            throw "Could not determine the GitHub CLI version."
+          }
+          if ([version]$Matches[1] -lt [version]'2.102.0') {
+            throw "GitHub CLI 2.102.0 or newer is required for strict attestation verification."
+          }
+
           # Only ever move the catalog forward. Without this, a dispatch naming
           # an older tag passes every other gate and opens a PR that rewrites
           # manifests Microsoft has already validated and merged.
@@ -126,7 +134,10 @@ jobs:
             throw "SHA256SUMS.txt disagrees with the published bytes for $assetName."
           }
 
-          gh attestation verify "verify/$assetName" --repo $env:GITHUB_REPOSITORY
+          gh attestation verify "verify/$assetName" `
+            --repo $env:GITHUB_REPOSITORY `
+            --signer-workflow "$env:GITHUB_REPOSITORY/.github/workflows/release-build.yml" `
+            --source-ref "refs/tags/$tag"
           if ($LASTEXITCODE -ne 0) {
             throw "Installer failed build-provenance verification; refusing submission."
           }

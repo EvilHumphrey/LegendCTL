@@ -20,7 +20,8 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Iterator
+from types import MappingProxyType
+from typing import Any, Iterator, Mapping
 
 from zd_app.models import WrapperProfile
 from zd_app.storage._import_guards import MAX_IMPORT_JSON_DEPTH
@@ -44,7 +45,7 @@ class RiskCategory(Enum):
 # logic. Keys are "preview field" keys (mostly snapshot keys; the trigger frames
 # split into ``.range`` (FEEL) and ``.mode`` (LAYOUT) because one trigger frame
 # carries both a feel value and a layout-ish mode). Kept as a seam for the badges.
-_CATEGORY_MAP: dict[str, RiskCategory] = {
+FIELD_CATEGORY_MAP: Mapping[str, RiskCategory] = MappingProxyType({
     "polling_rate": RiskCategory.DEVICE,  # Resolved: Device (not Feel).
     "step_size": RiskCategory.DEVICE,  # Device: global stick step-size, like polling.
     "vibration": RiskCategory.COSMETIC,
@@ -71,11 +72,17 @@ _CATEGORY_MAP: dict[str, RiskCategory] = {
     "lighting_zones": RiskCategory.COSMETIC,
     "motion_settings": RiskCategory.FEEL,  # motion sensitivity; read-only on apply.
     "back_paddle_bindings": RiskCategory.LAYOUT,
-}
+})
+
+# Temporary compatibility alias for callers outside this module that have not
+# yet migrated to the public registry. New code must consume
+# ``FIELD_CATEGORY_MAP`` so preview, filtering, and classification share the
+# same field-level policy.
+_CATEGORY_MAP = FIELD_CATEGORY_MAP
 
 # Device-level settings: global controller state (not per-profile feel/layout).
 # Single source of truth shared by Save As (opt-in), the profile-card badge, and
-# the apply confirm. The DEVICE entries of ``_CATEGORY_MAP`` must agree with this
+# the apply confirm. The DEVICE entries of ``FIELD_CATEGORY_MAP`` must agree with this
 # (guarded by ``CategoryMapDriftTests``).
 DEVICE_SETTING_KEYS: frozenset[str] = frozenset({"polling_rate", "step_size"})
 
@@ -88,7 +95,7 @@ KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
 # never drift. A key the codec does not serialize (e.g. the flagged ``step_size``
 # gap) is therefore treated as unknown until both the codec and this map gain it.
 _SNAPSHOT_KEY_ORDER: tuple[str, ...] = tuple(
-    dict.fromkeys(key.split(".", 1)[0] for key in _CATEGORY_MAP)
+    dict.fromkeys(key.split(".", 1)[0] for key in FIELD_CATEGORY_MAP)
 )
 KNOWN_SNAPSHOT_KEYS: frozenset[str] = frozenset(_SNAPSHOT_KEY_ORDER)
 
@@ -515,7 +522,7 @@ def classify_import(
     if result.profile is not None:
         normalized = snapshot_to_dict(result.profile.snapshot)
         for preview_key, imported_value in _iter_preview_fields(normalized):
-            category = _CATEGORY_MAP[preview_key]
+            category = FIELD_CATEGORY_MAP[preview_key]
             result.categories[category].append(
                 FieldChange(category, preview_key, _label_key(preview_key), imported_value)
             )

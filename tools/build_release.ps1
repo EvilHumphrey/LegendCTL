@@ -50,6 +50,26 @@ function Invoke-NativeCommand {
     }
 }
 
+function Get-AcceptedReleaseLockHashes {
+    param([Parameter(Mandatory)][string]$LiteralPath)
+    $lockBytes = [IO.File]::ReadAllBytes($LiteralPath)
+    $lockEncoding = New-Object System.Text.UTF8Encoding($false, $true)
+    $lockText = $lockEncoding.GetString($lockBytes)
+    $lfLockText = $lockText.Replace("`r`n", "`n")
+    $lockHasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        $accepted = @(
+            [BitConverter]::ToString($lockHasher.ComputeHash($lockBytes)).Replace("-", "").ToLowerInvariant()
+        )
+        foreach ($variant in @($lfLockText, $lfLockText.Replace("`n", "`r`n"))) {
+            $accepted += [BitConverter]::ToString($lockHasher.ComputeHash($lockEncoding.GetBytes($variant))).Replace("-", "").ToLowerInvariant()
+        }
+        return @($accepted | Select-Object -Unique)
+    } finally {
+        $lockHasher.Dispose()
+    }
+}
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 . (Join-Path $PSScriptRoot 'release_git.ps1')
@@ -59,8 +79,24 @@ $python = if ($FromVerifiedSnapshot) { $BuildPython } else { Join-Path $repoRoot
 if (-not $FromVerifiedSnapshot) {
     if ($BuildPython -or $ExpectedCommit -or $InnoToolchainRoot -or $SourceRepository -or $GitExecutable) { throw "Snapshot parameters are internal to the release builder." }
     if (-not $ArtifactDestination) { $ArtifactDestination = Join-Path $repoRoot "dist" }
+    $setupLock = Join-Path $repoRoot ".venv-zd.setup-lock"
+    $setupIncomplete = Join-Path $repoRoot ".venv-zd.setup-incomplete"
+    if ((Test-Path -LiteralPath $setupLock) -or (Test-Path -LiteralPath $setupIncomplete)) {
+        throw "The release venv setup is active or incomplete. Inspect the setup markers and recover .venv-zd before building."
+    }
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
         throw "Expected venv at .venv-zd; run tools\setup_dev_env.ps1 first."
+    }
+    $checkoutReleaseLock = Join-Path $repoRoot "requirements-release.lock"
+    $checkoutLockMarker = Join-Path $repoRoot ".venv-zd\.legendctl-release-lock.sha256"
+    if (-not (Test-Path -LiteralPath $checkoutReleaseLock -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $checkoutLockMarker -PathType Leaf)) {
+        throw "Expected a hash-locked release venv; run tools\setup_dev_env.ps1 first."
+    }
+    $checkoutRecordedHash = (Get-Content -LiteralPath $checkoutLockMarker -Raw).Trim()
+    $acceptedCheckoutLockHashes = Get-AcceptedReleaseLockHashes -LiteralPath $checkoutReleaseLock
+    if ($checkoutRecordedHash -notin $acceptedCheckoutLockHashes) {
+        throw "The release venv does not match requirements-release.lock. Move the stale .venv-zd aside, then run tools\setup_dev_env.ps1."
     }
     Invoke-NativeCommand -Label "commit-bound release build" -ScriptBlock { & $python -I -S (Join-Path $PSScriptRoot "export_git_tree.py") --repo $repoRoot --destination $ArtifactDestination --python $python --git $releaseGit }
     return
@@ -83,25 +119,13 @@ $lockMarker = Join-Path (Split-Path -Parent (Split-Path -Parent $python)) ".lege
 if (-not (Test-Path -LiteralPath $releaseLock) -or -not (Test-Path -LiteralPath $lockMarker)) {
     Write-Error "Expected a hash-locked release venv; run ``tools\setup_dev_env.ps1`` first."
 }
-$expectedLockHash = (Get-FileHash -LiteralPath $releaseLock -Algorithm SHA256).Hash.ToLowerInvariant()
 $recordedLockHash = (Get-Content -LiteralPath $lockMarker -Raw).Trim()
 # Existing setup markers hash checkout bytes. A text checkout may have CRLF
 # while this raw Git export has LF. Accept only exact raw/LF/CRLF encodings of
 # this same lock; every pin, wheel hash and other character stays unchanged.
-$lockEncoding = New-Object System.Text.UTF8Encoding($false, $true)
-$lockText = $lockEncoding.GetString([IO.File]::ReadAllBytes($releaseLock))
-$lfLockText = $lockText.Replace("`r`n", "`n")
-$acceptedLockHashes = @($expectedLockHash)
-$lockHasher = [Security.Cryptography.SHA256]::Create()
-try {
-    foreach ($variant in @($lfLockText, $lfLockText.Replace("`n", "`r`n"))) {
-        $acceptedLockHashes += [BitConverter]::ToString($lockHasher.ComputeHash($lockEncoding.GetBytes($variant))).Replace("-", "").ToLowerInvariant()
-    }
-} finally {
-    $lockHasher.Dispose()
-}
+$acceptedLockHashes = Get-AcceptedReleaseLockHashes -LiteralPath $releaseLock
 if ($recordedLockHash -notin $acceptedLockHashes) {
-    Write-Error "The release venv does not match requirements-release.lock; run ``tools\setup_dev_env.ps1 -Recreate``."
+    Write-Error "The release venv does not match requirements-release.lock. Move the stale .venv-zd aside, then run ``tools\setup_dev_env.ps1``."
 }
 
 $versionPy = Get-Content "zd_app\version.py" -Raw

@@ -283,6 +283,62 @@ class ClassifierTests(unittest.TestCase):
         self.assertIsNone(snap.polling_rate)  # device cleared
         self.assertIsNotNone(snap.deadzones)  # feel kept
 
+    def test_trigger_preview_is_split_between_feel_and_layout(self) -> None:
+        result = model.classify_import(_export_dict(), existing_names=set())
+        feel = {change.key for change in result.categories[RiskCategory.FEEL]}
+        layout = {change.key for change in result.categories[RiskCategory.LAYOUT]}
+        self.assertIn("trigger_left.range", feel)
+        self.assertIn("trigger_left.mode", layout)
+        self.assertNotIn("trigger_left", feel | layout)
+
+    def test_trigger_is_retained_only_when_both_categories_are_selected(self) -> None:
+        original = _snapshot()
+        cases = (
+            ({RiskCategory.FEEL, RiskCategory.LAYOUT}, True),
+            ({RiskCategory.FEEL}, False),
+            ({RiskCategory.LAYOUT}, False),
+            (set(), False),
+        )
+        for selected, retained in cases:
+            with self.subTest(selected={category.value for category in selected}):
+                filtered = model.filtered_snapshot(original, selected)
+                if retained:
+                    self.assertEqual(filtered.trigger_left, original.trigger_left)
+                else:
+                    self.assertIsNone(filtered.trigger_left)
+
+    def test_trigger_current_value_accessor_handles_split_fields(self) -> None:
+        serialized = model.snapshot_to_dict(_snapshot())
+        self.assertEqual(
+            model.current_field_value(serialized, "trigger_left.range"),
+            {"range_min": 0, "range_max": 100},
+        )
+        self.assertEqual(
+            model.current_field_value(serialized, "trigger_left.mode"),
+            TriggerMode.SHORT.value,
+        )
+        self.assertEqual(
+            model.summarize_value("trigger_left.mode", TriggerMode.SHORT.value),
+            i18n.t("controller.choice.trigger_mode.short"),
+        )
+
+    def test_effective_audit_categories_exclude_omitted_trigger_only_fields(self) -> None:
+        trigger_only = _snapshot(
+            polling_rate=None,
+            vibration=None,
+            deadzones=None,
+            button_bindings={},
+        )
+        result = model.classify_import(
+            WrapperProfile(name="Trigger only", snapshot=trigger_only).to_dict(),
+            existing_names=set(),
+        )
+        effective = model.filtered_snapshot(trigger_only, {RiskCategory.FEEL})
+        self.assertEqual(
+            model.retained_categories(effective, result.categories),
+            set(),
+        )
+
 
 class Sensitivity8PointImportTests(unittest.TestCase):
     """The 8-point curves must ride the full Safe Import surface.
@@ -593,6 +649,20 @@ class PreviewRenderTests(_DpgTestCase):
         self.assertIn(i18n.t("safe_import.field.sensitivity_left_8point"), joined)
         self._assert_no_placeholders(safe_import.PREVIEW_MODAL)
 
+    def test_trigger_split_and_omission_copy_render_in_each_locale(self) -> None:
+        self.addCleanup(i18n.set_locale, "en")
+        for locale in ("en", "zh-CN", "ko"):
+            with self.subTest(locale=locale):
+                i18n.set_locale(locale)
+                shell = make_shell(settings_service=MagicMock())
+                self._scan(shell, _export_dict())
+                joined = "\n".join(self._labels(safe_import.PREVIEW_MODAL))
+                self.assertIn(i18n.t("safe_import.field.trigger_left.range"), joined)
+                self.assertIn(i18n.t("safe_import.field.trigger_left.mode"), joined)
+                self.assertIn(i18n.t("safe_import.diff.trigger_pair_omission"), joined)
+                self._assert_no_placeholders(safe_import.PREVIEW_MODAL)
+                safe_import.close_modals()
+
     def test_preview_motion_row_carries_never_applied_note(self) -> None:
         # Motion stays importable/preserved, but the wrapper has no motion
         # write path — the diff row must say so, instead of implying the
@@ -644,6 +714,29 @@ class PreviewRenderTests(_DpgTestCase):
         self.assertEqual(shell._safe_import_result.audit.controller_write, "not_performed")
         self.assertTrue(dpg.does_item_exist(safe_import.RESULT_MODAL))
         self._assert_no_placeholders(safe_import.RESULT_MODAL)
+
+    def test_save_only_omits_whole_trigger_when_layout_is_excluded(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        self._full_ui(shell)
+        self._scan(shell, _export_dict())
+        shell._safe_import_selected = {RiskCategory.FEEL}
+
+        shell.safe_import_apply(apply_to_controller=False)
+
+        saved_profile = shell.wrapper_profile_store.save_new.call_args.args[0]
+        self.assertIsNone(saved_profile.snapshot.trigger_left)
+        self.assertEqual(
+            shell._safe_import_result.audit.omitted_coupled_fields,
+            ["trigger_left"],
+        )
+        joined = "\n".join(self._labels(safe_import.RESULT_MODAL))
+        self.assertIn(
+            i18n.t(
+                "safe_import.result.omitted_coupled_fields",
+                fields=i18n.t("safe_import.field.trigger_left"),
+            ),
+            joined,
+        )
 
     def test_save_as_new_uniquifies_default_collision_and_preserves_original(self) -> None:
         with tempfile.TemporaryDirectory() as d:
@@ -751,6 +844,33 @@ class PreviewRenderTests(_DpgTestCase):
         self.assertEqual(shell._safe_import_result.audit.controller_write, "verified")
         # A restore point was saved before applying (current snapshot present).
         self.assertIsNotNone(shell._safe_import_result.audit.restore_point_name)
+
+    def test_save_and_apply_never_sends_trigger_when_layout_is_excluded(self) -> None:
+        shell = make_shell(settings_service=MagicMock())
+        shell.last_controller_snapshot = _snapshot()
+        applied: dict = {}
+
+        def fake_apply(snapshot):
+            applied["snapshot"] = snapshot
+            return SimpleNamespace(failed=[])
+
+        shell._apply_snapshot_to_controller = MagicMock(side_effect=fake_apply)
+        shell.restore_point_service.read_current_state_with_provenance = MagicMock(
+            side_effect=lambda: (applied["snapshot"], {}, {})
+        )
+        self._full_ui(shell)
+        self._scan(shell, _export_dict())
+        shell._safe_import_selected = {RiskCategory.FEEL}
+
+        with patch("zd_app.ui.app_shell.time.sleep"):
+            shell.safe_import_apply(apply_to_controller=True)
+
+        sent = shell._apply_snapshot_to_controller.call_args.args[0]
+        self.assertIsNone(sent.trigger_left)
+        self.assertEqual(
+            shell._safe_import_result.audit.omitted_coupled_fields,
+            ["trigger_left"],
+        )
 
     def test_save_and_apply_sanitizes_custom_collision_and_preserves_original(self) -> None:
         with tempfile.TemporaryDirectory() as d:

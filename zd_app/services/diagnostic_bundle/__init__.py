@@ -15,8 +15,8 @@ Trust posture mirrors the rest of the wrapper:
 - **Local only.** No network calls. No upload. No telemetry.
 - **Path-safe.** Absolute filesystem paths are rewritten with
   ``<APP_DATA>`` placeholders before the Markdown is written.
-- **Privacy-conservative.** The wear-ledger appears in summarized form
-  (counts + recent service notes) — never the raw event timing log.
+- **Privacy-conservative.** The wear-ledger appears in count-only summarized
+  form — never service-note text, note timestamps, or the raw event timing log.
 - **Best-effort.** Missing data sources produce graceful placeholders;
   bundle generation never crashes.
 """

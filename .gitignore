@@ -1,5 +1,7 @@
 # Virtual environments
 .venv*/
+/.venv-zd.setup-lock
+/.venv-zd.setup-incomplete
 venv/
 env/
 

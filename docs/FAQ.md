@@ -46,8 +46,11 @@ test-enforced precisely so you don't have to trust the process; you can read it.
 Fair question — you shouldn't trust any of them blindly. Here's what you *can* do
 instead of trusting: read the source (it's all here), build it yourself, run the
 in-app **Trust Self-Check** (and export the **evidence card**), run the
-[no-network check](verifying-no-network.md), and verify the published **SHA-256**
-of your download against `SHA256SUMS.txt` in each release. Code signing (via the
+[no-network check](verifying-no-network.md), and check the published **SHA-256**
+of your download against `SHA256SUMS.txt` in each release. That detects a
+mismatch relative to the supplied checksum, but same-channel hashes do not
+authenticate the publisher; use the GitHub build-provenance attestation on
+v2.5.0+ releases for the separate origin check. Code signing (via the
 free [SignPath Foundation](https://signpath.org) program for open-source projects)
 is planned once the project is eligible — see the
 [code-signing policy](code-signing-policy.md).
@@ -57,8 +60,10 @@ is planned once the project is eligible — see the
 ### Why does Windows show "Windows protected your PC" (SmartScreen)?
 Because the build is currently **unsigned**. SmartScreen may show that prompt for
 unsigned or low-reputation downloads — it is not, by itself, a sign of malware.
-Verify the SHA-256 (above), then choose **More info → Run anyway**. Full detail
-under [First-run SmartScreen, and verifying your download](../README.md#first-run-smartscreen-and-verifying-your-download).
+A matching SHA-256 alone is not a reason to bypass the warning. Use the
+attestation check where available, and choose **More info → Run anyway** only if
+you independently trust the source and accept the unsigned-build risk. Full
+detail is under [First-run SmartScreen, and verifying your download](../README.md#first-run-smartscreen-and-verifying-your-download).
 
 ### My antivirus flagged it — is it a virus?
 Often a false positive for this packaging pattern — but verify rather than

@@ -13,8 +13,9 @@ services contract deliberately does not carry:
   ``ImportAudit`` the apply flow mutates, and an ``ImportResult`` carrying
   ``error_key`` / ``error_detail`` for hard-fail display plus the convenience
   members the screens read.
-* the category map, display helpers, name generation, and the file-loading glue
-  (``prepare_import``) are UI-owned and stay here.
+* display helpers, name generation, and the file-loading glue
+  (``prepare_import``) are UI-owned and stay here. The services classifier's
+  field-level category registry is canonical for both preview and filtering.
 
 ``classify_import`` is the adapter: it delegates blocked / unknown / automation
 detection to the services classifier, then presents the outcome in the UI
@@ -80,40 +81,30 @@ DEFAULT_CHECKED_CATEGORIES = (
 )
 
 
-# Serialized snapshot top-level key -> risk category (resolved map).
-# FEEL = deadzones, sensitivity curves, axis inversion, trigger range/mode,
-# motion sensitivity; LAYOUT = button bindings + back-paddle single-button;
-# COSMETIC = lighting + vibration; DEVICE = polling rate + step-size.
-SNAPSHOT_FIELD_CATEGORY: dict[str, RiskCategory] = {
-    "polling_rate": RiskCategory.DEVICE,
-    "step_size": RiskCategory.DEVICE,
-    "vibration": RiskCategory.COSMETIC,
-    "deadzones": RiskCategory.FEEL,
-    "axis_inversion_left": RiskCategory.FEEL,
-    "axis_inversion_right": RiskCategory.FEEL,
-    "sensitivity_left": RiskCategory.FEEL,
-    "sensitivity_right": RiskCategory.FEEL,
-    # 1.2.9 / fw-1.24 8-point curves (HID cat 0x86): the same per-stick feel
-    # surface as the 3-point curves above, so they share the FEEL bucket
-    # (mirrors ``import_classifier._CATEGORY_MAP``). Absent from this map they
-    # were invisible in the preview AND survived FEEL deselection in
-    # ``filtered_snapshot`` — guarded by tests/test_field_registry_drift.py.
-    "sensitivity_left_8point": RiskCategory.FEEL,
-    "sensitivity_right_8point": RiskCategory.FEEL,
-    "trigger_left": RiskCategory.FEEL,
-    "trigger_right": RiskCategory.FEEL,
-    "button_bindings": RiskCategory.LAYOUT,
-    "lighting_zones": RiskCategory.COSMETIC,
-    "motion_settings": RiskCategory.FEEL,
-    "back_paddle_bindings": RiskCategory.LAYOUT,
-}
+# Canonical field-level registry. Trigger frames are deliberately split into
+# range (Feel) and mode (Layout); filtering later treats the serialized trigger
+# object as indivisible and retains it only when both categories are selected.
+FIELD_CATEGORY_MAP = import_classifier.FIELD_CATEGORY_MAP
+# Compatibility name retained for callers/tests while its semantics move from
+# top-level fields to the canonical field-level registry.
+SNAPSHOT_FIELD_CATEGORY = FIELD_CATEGORY_MAP
+
+
+def _top_level_field_categories() -> dict[str, frozenset[RiskCategory]]:
+    categories: dict[str, set[RiskCategory]] = {}
+    for field_key, category in FIELD_CATEGORY_MAP.items():
+        categories.setdefault(field_key.split(".", 1)[0], set()).add(category)
+    return {key: frozenset(values) for key, values in categories.items()}
+
+
+TOP_LEVEL_FIELD_CATEGORIES = _top_level_field_categories()
 
 # Serialized snapshot fields backed by a dict (empty == absent).
 _DICT_SNAPSHOT_FIELDS = ("button_bindings", "lighting_zones", "back_paddle_bindings")
 
 # i18n label keys for each known field (used by the diff + result screens).
 FIELD_LABEL_KEYS: dict[str, str] = {
-    key: f"safe_import.field.{key}" for key in SNAPSHOT_FIELD_CATEGORY
+    key: f"safe_import.field.{key}" for key in FIELD_CATEGORY_MAP
 }
 
 _POLLING_HZ = {
@@ -150,6 +141,7 @@ class ImportAudit:
     generated_profile_id: str = ""
     selected_categories: list[RiskCategory] = field(default_factory=list)
     skipped_categories: list[RiskCategory] = field(default_factory=list)
+    omitted_coupled_fields: list[str] = field(default_factory=list)
     blocked_field_names: list[str] = field(default_factory=list)
     blocked_automation_count: int = 0
     controller_write: str = "not_performed"  # not_performed | sent | verified | aborted
@@ -330,11 +322,11 @@ def classify_import(raw_payload: dict, *, existing_names: set[str]) -> ImportRes
 def _bucket_snapshot(profile: WrapperProfile) -> dict[RiskCategory, list[FieldChange]]:
     serialized = snapshot_to_dict(profile.snapshot)
     categories: dict[RiskCategory, list[FieldChange]] = {}
-    for key, category in SNAPSHOT_FIELD_CATEGORY.items():
-        value = serialized.get(key)
+    for key, category in FIELD_CATEGORY_MAP.items():
+        value = _serialized_field_value(serialized, key)
         if value is None:
             continue
-        if key in _DICT_SNAPSHOT_FIELDS and not value:
+        if key.split(".", 1)[0] in _DICT_SNAPSHOT_FIELDS and not value:
             continue
         change = FieldChange(
             category=category,
@@ -344,6 +336,31 @@ def _bucket_snapshot(profile: WrapperProfile) -> dict[RiskCategory, list[FieldCh
         )
         categories.setdefault(category, []).append(change)
     return categories
+
+
+def _serialized_field_value(serialized: dict[str, Any], field_key: str) -> Any:
+    """Return the field-level preview value from a serialized snapshot."""
+
+    top, dot, leaf = field_key.partition(".")
+    value = serialized.get(top)
+    if not dot:
+        return value
+    if not isinstance(value, dict):
+        return None
+    if leaf == "range":
+        range_value = {
+            key: value[key]
+            for key in ("range_min", "range_max")
+            if key in value
+        }
+        return range_value or None
+    return value.get(leaf)
+
+
+def current_field_value(serialized: dict[str, Any], field_key: str) -> Any:
+    """Public dotted-field accessor used by the preview's current-value diff."""
+
+    return _serialized_field_value(serialized, field_key)
 
 
 # --- UI-owned glue (stays here regardless of the classifier) ----------------
@@ -402,8 +419,8 @@ def filtered_snapshot(snapshot: Any, selected: set[RiskCategory]) -> Any:
 
     cleared = {
         key: ({} if key in _DICT_SNAPSHOT_FIELDS else None)
-        for key, category in SNAPSHOT_FIELD_CATEGORY.items()
-        if category not in selected
+        for key, categories in TOP_LEVEL_FIELD_CATEGORIES.items()
+        if not categories.issubset(selected)
     }
     # ControllerSnapshot is a frozen dataclass — rebuild via replace().
     return dataclasses.replace(copy.deepcopy(snapshot), **cleared)
@@ -412,9 +429,40 @@ def filtered_snapshot(snapshot: Any, selected: set[RiskCategory]) -> Any:
 # Categories that stay when Device overrides are dropped (Save As default /
 # "Apply profile only"). Derived so it can't drift from the field map.
 _NON_DEVICE_CATEGORIES = frozenset(
-    category for category in SNAPSHOT_FIELD_CATEGORY.values()
+    category for category in FIELD_CATEGORY_MAP.values()
     if category is not RiskCategory.DEVICE
 )
+
+
+def coupled_field_omissions(snapshot: Any, selected: set[RiskCategory]) -> list[str]:
+    """Top-level indivisible fields omitted because one category is excluded."""
+
+    omitted: list[str] = []
+    for key, categories in TOP_LEVEL_FIELD_CATEGORIES.items():
+        if len(categories) < 2 or categories.issubset(selected):
+            continue
+        if getattr(snapshot, key, None) is not None:
+            omitted.append(key)
+    return omitted
+
+
+def retained_categories(
+    snapshot: Any,
+    categories: dict[RiskCategory, list[FieldChange]],
+) -> set[RiskCategory]:
+    """Categories with at least one field present in the effective snapshot."""
+
+    serialized = snapshot_to_dict(snapshot)
+    retained: set[RiskCategory] = set()
+    for category, changes in categories.items():
+        for change in changes:
+            value = _serialized_field_value(serialized, change.key)
+            if value is not None and not (
+                isinstance(value, (dict, list)) and not value
+            ):
+                retained.add(category)
+                break
+    return retained
 
 
 def has_device_settings(snapshot: Any) -> bool:
@@ -471,8 +519,14 @@ def summarize_value(key: str, value: Any) -> str:
             "sensitivity_right_8point",
         ):
             return t("safe_import.value.points", count=len(value))
-        if key in ("trigger_left", "trigger_right"):
+        if key in ("trigger_left.range", "trigger_right.range"):
             return f"{value['range_min']}–{value['range_max']}"
+        if key in ("trigger_left.mode", "trigger_right.mode"):
+            mode_key = {
+                0: "controller.choice.trigger_mode.long",
+                1: "controller.choice.trigger_mode.short",
+            }.get(value)
+            return t(mode_key) if mode_key else str(value)
         if key == "button_bindings":
             return t("safe_import.value.remaps", count=len(value))
         if key == "lighting_zones":
