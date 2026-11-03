@@ -92,7 +92,8 @@ class SetupScriptExecutableTests(unittest.TestCase):
         python_parent = self.local_app_data / "Programs" / "Python"
         python_parent.mkdir(parents=True)
         self.python_link = python_parent / "Python312"
-        self._make_junction(self.python_link, Path(sys.executable).resolve().parent)
+        base_python = Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+        self._make_junction(self.python_link, base_python.parent)
 
     def tearDown(self) -> None:
         if self.python_link.exists():
