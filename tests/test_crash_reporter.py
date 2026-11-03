@@ -224,6 +224,67 @@ class CrashReporterTests(unittest.TestCase):
         # the reviewed report is excluded by adjacent marker.
         self.assertEqual(unread, [])
 
+    def test_unread_listing_accepts_only_generated_regular_report_names(self) -> None:
+        crash_reporter.install_crash_handlers(self.user_data_dir)
+        crashes_dir = self.user_data_dir / "crashes"
+        valid = crashes_dir / "20260509T130000Z.txt"
+        valid.write_text("valid", encoding="utf-8")
+        (crashes_dir / "notes.txt").write_text("not a report", encoding="utf-8")
+        (crashes_dir / "20260509T130000Z_0.txt").write_text("bad suffix", encoding="utf-8")
+        (crashes_dir / "20260509T130000Z_10000.txt").write_text("bad suffix", encoding="utf-8")
+        (crashes_dir / "20260509T130001Z.txt").mkdir()
+
+        unread = crash_reporter.list_unread_crash_reports(self.user_data_dir)
+
+        self.assertEqual(unread, [valid])
+
+    def test_preview_is_bounded_strict_utf8_and_rejects_hardlinks(self) -> None:
+        crash_reporter.install_crash_handlers(self.user_data_dir)
+        crashes_dir = self.user_data_dir / "crashes"
+        normal = crashes_dir / "20260509T130000Z.txt"
+        normal.write_text("normal preview", encoding="utf-8")
+        self.assertEqual(crash_reporter.read_crash_report_preview(normal), "normal preview")
+
+        invalid = crashes_dir / "20260509T130001Z.txt"
+        invalid.write_bytes(b"\xff\xfe")
+        with self.assertRaises(UnicodeError):
+            crash_reporter.read_crash_report_preview(invalid)
+
+        oversized = crashes_dir / "20260509T130002Z.txt"
+        oversized.write_bytes(b"x" * (crash_reporter.MAX_CRASH_REPORT_PREVIEW_BYTES + 1))
+        with self.assertRaises(ValueError):
+            crash_reporter.read_crash_report_preview(oversized)
+
+        crash_reporter._reset_for_tests()
+        outside = self.user_data_dir / "outside.txt"
+        outside.write_text("outside", encoding="utf-8")
+        alias = crashes_dir / "20260509T130003Z.txt"
+        import os
+        os.link(outside, alias)
+        with self.assertRaises(ValueError):
+            crash_reporter.read_crash_report_preview(alias)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junction fixture")
+    def test_crashes_directory_junction_is_refused_without_touching_target(self) -> None:
+        import _winapi
+        import os
+
+        target = self.user_data_dir / "outside"
+        target.mkdir()
+        readme = target / "_README.txt"
+        fault_log = target / "_faulthandler.log"
+        readme.write_text("safe readme", encoding="utf-8")
+        fault_log.write_text("safe fault log", encoding="utf-8")
+        alias = self.user_data_dir / "crashes"
+        _winapi.CreateJunction(str(target), str(alias))
+        try:
+            crash_reporter.install_crash_handlers(self.user_data_dir)
+            self.assertFalse(crash_reporter._installed)
+            self.assertEqual(readme.read_text(encoding="utf-8"), "safe readme")
+            self.assertEqual(fault_log.read_text(encoding="utf-8"), "safe fault log")
+        finally:
+            os.rmdir(alias)
+
     def test_mark_crashes_reviewed_creates_marker(self) -> None:
         crash_reporter.install_crash_handlers(self.user_data_dir)
         crashes_dir = self.user_data_dir / "crashes"

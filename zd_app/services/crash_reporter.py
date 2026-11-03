@@ -26,13 +26,18 @@ import collections
 import datetime
 import faulthandler
 import logging
+import os
 import platform
+import re
+import stat
 import sys
 import threading
 import traceback
 from pathlib import Path
 
 from zd_app.services.path_scrub import sanitize_shareable_text
+from zd_app.storage._import_guards import list_guarded_directory, read_guarded_text
+from zd_app.storage._output_guards import GuardedOutputDirectory, guarded_output_directory
 from zd_app.version import __app_id__, __app_name__, __build_commit__, __version__
 
 
@@ -47,6 +52,7 @@ _previous_excepthook = None
 _previous_threading_excepthook = None
 _faulthandler_log_handle = None  # Held to keep the file open until process exit
 _crashes_dir: Path | None = None
+_crash_user_data_dir: Path | None = None
 _native_filter_callback = None  # Held to keep the WINFUNCTYPE callback alive for SEH
 _native_hook_installed = False
 
@@ -64,9 +70,12 @@ _MINIDUMP_OPT_IN = False
 # ``list_unread_crash_reports`` (same convention as ``_faulthandler.log``), so
 # the marker never surfaces in the in-app "unread crash reports" review.
 _CRASHES_README_FILENAME = "_README.txt"
+_CRASH_REPORT_NAME = re.compile(r"^(\d{8}T\d{6}Z)(?:_([1-9]\d{0,3}))?\.txt$")
+_MAX_CRASH_DIRECTORY_ENTRIES = 1024
+MAX_CRASH_REPORT_PREVIEW_BYTES = 256 * 1024
 
 
-def _write_crashes_readme(crashes_dir: Path) -> None:
+def _write_crashes_readme(crashes_output: GuardedOutputDirectory) -> None:
     """Drop a marker explaining the crashes folder is not share-safe as-is.
 
     The in-app "Open report folder" button points the user straight at this
@@ -76,7 +85,6 @@ def _write_crashes_readme(crashes_dir: Path) -> None:
     never block crash-handler installation.
     """
 
-    marker = crashes_dir / _CRASHES_README_FILENAME
     body = (
         f"{__app_name__} - local crash diagnostics\n"
         "==========================================\n\n"
@@ -93,8 +101,9 @@ def _write_crashes_readme(crashes_dir: Path) -> None:
         "  before sending it.\n"
     )
     try:
-        marker.write_text(body, encoding="utf-8")
-    except OSError as exc:
+        with crashes_output.open_text_truncate(_CRASHES_README_FILENAME) as marker:
+            marker.write(body)
+    except (OSError, ValueError) as exc:
         logger.warning("Could not write crashes README marker: %s", exc)
 
 
@@ -110,16 +119,30 @@ def install_crash_handlers(user_data_dir: Path) -> None:
 
     global _installed, _previous_excepthook, _previous_threading_excepthook
     global _faulthandler_log_handle, _crashes_dir
+    global _crash_user_data_dir
 
-    crashes_dir = Path(user_data_dir) / "crashes"
-    crashes_dir.mkdir(parents=True, exist_ok=True)
-    _crashes_dir = crashes_dir
-    # Always (re)write the marker so it exists whenever the folder does, even
-    # on the idempotent second call. Cheap and best-effort.
-    _write_crashes_readme(crashes_dir)
-
+    user_data_dir = Path(user_data_dir)
+    crashes_dir = user_data_dir / "crashes"
     if _installed:
+        try:
+            with guarded_output_directory(crashes_dir, user_data_dir) as output:
+                _write_crashes_readme(output)
+        except (OSError, ValueError) as exc:
+            logger.warning("Could not reopen crash directory for README marker: %s", exc)
         return
+
+    try:
+        with guarded_output_directory(crashes_dir, user_data_dir) as crashes_output:
+            fault_handle = crashes_output.open_text_truncate(
+                "_faulthandler.log", buffering=1
+            )
+            _write_crashes_readme(crashes_output)
+    except (OSError, ValueError) as exc:
+        logger.error("Crash handlers disabled: unsafe crash output path: %s", exc)
+        return
+
+    _crashes_dir = crashes_dir
+    _crash_user_data_dir = user_data_dir
 
     _previous_excepthook = sys.excepthook
     sys.excepthook = _excepthook
@@ -127,14 +150,13 @@ def install_crash_handlers(user_data_dir: Path) -> None:
     _previous_threading_excepthook = threading.excepthook
     threading.excepthook = _threading_excepthook
 
-    fault_log_path = crashes_dir / "_faulthandler.log"
     # Open mode "w" (truncate per startup), not "a": a faulthandler dump is only
     # useful for the crash that just happened, and this file is written at the C
     # level — unsanitized, with raw frame paths incl. C:\Users\<name> on
     # from-source builds. Truncating each launch stops historical native stacks
     # (and their home paths) from accumulating in a non-share-safe file.
     # buffering=1 (line-buffered) so segfault traces flush mid-crash.
-    _faulthandler_log_handle = open(fault_log_path, "w", encoding="utf-8", buffering=1)
+    _faulthandler_log_handle = fault_handle
     faulthandler.enable(file=_faulthandler_log_handle)
 
     if sys.platform == "win32":
@@ -202,33 +224,52 @@ def list_unread_crash_reports(
     """
 
     crashes_dir = Path(user_data_dir) / "crashes"
-    if not crashes_dir.is_dir():
+    try:
+        entries = list_guarded_directory(
+            crashes_dir, max_entries=_MAX_CRASH_DIRECTORY_ENTRIES
+        )
+    except (OSError, ValueError):
         return []
 
+    entry_names = {entry.name for entry in entries}
     reports: list[Path] = []
-    for entry in crashes_dir.iterdir():
-        if not entry.is_file():
+    for entry in entries:
+        match = _CRASH_REPORT_NAME.fullmatch(entry.name)
+        if match is None:
             continue
-        if entry.suffix != ".txt":
+        try:
+            info = os.lstat(entry)
+        except OSError:
             continue
-        if entry.name.startswith("_"):
+        if (not stat.S_ISREG(info.st_mode)
+                or getattr(info, "st_file_attributes", 0) & 0x400):
             continue
-        marker = entry.with_name(entry.name + ".reviewed")
-        if marker.exists():
+        if entry.name + ".reviewed" in entry_names:
             continue
         if since is not None:
-            try:
-                mtime = datetime.datetime.fromtimestamp(
-                    entry.stat().st_mtime, tz=datetime.timezone.utc
-                )
-            except OSError:
-                continue
-            if mtime <= since:
+            report_time = datetime.datetime.fromtimestamp(
+                info.st_mtime, tz=datetime.timezone.utc
+            )
+            if report_time <= since:
                 continue
         reports.append(entry)
 
     reports.sort()
     return reports
+
+
+def read_crash_report_preview(report: Path) -> str:
+    """Read one bounded, regular, no-reparse crash report as strict UTF-8."""
+
+    report = Path(report)
+    if _CRASH_REPORT_NAME.fullmatch(report.name) is None:
+        raise ValueError("Crash report name is not application-generated")
+    return read_guarded_text(
+        report,
+        max_bytes=MAX_CRASH_REPORT_PREVIEW_BYTES,
+        local_only=True,
+        require_single_link=True,
+    )
 
 
 def mark_crashes_reviewed(user_data_dir: Path, files: list[Path]) -> None:
@@ -239,13 +280,22 @@ def mark_crashes_reviewed(user_data_dir: Path, files: list[Path]) -> None:
     which is a recoverable nuisance.
     """
 
-    del user_data_dir  # ``files`` already carries absolute paths.
-    for f in files:
-        marker = f.with_name(f.name + ".reviewed")
-        try:
-            marker.write_text("", encoding="utf-8")
-        except OSError as exc:
-            logger.warning("Could not write reviewed marker for %s: %s", f, exc)
+    crashes_dir = Path(user_data_dir) / "crashes"
+    try:
+        with guarded_output_directory(crashes_dir, Path(user_data_dir)) as output:
+            for f in files:
+                f = Path(f)
+                if f.parent != crashes_dir or _CRASH_REPORT_NAME.fullmatch(f.name) is None:
+                    logger.warning("Refusing reviewed marker for unexpected crash path: %s", f)
+                    continue
+                try:
+                    output.write_text(f.name + ".reviewed", "", rename_on_collision=False)
+                except FileExistsError:
+                    pass
+                except (OSError, ValueError) as exc:
+                    logger.warning("Could not write reviewed marker for %s: %s", f, exc)
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not open crash directory for review markers: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +340,7 @@ def _threading_excepthook(args) -> None:
 
 
 def _write_crash_report(exc_type, exc_value, exc_tb, *, source: str, thread_name: str) -> None:
-    if _crashes_dir is None:
+    if _crashes_dir is None or _crash_user_data_dir is None:
         return
 
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -303,22 +353,22 @@ def _write_crash_report(exc_type, exc_value, exc_tb, *, source: str, thread_name
     # on one filename and silently overwrite each other — the later, often a
     # cascade, would clobber the earlier root-cause report. open(..., "x") is
     # atomic (O_EXCL), so even concurrent writers each land on a distinct name.
-    crash_path = _crashes_dir / f"{iso_basename}.txt"
-    attempt = 1
-    while True:
-        try:
-            with open(crash_path, "x", encoding="utf-8") as handle:
-                handle.write(body)
-            return
-        except FileExistsError:
-            crash_path = _crashes_dir / f"{iso_basename}_{attempt}.txt"
-            attempt += 1
-            if attempt > 10000:  # pathological backstop — never spin forever
-                logger.error("Could not find a free crash-report name for %s", iso_basename)
-                return
-        except OSError:
-            logger.exception("Could not write crash report to %s", crash_path)
-            return
+    crash_name = f"{iso_basename}.txt"
+    try:
+        with guarded_output_directory(_crashes_dir, _crash_user_data_dir) as output:
+            attempt = 1
+            while True:
+                try:
+                    output.write_text(crash_name, body, rename_on_collision=False)
+                    return
+                except FileExistsError:
+                    crash_name = f"{iso_basename}_{attempt}.txt"
+                    attempt += 1
+                    if attempt > 10000:  # pathological backstop — never spin forever
+                        logger.error("Could not find a free crash-report name for %s", iso_basename)
+                        return
+    except (OSError, ValueError):
+        logger.exception("Could not write crash report %s", crash_name)
 
 
 def _format_report(
@@ -513,6 +563,7 @@ def _reset_for_tests() -> None:
 
     global _installed, _previous_excepthook, _previous_threading_excepthook
     global _faulthandler_log_handle, _crashes_dir
+    global _crash_user_data_dir
     global _native_filter_callback, _native_hook_installed
 
     if _previous_excepthook is not None:
@@ -525,13 +576,13 @@ def _reset_for_tests() -> None:
             _faulthandler_log_handle.close()
         except OSError:
             pass
-
     _log_buffer.clear()
     _installed = False
     _previous_excepthook = None
     _previous_threading_excepthook = None
     _faulthandler_log_handle = None
     _crashes_dir = None
+    _crash_user_data_dir = None
     # Native callback is intentionally NOT cleared from Windows — once
     # SetUnhandledExceptionFilter is called we cannot reliably un-register
     # it from a Python callback context without risking SEH races. The

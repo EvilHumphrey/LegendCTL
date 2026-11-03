@@ -5400,8 +5400,8 @@ class AppShell:
 
         most_recent = unread[-1]
         try:
-            preview_body = most_recent.read_text(encoding="utf-8")
-        except OSError:
+            preview_body = crash_reporter.read_crash_report_preview(most_recent)
+        except (OSError, UnicodeError, ValueError):
             preview_body = ""
 
         try:

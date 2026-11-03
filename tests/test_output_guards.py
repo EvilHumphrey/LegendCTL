@@ -163,11 +163,12 @@ class OutputGuardNativeContractTests(unittest.TestCase):
         with patch.object(guards, "load_system_dll", return_value=ntdll):
             self.assertEqual(guards._windows_open("child", 42, directory=True, create=True), 123)
             self.assertEqual(guards._windows_open("card.html", 123, directory=False, create=True), 123)
-        self.assertEqual([call[1] for call in calls], [42, 123])
+            self.assertEqual(guards._windows_open("rolling.log", 123, directory=False, create=False), 123)
+        self.assertEqual([call[1] for call in calls], [42, 123, 123])
         self.assertTrue(all(call[2] & 0x1000 for call in calls))
         self.assertTrue(all(call[3] == 1 for call in calls))
-        self.assertEqual([call[4] for call in calls], [3, 2])
-        self.assertEqual([call[5] for call in calls], [0x21, 0x60])
+        self.assertEqual([call[4] for call in calls], [3, 2, 1])
+        self.assertEqual([call[5] for call in calls], [0x21, 0x60, 0x60])
 
     def test_native_reparse_error_is_explicit(self):
         ntdll = SimpleNamespace(NtCreateFile=Mock(return_value=ctypes.c_int32(0xC000050B).value))
@@ -231,6 +232,27 @@ class OutputGuardNativeContractTests(unittest.TestCase):
 
 
 class OutputGuardFilesystemTests(unittest.TestCase):
+    def test_guarded_truncate_rewrites_an_ordinary_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "rolling.log"
+            target.write_text("old content", encoding="utf-8")
+            with guards.guarded_output_directory(root, root) as directory:
+                with directory.open_text_truncate("rolling.log") as stream:
+                    stream.write("new")
+            self.assertEqual(target.read_text(encoding="utf-8"), "new")
+
+    def test_guarded_truncate_refuses_a_hardlink_without_touching_target(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "sentinel.txt"
+            target.write_text("safe", encoding="utf-8")
+            os.link(target, root / "rolling.log")
+            with guards.guarded_output_directory(root, root) as directory:
+                with self.assertRaises(guards.UnsafeOutputPathError):
+                    directory.open_text_truncate("rolling.log")
+            self.assertEqual(target.read_text(encoding="utf-8"), "safe")
+
     def test_new_directories_and_unicode_files_work_without_reopening_output_paths(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
