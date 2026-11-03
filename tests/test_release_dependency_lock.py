@@ -142,6 +142,8 @@ class ReleaseLockClosureTests(unittest.TestCase):
         self.assertIn("filelock==4.2.1", release_lock["filelock"])
         self.assertIn("setuptools==84.1.0", release_input)
         self.assertIn("setuptools==84.1.0", release_lock["setuptools"])
+        self.assertIn("msgpack==1.2.3", release_input)
+        self.assertIn("msgpack==1.2.3", release_lock["msgpack"])
         self.assertIn("pip-tools==7.6.2", tools_input)
         self.assertIn("pip==26.2.2", tools_input)
         self.assertIn("pip-tools", lock_tools)

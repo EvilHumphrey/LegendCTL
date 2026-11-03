@@ -18,8 +18,8 @@ support exports, controller-import filtering, and the release toolchain.
   failed environment. It retains the path for explicit inspection and cleanup.
 - Download guidance now distinguishes same-channel SHA-256 mismatch detection
   from authenticated publisher or build-origin verification.
-- The release lock moves `filelock` and `setuptools` to their advisory-fixed
-  releases and records their exact hashes.
+- The release lock moves `filelock`, `setuptools`, and `msgpack` to their
+  advisory-fixed releases and records their exact hashes.
 
 ## Controller-write boundary
 

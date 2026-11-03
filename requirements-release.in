@@ -24,3 +24,4 @@ pip==26.2.2
 # a future resolver change from selecting a known-vulnerable release.
 filelock==4.2.1
 setuptools==84.1.0
+msgpack==1.2.3
