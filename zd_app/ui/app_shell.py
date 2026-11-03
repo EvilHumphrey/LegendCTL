@@ -137,8 +137,11 @@ from zd_app.ui.safe_import_model import (
     DEFAULT_CHECKED_CATEGORIES,
     RiskCategory,
     SELECTABLE_CATEGORIES,
+    coupled_field_omissions,
+    current_field_value,
     filtered_snapshot,
     has_device_settings,
+    retained_categories,
     without_device_settings,
 )
 from zd_app.ui.components import (
@@ -5397,8 +5400,8 @@ class AppShell:
 
         most_recent = unread[-1]
         try:
-            preview_body = most_recent.read_text(encoding="utf-8")
-        except OSError:
+            preview_body = crash_reporter.read_crash_report_preview(most_recent)
+        except (OSError, UnicodeError, ValueError):
             preview_body = ""
 
         try:
@@ -8505,7 +8508,7 @@ class AppShell:
         current = snapshot_to_dict(self.last_controller_snapshot)
         for changes in result.categories.values():
             for change in changes:
-                change.current_value = current.get(change.key)
+                change.current_value = current_field_value(current, change.key)
 
     def _safe_import_presence_token_is_current(self) -> bool:
         return (
@@ -8696,15 +8699,19 @@ class AppShell:
         snapshot = filtered_snapshot(result.profile.snapshot, selected)
 
         audit = result.audit
+        audit.omitted_coupled_fields = coupled_field_omissions(
+            result.profile.snapshot, selected
+        )
+        effective_categories = retained_categories(snapshot, result.categories)
         audit.selected_categories = [
             category
             for category in SELECTABLE_CATEGORIES
-            if category in selected and result.categories.get(category)
+            if category in selected and category in effective_categories
         ]
         audit.skipped_categories = [
             category
             for category in SELECTABLE_CATEGORIES
-            if category not in selected and result.categories.get(category)
+            if result.categories.get(category) and category not in effective_categories
         ]
 
         if not (apply_to_controller and self.settings_service is not None):

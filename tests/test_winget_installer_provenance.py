@@ -27,6 +27,16 @@ class WingetInstallerProvenanceTests(unittest.TestCase):
         self.assertLess(workflow.index("uses: actions/checkout@"), workflow.index("verify-winget-installer.ps1"))
         self.assertLess(workflow.rindex("verify-winget-installer.ps1"), workflow.index("& .\\wingetcreate.exe submit"))
 
+    def test_workflow_pins_attestation_identity_and_patched_cli(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("GitHub CLI 2.102.0 or newer is required", workflow)
+        self.assertIn("--repo $env:GITHUB_REPOSITORY", workflow)
+        self.assertIn(
+            '--signer-workflow "$env:GITHUB_REPOSITORY/.github/workflows/release-build.yml"',
+            workflow,
+        )
+        self.assertIn('--source-ref "refs/tags/$tag"', workflow)
+
     def test_generated_manifest_provenance_matrix(self) -> None:
         pwsh = shutil.which("pwsh")
         if not pwsh:

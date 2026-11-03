@@ -188,6 +188,8 @@ class GenerateMarkdownFullDataTests(unittest.TestCase):
     def test_markdown_includes_verbatim_claim_boundary(self) -> None:
         md = self.service.generate_markdown()
         self.assertIn(CLAIM_BOUNDARY_PARAGRAPH, md)
+        self.assertIn("service-note event counts but not service-note text", md)
+        self.assertNotIn("operator-written service notes", md)
 
     def test_markdown_renders_passport_module_ids_and_metrics(self) -> None:
         md = self.service.generate_markdown()
@@ -244,9 +246,13 @@ class GenerateMarkdownFullDataTests(unittest.TestCase):
         # Module characterizations: one per side seed = 2.
         self.assertIn("Total module characterizations: 2", md)
 
-    def test_markdown_recent_service_note_preview(self) -> None:
+    def test_markdown_excludes_service_note_text(self) -> None:
         md = self.service.generate_markdown()
-        self.assertIn("Installed new stabilizer pads.", md)
+        self.assertNotIn("Installed new stabilizer pads.", md)
+        self.assertNotIn("Recent service notes:", md)
+        self.assertIn(
+            "Service-note text and timestamps: excluded (counts only)", md
+        )
 
     def test_markdown_health_report_limit_respected(self) -> None:
         md = self.service.generate_markdown(health_report_limit=1)
@@ -328,7 +334,8 @@ class GenerateMarkdownMissingDataTests(unittest.TestCase):
         md = service.generate_markdown()
         self.assertIn("Total sessions: 0", md)
         self.assertIn("Total profile applies: 0", md)
-        self.assertIn("(none in window)", md)
+        self.assertNotIn("Recent service notes:", md)
+        self.assertIn("Service-note text and timestamps: excluded", md)
 
     def test_missing_wear_ledger_renders_zero_counts(self) -> None:
         service = self._service(ledger=None)
@@ -486,7 +493,7 @@ class PathSanitizationTests(unittest.TestCase):
 
 
 class MarkdownDoesNotLeakAbsolutePathsTests(unittest.TestCase):
-    """Service notes that include absolute paths must be sanitized in render."""
+    """Service-note contents stay local even when they contain paths."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -517,10 +524,11 @@ class MarkdownDoesNotLeakAbsolutePathsTests(unittest.TestCase):
             utc_now=self.clock,
         )
 
-    def test_service_note_path_is_sanitized(self) -> None:
+    def test_service_note_path_is_not_exported(self) -> None:
         md = self.service.generate_markdown()
         self.assertNotIn("exampleuser", md)
-        self.assertIn(APP_DATA_PLACEHOLDER, md)
+        self.assertNotIn("wrapper_profiles/x.json", md)
+        self.assertIn("Total service notes: 1", md)
 
 
 class MarkdownDoesNotLeakRootedHomePathTests(unittest.TestCase):
@@ -664,7 +672,6 @@ class ReportMarkdownEscapingTests(unittest.TestCase):
             r"Captured \| \[captured\]",
             r"Pad \| \[controller\]",
             r"ready \| \[overall\]",
-            r"Service note \| \[note\]",
         ):
             self.assertIn(escaped, report_md)
         for raw_link in (
@@ -674,14 +681,12 @@ class ReportMarkdownEscapingTests(unittest.TestCase):
             "[captured](file:///captured)",
             "[controller](file:///controller)",
             "[overall](file:///overall)",
-            "[note](file:///note)",
             "[product](file:/product)",
             "[firmware](file:/firmware)",
             "[connection](file:/connection)",
             "[captured](file:/captured)",
             "[controller](file:/controller)",
             "[overall](file:/overall)",
-            "[note](file:/note)",
         ):
             self.assertNotIn(raw_link, report_md)
         for raw_code in (
@@ -691,7 +696,6 @@ class ReportMarkdownEscapingTests(unittest.TestCase):
             "`captured`",
             "`controller`",
             "`overall`",
-            "`note`",
         ):
             self.assertNotIn(raw_code, report_md)
         for heading in (
@@ -701,7 +705,6 @@ class ReportMarkdownEscapingTests(unittest.TestCase):
             "\n# captured heading",
             "\n# controller heading",
             "\n# overall heading",
-            "\n# note heading",
         ):
             self.assertNotIn(heading, report_md)
 
@@ -712,11 +715,9 @@ class ReportMarkdownEscapingTests(unittest.TestCase):
         self.assertIn(f"{escaped_placeholder}/device/product.json", report_md)
         self.assertIn(f"{escaped_placeholder}/controllers/pad.json", report_md)
         self.assertIn(f"{escaped_placeholder}/overall.json", report_md)
-        self.assertIn(f"{escaped_placeholder}/note.txt", report_md)
-        # JSON members stay path-scrubbed, not Markdown-escaped.
-        preview = wear_summary["recent_service_notes"][0]["preview"]
-        self.assertIn("[note]", preview)
-        self.assertNotIn(r"\[note\]", preview)
+        self.assertNotIn("note.txt", report_md)
+        self.assertNotIn("Service note", report_md)
+        self.assertEqual(wear_summary["recent_service_notes"], [])
 
 
 # ---------------------------------------------------------------------------
@@ -784,6 +785,7 @@ class GenerateBundleZipTests(unittest.TestCase):
             )
         self.assertIn("counts", summary)
         self.assertIn("recent_service_notes", summary)
+        self.assertEqual(summary["recent_service_notes"], [])
         # The raw events.jsonl must NOT be in the bundle.
         self.assertNotIn("wear_ledger/events.jsonl", names)
         self.assertNotIn("events.jsonl", names)
@@ -877,6 +879,75 @@ class GenerateBundleZipTests(unittest.TestCase):
             "health_reports/zd_health_report_2026-05-26_180000.json",
             names,
         )
+
+
+class ServiceNoteExportPrivacyTests(unittest.TestCase):
+    """Diagnostic exports disclose service-note counts, never note contents."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def test_counts_survive_but_note_text_is_absent_from_every_output(self) -> None:
+        for note_count in (0, 1, 2, 12):
+            with self.subTest(note_count=note_count):
+                case_root = self.root / f"case-{note_count}"
+                clock = _frozen_clock(
+                    datetime(2026, 5, 26, 18, 0, 0, tzinfo=timezone.utc)
+                )
+                ledger = WearLedgerService(
+                    base_dir=case_root / "ledger", utc_now=clock
+                )
+                ledger.append(SESSION_START, summary="mixed event")
+                secret_prefix = f"LOCAL_SERVICE_NOTE_SECRET_{note_count}_"
+                for index in range(note_count):
+                    secret = f"{secret_prefix}{index}"
+                    ledger.append(
+                        SERVICE_NOTE,
+                        summary=secret,
+                        details={"note": secret},
+                    )
+                service = DiagnosticBundleService(
+                    base_dir=case_root / "bundles",
+                    wear_ledger=ledger,
+                    utc_now=clock,
+                )
+
+                markdown = service.generate_markdown()
+                manifest = service.preview_bundle_manifest()
+                wear_item = next(
+                    item for item in manifest.items if item.key == "wear_ledger"
+                )
+                self.assertEqual(
+                    wear_item.metadata["service_note_count"], note_count
+                )
+                self.assertEqual(
+                    wear_item.metadata["event_count"], note_count + 1
+                )
+                self.assertNotIn(secret_prefix, markdown)
+                self.assertNotIn(secret_prefix, repr(manifest))
+                self.assertIn(
+                    f"Total service notes: {note_count}", markdown
+                )
+
+                target = case_root / "diagnostic_bundle.zip"
+                self.assertEqual(service.generate_bundle_zip(target), target)
+                with zipfile.ZipFile(target, "r") as zf:
+                    for name in zf.namelist():
+                        self.assertNotIn(secret_prefix, name)
+                        self.assertNotIn(
+                            secret_prefix,
+                            zf.read(name).decode("utf-8", errors="replace"),
+                            f"service-note text leaked in {name}",
+                        )
+                    summary = json.loads(
+                        zf.read("wear_ledger_summary.json").decode("utf-8")
+                    )
+                self.assertEqual(summary["recent_service_notes"], [])
+                self.assertEqual(
+                    summary["counts"].get(SERVICE_NOTE, 0), note_count
+                )
 
 
 class BundlePreviewEmptySourcesTests(unittest.TestCase):
@@ -1322,7 +1393,7 @@ class BundleScrubsSpacedDisplayNameAcrossAllMembersTests(unittest.TestCase):
     leak class where a stop-at-first-whitespace regex truncated the path and
     shipped the first name ("Jane") verbatim. A single bundle carries the
     home path in the passport ``module_id`` + ``notes``, a legacy health-report
-    ``.md`` + ``.json`` pair, and a service-note preview; NO ZIP member may
+    ``.md`` + ``.json`` pair, and a local-only service note; NO ZIP member may
     contain "Jane", ``C:\\Users``, or ``C:/Users``.
 
     Passes today — ``generate_bundle_zip`` scrubs every copied member on write
@@ -1377,7 +1448,7 @@ class BundleScrubsSpacedDisplayNameAcrossAllMembersTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        # A service note whose preview surfaces in wear_ledger_summary.json.
+        # A service note whose text must not surface in wear_ledger_summary.json.
         self.ledger.append(
             SERVICE_NOTE,
             summary="serviced",

@@ -137,18 +137,21 @@ class FieldRegistryDriftTests(unittest.TestCase):
             "import_classifier.KNOWN_SNAPSHOT_KEYS",
             set(import_classifier.KNOWN_SNAPSHOT_KEYS),
         )
-        # KNOWN_SNAPSHOT_KEYS is derived from _CATEGORY_MAP by collapsing the
+        # KNOWN_SNAPSHOT_KEYS is derived from FIELD_CATEGORY_MAP by collapsing the
         # split trigger keys; pin the derivation assumption explicitly.
-        collapsed = {_collapse(key) for key in import_classifier._CATEGORY_MAP}
+        collapsed = {_collapse(key) for key in import_classifier.FIELD_CATEGORY_MAP}
         self.assertEqual(
             collapsed,
             set(import_classifier.KNOWN_SNAPSHOT_KEYS),
-            "import_classifier._CATEGORY_MAP no longer collapses to KNOWN_SNAPSHOT_KEYS",
+            "import_classifier.FIELD_CATEGORY_MAP no longer collapses to KNOWN_SNAPSHOT_KEYS",
         )
 
     def test_safe_import_ui_map_covers_every_field(self) -> None:
-        # The UI map keeps the trigger frames unsplit today; collapse anyway so
-        # the comparison stays valid if it ever adopts the classifier's split keys.
+        self.assertIs(
+            safe_import_model.FIELD_CATEGORY_MAP,
+            import_classifier.FIELD_CATEGORY_MAP,
+            "Safe Import must consume the classifier's canonical field registry",
+        )
         collapsed = {_collapse(key) for key in safe_import_model.SNAPSHOT_FIELD_CATEGORY}
         self._assert_parity("safe_import_model.SNAPSHOT_FIELD_CATEGORY", collapsed)
 
@@ -214,49 +217,27 @@ class CategoryValueAgreementTests(unittest.TestCase):
     maxDiff = None
 
     def test_category_values_agree_classifier_vs_ui_map(self) -> None:
-        """The classifier (services) and the Safe-Import UI map assign
-        the SAME category to every key they share, after collapsing the classifier's
-        ``trigger_*.range``/``.mode`` split onto the UI map's unsplit frames.
+        """Classifier and Safe Import consume one exact registry object."""
 
-        By rule: axis_inversion = FEEL everywhere, vibration = COSMETIC
-        everywhere. Both maps use the same ``RiskCategory``
-        enum (re-exported), so identity comparison is exact.
-        """
-
-        disagreements = []
-        for key, classifier_category in import_classifier._CATEGORY_MAP.items():
-            if key in CLASSIFIER_TRIGGER_MODE_KEYS:
-                continue  # the one intentional classifier refinement, pinned below
-            ui_map_category = safe_import_model.SNAPSHOT_FIELD_CATEGORY[_collapse(key)]
-            if classifier_category is not ui_map_category:
-                disagreements.append(
-                    f"{key}: classifier={classifier_category.name}"
-                    f" ui-map={ui_map_category.name}"
-                )
-        self.assertFalse(
-            disagreements,
-            "classifier / Safe-Import-UI category assignment(s) diverged (policy"
-            " 2026-06-10: axis_inversion=FEEL, vibration=COSMETIC): "
-            + "; ".join(disagreements),
+        self.assertIs(
+            safe_import_model.SNAPSHOT_FIELD_CATEGORY,
+            import_classifier.FIELD_CATEGORY_MAP,
         )
 
-    def test_trigger_mode_exception_is_exact(self) -> None:
-        """Keeps the trigger-split exception honest: the ONLY split keys in
-        the classifier are the two trigger frames, only their ``.mode`` halves diverge
-        from the UI map (LAYOUT vs the frame's FEEL), and the ``.range`` halves
-        agree as FEEL."""
+    def test_trigger_split_is_exact(self) -> None:
+        """The only split fields are trigger range (Feel) and mode (Layout)."""
 
-        split_keys = {key for key in import_classifier._CATEGORY_MAP if "." in key}
+        split_keys = {key for key in import_classifier.FIELD_CATEGORY_MAP if "." in key}
         self.assertEqual(
             split_keys,
             {"trigger_left.range", "trigger_left.mode",
              "trigger_right.range", "trigger_right.mode"},
-            "import_classifier._CATEGORY_MAP grew/lost split preview keys -"
-            " update the trigger-split exception here deliberately",
+            "import_classifier.FIELD_CATEGORY_MAP grew/lost split preview keys -"
+            " update the canonical trigger split deliberately",
         )
         for key in CLASSIFIER_TRIGGER_MODE_KEYS:
             self.assertIs(
-                import_classifier._CATEGORY_MAP[key],
+                import_classifier.FIELD_CATEGORY_MAP[key],
                 import_classifier.RiskCategory.LAYOUT,
                 f"{key} is the documented LAYOUT half of the trigger split",
             )
@@ -293,6 +274,16 @@ class CategoryValueAgreementTests(unittest.TestCase):
 
         disagreements = []
         for name, coverage_category in coverage_categories.items():
+            if name in ("trigger_left", "trigger_right"):
+                self.assertIs(
+                    safe_import_model.FIELD_CATEGORY_MAP[f"{name}.range"],
+                    import_classifier.RiskCategory.FEEL,
+                )
+                self.assertIs(
+                    safe_import_model.FIELD_CATEGORY_MAP[f"{name}.mode"],
+                    import_classifier.RiskCategory.LAYOUT,
+                )
+                continue
             ui_category = safe_import_model.SNAPSHOT_FIELD_CATEGORY[name]
             if coverage_category.value != ui_category.value:
                 disagreements.append(

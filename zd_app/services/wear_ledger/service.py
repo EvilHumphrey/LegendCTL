@@ -168,10 +168,12 @@ class WearLedgerService:
         try:
             self._write_line(event)
         except (OSError, ValueError, TypeError):
-            logger.exception(
-                "WearLedgerService.append failed: event_type=%r summary=%r",
-                event_type, summary,
-            )
+            # Both fields can contain operator-authored text (service notes,
+            # profile names, module identifiers). Keep failure telemetry
+            # structural: exception type and traceback are useful, while
+            # echoing either rejected payload would copy private text into the
+            # rotating support log.
+            logger.exception("WearLedgerService.append failed")
             return None
         return event
 

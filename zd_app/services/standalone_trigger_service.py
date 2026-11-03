@@ -34,6 +34,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Optional
 
+from zd_app.services.hidden_write_policy import (
+    HIDDEN_WRITE_DISABLED_MESSAGE,
+    hidden_writes_available,
+)
 from zd_app.system_dll import load_system_dll
 
 
@@ -219,12 +223,8 @@ class _Win32:
             cls._kernel32.DuplicateHandle.restype = w.BOOL
             cls._kernel32.GetLastError.argtypes = []
             cls._kernel32.GetLastError.restype = w.DWORD
-            # HID keepalive overlapped-I/O bindings
-            cls._kernel32.WriteFile.argtypes = [
-                w.HANDLE, c.c_void_p, w.DWORD,
-                c.POINTER(w.DWORD), c.c_void_p,
-            ]
-            cls._kernel32.WriteFile.restype = w.BOOL
+            # Read-only hidden-session observation bindings. Production
+            # hidden writes are unavailable; no WriteFile binding is exposed.
             cls._kernel32.ReadFile.argtypes = [
                 w.HANDLE, c.c_void_p, w.DWORD,
                 c.c_void_p, c.c_void_p,
@@ -301,6 +301,7 @@ class TriggerOutcome(Enum):
     DUPLICATE_FAILED = "duplicate_failed"  # DuplicateHandle failed
     IOCTL_FAILED = "ioctl_failed"  # at least one of the 7 IOCTLs returned ok=false
     HIDDEN_NOT_VISIBLE = "hidden_not_visible"  # all IOCTLs ok, no VID_20BC enum within timeout
+    DISABLED = "disabled"  # production standalone trigger packets are unavailable
 
 
 @dataclass
@@ -629,7 +630,14 @@ def fire_trigger_sequence(
     - ``DUPLICATE_FAILED``: ``duplicate_handle`` failed.
     - ``IOCTL_FAILED``: at least one IOCTL returned ok=false.
     - ``HIDDEN_NOT_VISIBLE``: all IOCTLs ok but VID_20BC did not appear.
+    - ``DISABLED``: production standalone trigger packets are unavailable.
     """
+    if not hidden_writes_available():
+        return TriggerResult(
+            outcome=TriggerOutcome.DISABLED,
+            error_message=HIDDEN_WRITE_DISABLED_MESSAGE,
+        )
+
     result = TriggerResult(outcome=TriggerOutcome.SUCCESS)
 
     # 0. Pick the target path
@@ -798,6 +806,7 @@ class EnsureDualModeStatus(Enum):
     DUPLICATE_FAILED = "duplicate_failed"  # propagated hard failure
     IOCTL_FAILED = "ioctl_failed"  # propagated hard failure
     EXHAUSTED_RETRIES = "exhausted_retries"  # all attempts had HIDDEN_NOT_VISIBLE
+    DISABLED = "disabled"
 
 
 @dataclass
@@ -851,6 +860,12 @@ def ensure_dual_mode(
     ``fire_trigger`` callable (which defaults to ``fire_trigger_sequence``);
     use it to inject DI seams in tests.
     """
+    if not hidden_writes_available():
+        return EnsureDualModeResult(
+            status=EnsureDualModeStatus.DISABLED,
+            error_message=HIDDEN_WRITE_DISABLED_MESSAGE,
+        )
+
     trigger_kwargs = trigger_kwargs or {}
     attempts: list[TriggerResult] = []
     total_attempts = max_retries + 1
@@ -1154,23 +1169,9 @@ class KeepaliveSnapshot:
 # ---------------------------------------------------------------------------
 
 def _default_write_hid(handle: int, payload: bytes) -> tuple[bool, int, int]:
-    """Synchronous WriteFile. Returns ``(ok, last_error, bytes_written)``."""
-    try:
-        kernel32 = _Win32.kernel32()
-    except (OSError, AttributeError):  # pragma: no cover - non-Windows
-        return False, 0, 0
-    buffer = c.create_string_buffer(payload)
-    written = w.DWORD(0)
-    ok = bool(
-        kernel32.WriteFile(
-            handle,
-            c.cast(buffer, c.c_void_p),
-            len(payload),
-            c.byref(written),
-            None,
-        )
-    )
-    return ok, 0 if ok else kernel32.GetLastError(), written.value
+    """Refuse the former hidden keepalive write syscall."""
+
+    return False, 0, 0
 
 
 def _default_create_overlapped_context() -> OverlappedReadContext:
@@ -1399,38 +1400,8 @@ class KeepaliveLoop:
 
         The handles are borrowed; caller closes them after ``stop()``.
         """
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop_event.clear()
-        self._write_handle = write_handle
-        self._read_handle = read_handle
-        self._cycles = []
-        self._successful_write_pairs = 0
-        self._successful_reads = 0
-        self._write_errors = 0
-        self._read_errors = 0
-        self._last_cycle_started_ts = None
-        self._next_read_seq = 1
-        self._last_error = None
-
-        # Post the initial overlapped ReadFile BEFORE launching the
-        # thread so the first cycle's wait_read has something to wait on.
-        ctx = self._io.create_overlapped()
-        ctx.sequence_num = self._next_read_seq
-        post_ok, post_err = self._io.post_read(read_handle, ctx)
-        if not post_ok:
-            logger.warning(
-                "Keepalive initial overlapped read post failed (last_error=%d)",
-                post_err,
-            )
-            self._read_errors += 1
-        self._pending_read = ctx
-        self._next_read_seq += 1
-
-        self._thread = threading.Thread(
-            target=self._run_loop, daemon=True, name="StandaloneTriggerKeepalive",
-        )
-        self._thread.start()
+        self._last_error = HIDDEN_WRITE_DISABLED_MESSAGE
+        return
 
     def stop(self) -> None:
         """Signal stop, join the thread, cancel + destroy the pending read.
@@ -1506,6 +1477,12 @@ class KeepaliveLoop:
             logger.exception("KeepaliveLoop _run_loop crashed; thread exiting")
 
     def _run_one_cycle(self) -> None:
+        # Direct/internal invocation must not reach an injected writer either.
+        self._last_error = HIDDEN_WRITE_DISABLED_MESSAGE
+        return
+
+        # Retained unreachable algorithm notes below document the former
+        # protocol for a future authorizer-owned redesign.
         cycle_num = len(self._cycles) + 1
         self._last_cycle_started_ts = self._clock()
         write_handle = self._write_handle
@@ -1649,6 +1626,7 @@ class StandaloneStartStatus(Enum):
     IOCTL_FAILED = "ioctl_failed"  # propagated from trigger
     EXHAUSTED_RETRIES = "exhausted_retries"  # propagated from retry wrapper
     HID_SESSION_OPEN_FAILED = "hid_session_open_failed"  # post-trigger HID open failed
+    HIDDEN_WRITES_DISABLED = "hidden_writes_disabled"
 
 
 @dataclass
@@ -1784,6 +1762,13 @@ class StandaloneTriggerService:
         On any failure, all partial state is cleaned up before returning
         — handles are closed, singleton is released, no zombies.
         """
+        return StandaloneStartResult(
+            status=StandaloneStartStatus.HIDDEN_WRITES_DISABLED,
+            error_message=HIDDEN_WRITE_DISABLED_MESSAGE,
+        )
+
+        # Retained unreachable lifecycle notes below document the former
+        # protocol for a future authorizer-owned redesign.
         # 1. Singleton check
         if self._enable_singleton_mutex and self._mutex_handle is None:
             if not self.acquire_singleton():

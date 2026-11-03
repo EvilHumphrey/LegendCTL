@@ -237,6 +237,24 @@ class WearLedgerSchemaTests(unittest.TestCase):
             )
             self.assertIsNone(result)
 
+    def test_append_failure_log_excludes_operator_text(self) -> None:
+        secret = r"LOCAL_SECRET_C:\Users\Jane Doe\private-note.txt"
+        with open(self.base / "open-handle.txt", "wb") as handle:
+            with self.assertLogs(
+                "zd_app.services.wear_ledger.service", level="ERROR"
+            ) as captured:
+                result = self.service.append(
+                    f"private-event-{secret}",
+                    summary=f"operator note {secret}",
+                    details={"handle": handle},
+                )
+
+        self.assertIsNone(result)
+        rendered = "\n".join(captured.output)
+        self.assertIn("WearLedgerService.append failed", rendered)
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn("private-event-", rendered)
+
 
 class WearLedgerRotationTests(unittest.TestCase):
     def setUp(self) -> None:

@@ -74,7 +74,8 @@ Before a submission, the workflow:
 - **downloads that installer and binds it to this project's own build
   provenance** before generating anything — the bytes must hash to the digest
   GitHub recorded, must match the release's published `SHA256SUMS.txt`, and must
-  pass `gh attestation verify` against this repository. Without this the
+  pass `gh attestation verify` against this repository's release workflow and
+  the exact release tag. Without this the
   submitted `InstallerSha256` would only be self-consistent with whatever the
   URL happened to serve;
 - requires the generated manifest's single x64 installer URL and SHA-256 to

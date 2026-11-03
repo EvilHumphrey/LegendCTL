@@ -27,6 +27,7 @@ from zd_app.services.wear_ledger import WearLedgerService
 from zd_app.services.wear_ledger.models import (
     MODULE_CHARACTERIZED,
     READINESS_CHECK,
+    SERVICE_NOTE,
     SESSION_START,
 )
 
@@ -181,6 +182,11 @@ class ShareCardRendererTests(unittest.TestCase):
                 summary="Module characterized: STOCK -> good",
                 details={"overall_status": "good"},
             )
+            ledger.append(
+                SERVICE_NOTE,
+                summary="SHARE_CARD_LOCAL_NOTE_SECRET",
+                details={"note": "SHARE_CARD_LOCAL_NOTE_SECRET"},
+            )
             bundle = DiagnosticBundleService(
                 base_dir=root / "bundles",
                 health_report_dir=health_dir,
@@ -209,6 +215,8 @@ class ShareCardRendererTests(unittest.TestCase):
         ):
             with self.subTest(expected=expected):
                 self.assertIn(expected, markdown)
+        self.assertNotIn("SHARE_CARD_LOCAL_NOTE_SECRET", markdown)
+        self.assertIn("service-note text and timestamps", markdown)
 
     def test_forbidden_overclaim_phrases_are_absent(self) -> None:
         card = build_share_card(now=_NOW)

@@ -18,3 +18,10 @@ urllib3==2.8.0
 # the deterministic pip-tools refresher also uses; this is part of the audited
 # build venv, not an implicit upgrader.
 pip==26.2.2
+
+# Keep release locking and extraction above their advisory-fixed floors.
+# These are transitive build-tool dependencies, but pinning them here prevents
+# a future resolver change from selecting a known-vulnerable release.
+filelock==4.2.1
+setuptools==84.1.0
+msgpack==1.2.3

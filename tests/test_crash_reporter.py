@@ -74,6 +74,59 @@ class CrashReporterTests(unittest.TestCase):
         self.assertIn("FileNotFoundError", body)
         self.assertIn("config.json", body)
 
+    def test_crash_report_sanitizes_instance_ids_in_summary_and_traceback(self) -> None:
+        """Dated reports remove per-unit identifiers at both shareable sinks.
+
+        ``scrub_paths`` alone used to keep the stable tail after reducing a
+        HID interface path to a basename. Exercise the real report writer with
+        distinct summary/traceback identifiers, punctuation-bearing tails,
+        and a relocated home path so neither representation can bypass the
+        composed sanitizer.
+        """
+
+        crash_reporter.install_crash_handlers(self.user_data_dir)
+        summary_tail = "UNIT@SERIAL(123)"
+        traceback_tail = "7&2f3a1c2b&0&0000"
+        summary_id = rf"HID\VID_413D&PID_2104&MI_02\{summary_tail}"
+        traceback_id = (
+            rf"\\?\HID#VID_413D&PID_2104&MI_02#{traceback_tail}"
+            r"#{12345678-1234-1234-1234-123456789abc}"
+        )
+        relocated_home = Path(r"D:\Profiles\Jane Doe")
+        fake_traceback = (
+            "Traceback (most recent call last):\n"
+            rf'  File "{relocated_home}\private\frame.py", line 7, in worker\n'
+            rf"RuntimeError: controller read failed via {traceback_id}\n"
+        )
+
+        with (
+            mock.patch(
+                "zd_app.services.path_scrub.Path.home",
+                return_value=relocated_home,
+            ),
+            mock.patch.object(
+                crash_reporter.traceback,
+                "format_exception",
+                return_value=[fake_traceback],
+            ),
+        ):
+            self._trigger_excepthook(
+                RuntimeError(
+                    rf"controller read failed via {summary_id} from "
+                    rf"{relocated_home}\private\capture.json"
+                )
+            )
+
+        body = self._read_only_crash_report().read_text(encoding="utf-8")
+        self.assertNotIn(summary_tail, body)
+        self.assertNotIn(traceback_tail, body)
+        self.assertNotIn("Jane Doe", body)
+        self.assertNotIn(r"D:\Profiles", body)
+        self.assertIn("VID_413D&PID_2104", body)
+        self.assertIn("controller read failed", body)
+        self.assertIn("capture.json", body)
+        self.assertIn("frame.py", body)
+
     def test_install_crash_handlers_chains_previous_excepthook(self) -> None:
         captured: list[tuple] = []
 
@@ -171,6 +224,67 @@ class CrashReporterTests(unittest.TestCase):
         # the reviewed report is excluded by adjacent marker.
         self.assertEqual(unread, [])
 
+    def test_unread_listing_accepts_only_generated_regular_report_names(self) -> None:
+        crash_reporter.install_crash_handlers(self.user_data_dir)
+        crashes_dir = self.user_data_dir / "crashes"
+        valid = crashes_dir / "20260509T130000Z.txt"
+        valid.write_text("valid", encoding="utf-8")
+        (crashes_dir / "notes.txt").write_text("not a report", encoding="utf-8")
+        (crashes_dir / "20260509T130000Z_0.txt").write_text("bad suffix", encoding="utf-8")
+        (crashes_dir / "20260509T130000Z_10000.txt").write_text("bad suffix", encoding="utf-8")
+        (crashes_dir / "20260509T130001Z.txt").mkdir()
+
+        unread = crash_reporter.list_unread_crash_reports(self.user_data_dir)
+
+        self.assertEqual(unread, [valid])
+
+    def test_preview_is_bounded_strict_utf8_and_rejects_hardlinks(self) -> None:
+        crash_reporter.install_crash_handlers(self.user_data_dir)
+        crashes_dir = self.user_data_dir / "crashes"
+        normal = crashes_dir / "20260509T130000Z.txt"
+        normal.write_text("normal preview", encoding="utf-8")
+        self.assertEqual(crash_reporter.read_crash_report_preview(normal), "normal preview")
+
+        invalid = crashes_dir / "20260509T130001Z.txt"
+        invalid.write_bytes(b"\xff\xfe")
+        with self.assertRaises(UnicodeError):
+            crash_reporter.read_crash_report_preview(invalid)
+
+        oversized = crashes_dir / "20260509T130002Z.txt"
+        oversized.write_bytes(b"x" * (crash_reporter.MAX_CRASH_REPORT_PREVIEW_BYTES + 1))
+        with self.assertRaises(ValueError):
+            crash_reporter.read_crash_report_preview(oversized)
+
+        crash_reporter._reset_for_tests()
+        outside = self.user_data_dir / "outside.txt"
+        outside.write_text("outside", encoding="utf-8")
+        alias = crashes_dir / "20260509T130003Z.txt"
+        import os
+        os.link(outside, alias)
+        with self.assertRaises(ValueError):
+            crash_reporter.read_crash_report_preview(alias)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junction fixture")
+    def test_crashes_directory_junction_is_refused_without_touching_target(self) -> None:
+        import _winapi
+        import os
+
+        target = self.user_data_dir / "outside"
+        target.mkdir()
+        readme = target / "_README.txt"
+        fault_log = target / "_faulthandler.log"
+        readme.write_text("safe readme", encoding="utf-8")
+        fault_log.write_text("safe fault log", encoding="utf-8")
+        alias = self.user_data_dir / "crashes"
+        _winapi.CreateJunction(str(target), str(alias))
+        try:
+            crash_reporter.install_crash_handlers(self.user_data_dir)
+            self.assertFalse(crash_reporter._installed)
+            self.assertEqual(readme.read_text(encoding="utf-8"), "safe readme")
+            self.assertEqual(fault_log.read_text(encoding="utf-8"), "safe fault log")
+        finally:
+            os.rmdir(alias)
+
     def test_mark_crashes_reviewed_creates_marker(self) -> None:
         crash_reporter.install_crash_handlers(self.user_data_dir)
         crashes_dir = self.user_data_dir / "crashes"
@@ -256,6 +370,9 @@ class CrashReporterTests(unittest.TestCase):
         text = readme.read_text(encoding="utf-8")
         self.assertIn("NOT SHARE-SAFE", text)
         self.assertIn("_faulthandler.log", text)
+        self.assertIn("recognized VID/PID-form per-unit interface tails", text)
+        self.assertIn("REVIEW BEFORE SHARING", text)
+        self.assertIn("free-form exception text can remain", text)
 
         # The marker (and the faulthandler log) must not be treated as reports.
         unread = crash_reporter.list_unread_crash_reports(self.user_data_dir, since=None)

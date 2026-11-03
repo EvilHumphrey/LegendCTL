@@ -3,6 +3,10 @@
 Run `tools/setup_dev_env.ps1` first, then `tools/build_release.ps1` from a clean
 committed checkout. The setup script still uses the public release lock, a
 hash-verified wheelhouse and an offline install into `.venv-zd`. The builder
+refuses to invoke that environment while `.venv-zd.setup-lock` or
+`.venv-zd.setup-incomplete` exists. Setup retains an incomplete environment and
+marker for manual inspection after failure; it never recursively deletes or
+automatically repairs an existing environment. The builder
 checks that environment's lock marker against the **exported** release lock,
 runs `pip check` and `pip-audit`, and never resolves or installs packages.
 Existing setup markers may hash an LF or CRLF checkout of that lock. The

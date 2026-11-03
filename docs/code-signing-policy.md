@@ -56,8 +56,10 @@ open-source software.
    before a maintainer publishes them.
 5. **Publish hashes.** Each release publishes `SHA256SUMS.txt` computed over
    the **final published bytes** (after signing, once signing is live), so
-   users can verify integrity independently of the signature — hashes and
-   attestations always describe exactly what users download.
+   users can detect a mismatch relative to the supplied checksum. When the
+   artifact and checksum come from the same release channel, the hash does not
+   authenticate the publisher and is not a signature substitute. Attestations
+   are the separate build-origin check for current unsigned releases.
 
 ## Signing scope
 
@@ -104,21 +106,19 @@ Once signing is live, you can confirm a downloaded build is the signed release:
 
 1. Right-click `ZD Ultimate Legend.exe` → **Properties → Digital Signatures**
    and confirm the signer is the LegendCTL project certificate.
-2. Independently, check the downloaded artifact's hash against the published `SHA256SUMS.txt`:
+2. Check the downloaded artifact's hash against `SHA256SUMS.txt` to detect a
+   mismatch relative to that supplied checksum:
    ```powershell
    Get-FileHash ".\ZDUltimateLegend-v<version>-windows.zip" -Algorithm SHA256
    ```
 
 Until signing is in place, releases are **unsigned** — but from v2.5.0 they are
 not unverifiable: each release's binaries carry CI build-provenance
-attestations you can check with the GitHub CLI:
-
-```powershell
-gh attestation verify .\ZDUltimateLegend-v<version>-Setup.exe --repo EvilHumphrey/LegendCTL
-gh attestation verify .\ZDUltimateLegend-v<version>-windows.zip --repo EvilHumphrey/LegendCTL
-```
-
-See [install-windows-and-smartscreen.md](install-windows-and-smartscreen.md)
-for the full verification guide (including offline verification), and the
+attestations. Use the pinned commands in
+[install-windows-and-smartscreen.md](install-windows-and-smartscreen.md). That
+maintained guide states the required GitHub CLI version and constrains the
+repository, signer workflow, and release tag for both online and offline
+verification. Do not replace those commands with a repository-only check. See
+also the
 README's ["First-run SmartScreen, and verifying your download"](../README.md#first-run-smartscreen-and-verifying-your-download)
 section for what to expect from SmartScreen and antivirus in the meantime.

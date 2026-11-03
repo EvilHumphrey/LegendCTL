@@ -41,8 +41,11 @@ Portable ZIP is the low-friction path — no admin, no installer:
    [latest release](https://github.com/EvilHumphrey/LegendCTL/releases/latest).
 2. The build is currently **unsigned**, so Windows SmartScreen may show
    "Windows protected your PC" on first run. That can happen for unsigned or
-   low-reputation downloads — if you like, verify the **SHA-256** against
-   `SHA256SUMS.txt` in the release first, then **More info → Run anyway**.
+   low-reputation downloads. Check the **SHA-256** against `SHA256SUMS.txt` to
+   detect a mismatch or corruption, and use the GitHub attestation for the
+   separate build-origin check. A same-channel hash does not authenticate the
+   publisher; choose **More info → Run anyway** only if you independently trust
+   the source and accept the unsigned-build risk.
 3. Extract anywhere and run `ZD Ultimate Legend.exe` (the window/exe still carry
    the project's legacy name — same program).
 

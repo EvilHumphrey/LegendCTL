@@ -507,7 +507,7 @@ class CategoryMapDriftTests(unittest.TestCase):
 
         device_in_map = {
             key
-            for key, category in import_classifier._CATEGORY_MAP.items()
+            for key, category in import_classifier.FIELD_CATEGORY_MAP.items()
             if category is RiskCategory.DEVICE
         }
         self.assertEqual(device_in_map, set(DEVICE_SETTING_KEYS))

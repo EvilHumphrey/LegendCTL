@@ -119,17 +119,22 @@ a couple of things are expected and normal on first launch:
   likely show a "Windows protected your PC" / "unrecognized app" prompt.
   SmartScreen weighs code signing and download reputation, so the exact behavior
   can vary (and enterprise policy can change it) — the prompt is not in itself a
-  sign of malware. If you trust the source and have verified the hash (below),
-  choose **More info → Run anyway**.
+  sign of malware. A matching hash alone is not a reason to bypass the warning.
+  Choose **More info → Run anyway** only if you independently trust the source
+  and accept the risk of running an unsigned build.
 - **Verify the published SHA-256.** Every release publishes `SHA256SUMS.txt`,
   which lists the hash of each downloadable artifact (the `-windows.zip` and the
-  `-Setup.exe`). Confirm your download matches before extracting/running:
+  `-Setup.exe`). A match detects a mismatch or corruption relative to that
+  checksum. Because the artifact and checksum come from the same release
+  channel, the hash alone does **not** authenticate the publisher:
 
   ```powershell
   Get-FileHash ".\ZDUltimateLegend-v<version>-windows.zip" -Algorithm SHA256
   ```
 
-  Compare the output against the matching value in `SHA256SUMS.txt`.
+  Compare the output against the matching value in `SHA256SUMS.txt`. For an
+  authenticated build-origin check on v2.5.0+ releases, also follow the GitHub
+  attestation steps in the install guide.
 - **Antivirus false positives.** PyInstaller-packaged apps (this is one) are a
   well-known source of heuristic AV false-positives, because the self-extracting
   bundle pattern resembles some packers. If your AV flags the build, you can
@@ -165,8 +170,11 @@ how releases are (will be) signed.
 1. Plug a ZD Ultimate Legend controller into a USB port.
 2. Launch `ZD Ultimate Legend.exe` (Start Menu shortcut after an installer install,
    or by extracting the ZIP and double-clicking). On first launch you may see the
-   [SmartScreen prompt](#first-run-smartscreen-and-verifying-your-download) — verify
-   your download and trust the source first, then choose **More info → Run anyway**.
+   [SmartScreen prompt](#first-run-smartscreen-and-verifying-your-download). A
+   checksum match detects a changed download but does not authenticate its
+   publisher; use the attestation guide where available, and choose **More info →
+   Run anyway** only if you independently trust the source and accept the
+   unsigned-build risk.
 3. The app auto-reads current controller state on connect.
 4. Adjust settings via the sidebar tabs. Controls labeled as live write immediately;
    for other settings, use the tab's Apply button or apply a saved profile from the footer.

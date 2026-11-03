@@ -72,6 +72,18 @@ class CrashReviewModalTests(unittest.TestCase):
         finally:
             dpg.destroy_context()
 
+    def test_invalid_utf8_preview_does_not_abort_modal_startup(self) -> None:
+        report = self.user_data_dir / "crashes" / "20260509T120001Z.txt"
+        report.write_bytes(b"\xff\xfe")
+        dpg.create_context()
+        try:
+            shell = self._make_shell_with_user_data_dir()
+            shell._show_crash_review_modal_if_any()
+            self.assertTrue(dpg.does_item_exist("crash_review_modal"))
+            self.assertEqual(dpg.get_value("crash_review_preview"), "")
+        finally:
+            dpg.destroy_context()
+
     def test_dismiss_button_marks_all_reviewed_and_saves_timestamp(self) -> None:
         report = self._seed_crash("20260509T130000Z.txt")
         dpg.create_context()

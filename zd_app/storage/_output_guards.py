@@ -12,6 +12,7 @@ import ctypes
 import ntpath
 import os
 import re
+import stat
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -182,7 +183,8 @@ def _windows_open(name: str, parent: int | None, *, directory: bool, create: boo
         0x100000 | 0x80 | (0x1 | 0x20 if directory else 0x2),
         ctypes.byref(attributes), ctypes.byref(status_block), None, 0,
         0x1,  # FILE_SHARE_READ only: pin names against writes/reparse/delete
-        (3 if create else 1) if directory else 2,  # OPEN_IF / OPEN / CREATE
+        (3 if create else 1) if directory else (2 if create else 1),
+        # directories: OPEN_IF / OPEN; files: CREATE / OPEN
         0x20 | (0x1 if directory else 0x40), None, 0,
     )
     if status < 0:
@@ -217,11 +219,7 @@ class GuardedOutputDirectory:
 
         if self._handle is None:
             raise ValueError("Output directory is closed")
-        if (not filename or filename in {".", ".."}
-                or any(c in filename for c in '/\\\0:<>"|?*')
-                or filename.endswith((" ", ".")) or _DEVICE_NAME.match(filename)
-                or any(ord(c) < 32 for c in filename)):
-            raise UnsafeOutputPathError("Output name must be a regular leaf filename")
+        self._validate_filename(filename)
         for _attempt in range(5):
             _bounded_output_path(self.path / filename)
             try:
@@ -243,6 +241,34 @@ class GuardedOutputDirectory:
             stream.write(text)
         return self.path / filename
 
+    def open_text_truncate(self, filename: str, *, buffering: int = 1):
+        """Open one pinned ordinary file for a guarded truncate-and-rewrite.
+
+        The directory capability remains live for the returned stream's
+        lifetime. Existing reparses, non-regular files and hardlink aliases are
+        refused before truncation. Callers own and must close the stream.
+        """
+
+        if self._handle is None:
+            raise ValueError("Output directory is closed")
+        self._validate_filename(filename)
+        descriptor = self._open_file_truncate(filename)
+        try:
+            return os.fdopen(
+                descriptor, "w", encoding="utf-8", newline="", buffering=buffering
+            )
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    @staticmethod
+    def _validate_filename(filename: str) -> None:
+        if (not filename or filename in {".", ".."}
+                or any(c in filename for c in '/\\\0:<>"|?*')
+                or filename.endswith((" ", ".")) or _DEVICE_NAME.match(filename)
+                or any(ord(c) < 32 for c in filename)):
+            raise UnsafeOutputPathError("Output name must be a regular leaf filename")
+
     def _create_file(self, filename: str) -> int:
         if _WINDOWS:
             import msvcrt
@@ -257,6 +283,36 @@ class GuardedOutputDirectory:
             filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
             0o600, dir_fd=self._handle,
         )
+
+    def _open_file_truncate(self, filename: str) -> int:
+        if _WINDOWS:
+            import msvcrt
+
+            try:
+                handle = _windows_open(filename, self._handle, directory=False, create=True)
+            except FileExistsError:
+                handle = _windows_open(filename, self._handle, directory=False, create=False)
+            try:
+                descriptor = msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY)
+            except BaseException:
+                _close_windows_handle(handle)
+                raise
+        else:
+            descriptor = os.open(
+                filename, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW,
+                0o600, dir_fd=self._handle,
+            )
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise UnsafeOutputPathError(
+                    "Output file must be regular and have exactly one link"
+                )
+            os.ftruncate(descriptor, 0)
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
 
 
 @contextmanager

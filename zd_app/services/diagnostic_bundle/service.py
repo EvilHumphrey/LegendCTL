@@ -20,13 +20,11 @@ passport → "Not assigned" placeholder; missing health_reports directory →
 "No exports found" section line; empty wear ledger → all zeroes. Bundle
 generation never raises through these holes.
 
-**Path sanitization.** The on-disk Markdown must not leak absolute paths,
-even when an embedded summary line happens to include one (e.g., a wear
-ledger ``details`` dict that recorded a profile path). All paths
-flowing into the report run through :func:`_sanitize_path`, which
-rewrites ``<APP_DATA>\\ZDUltimateLegend\\...`` segments with the
-:data:`APP_DATA_PLACEHOLDER` token and strips the dirname when the file
-is inside one of the wrapper's own known sub-directories.
+**Share safety.** The on-disk Markdown must not leak absolute paths or
+service-note contents. Wear-ledger exports contain aggregate counts only;
+the compatibility ``recent_service_notes`` field is always an empty list.
+Other free-form values flowing into the report run through the composed
+share sanitizer before they are rendered.
 """
 
 from __future__ import annotations
@@ -89,7 +87,6 @@ BUNDLE_DIRNAME = "diagnostic_bundles"
 # Default summary windows / limits.
 DEFAULT_HEALTH_REPORT_LIMIT = 5
 DEFAULT_WEAR_LEDGER_DAYS = 90
-DEFAULT_RECENT_SERVICE_NOTES = 10
 _HEALTH_REPORT_MARKDOWN_NAME = re.compile(
     r"zd_health_report_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{6}\.md"
 )
@@ -575,15 +572,7 @@ class DiagnosticBundleService:
             "- Total prior diagnostic bundles: "
             f"{counts.get('diagnostic_bundle_generated', 0)}"
         )
-        recent_notes = summary["recent_service_notes"]
-        lines.append("- Recent service notes:")
-        if not recent_notes:
-            lines.append("    - (none in window)")
-        else:
-            for entry in recent_notes:
-                preview = self._sanitize_markdown(entry.get("preview", ""))
-                ts = self._sanitize_markdown(entry.get("ts", ""))
-                lines.append(f"    - {ts}: {preview}")
+        lines.append("- Service-note text and timestamps: excluded (counts only)")
         return "\n".join(lines)
 
     def _render_not_included(self) -> str:
@@ -715,9 +704,7 @@ class DiagnosticBundleService:
               "rp_restore_labels": { label: count, ... },
               "readiness_check_verdicts": { verdict: count, ... },
               "module_characterized_verdicts": { verdict: count, ... },
-              "recent_service_notes": [
-                  {"ts": "...", "preview": "...first 80 chars..."}, ...
-              ],
+              "recent_service_notes": [],
             }
 
         Does NOT include full event timing or raw summary lines.
@@ -746,7 +733,6 @@ class DiagnosticBundleService:
         rp_restore_labels: dict[str, int] = {}
         readiness_check_verdicts: dict[str, int] = {}
         module_characterized_verdicts: dict[str, int] = {}
-        recent_service_notes: list[dict[str, str]] = []
         for event in events:
             counts[event.event_type] = counts.get(event.event_type, 0) + 1
             details = event.details or {}
@@ -763,27 +749,14 @@ class DiagnosticBundleService:
                 module_characterized_verdicts[verdict] = (
                     module_characterized_verdicts.get(verdict, 0) + 1
                 )
-            elif event.event_type == SERVICE_NOTE:
-                if len(recent_service_notes) < DEFAULT_RECENT_SERVICE_NOTES:
-                    preview = self._sanitize_path(
-                        details.get("note") or event.summary or ""
-                    )
-                    preview = preview.strip().replace("\n", " ")
-                    if len(preview) > 80:
-                        preview = preview[:80] + "..."
-                    recent_service_notes.append(
-                        {
-                            "ts": self._sanitize_path(event.ts),
-                            "preview": preview,
-                        }
-                    )
         return {
             "window_days": int(wear_ledger_days),
             "counts": counts,
             "rp_restore_labels": rp_restore_labels,
             "readiness_check_verdicts": readiness_check_verdicts,
             "module_characterized_verdicts": module_characterized_verdicts,
-            "recent_service_notes": recent_service_notes,
+            # Compatibility field: service-note text and timestamps are local-only.
+            "recent_service_notes": [],
         }
 
     # ------------------------------------------------------------------
@@ -910,10 +883,12 @@ class DiagnosticBundleService:
                     event_count += int(value)
                 except (TypeError, ValueError):
                     pass
-        recent_notes = wear_ledger_summary.get("recent_service_notes", [])
-        service_note_count = (
-            len(recent_notes) if isinstance(recent_notes, list) else 0
-        )
+        service_note_count = 0
+        if isinstance(counts, Mapping):
+            try:
+                service_note_count = int(counts.get(SERVICE_NOTE, 0))
+            except (TypeError, ValueError):
+                service_note_count = 0
 
         members: list[_BundleMember] = [
             _BundleMember(
