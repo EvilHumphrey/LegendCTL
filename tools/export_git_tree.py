@@ -456,6 +456,12 @@ def run_build(repo: Path, destination: Path, python: Path) -> None:
         env = {k: v for k, v in os.environ.items()
                if not k.upper().startswith(("PYTHON", "PIP_", "GIT_")) and k.upper() != "PSMODULEPATH"}
         env["PIP_CONFIG_FILE"] = os.devnull
+        # PyInstaller 6.22 may materialize import caches in the raw source tree
+        # even when its parent interpreter was launched with ``-B``.  The
+        # release provenance check correctly refuses those extra directories,
+        # so make the no-bytecode contract explicit for the complete isolated
+        # worker process and every Python descendant it starts.
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         result = subprocess.run([
             "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
             str(source / "tools" / "build_release.ps1"), "-FromVerifiedSnapshot",

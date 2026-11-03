@@ -425,6 +425,7 @@ class RawSourceTests(RepositoryFixture):
             self.assertEqual(Path(args[args.index("-InnoToolchainRoot") + 1]), self.repo / ".release-tools")
             self.assertFalse((source / ".release-tools").exists())
             self.assertNotIn("PYTHONPATH", kwargs["env"])
+            self.assertEqual(kwargs["env"].get("PYTHONDONTWRITEBYTECODE"), "1")
             version = source / "zd_app/version.py"
             version.write_bytes(original_version.replace(b'__build_commit__ = ""',
                                                          f'__build_commit__ = "{self.commit_id}"'.encode()))
