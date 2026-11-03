@@ -11,6 +11,8 @@ support exports, controller-import filtering, and the release toolchain.
 - Diagnostic bundles exclude service-note text by default. They retain counts
   without placing private note prose in Markdown, JSON, ZIP members, filenames,
   or previews.
+- Wear-ledger failure telemetry no longer echoes operator-authored event types
+  or summaries into the support log.
 - Safe Import applies one field-level classification to preview, filtering,
   saving, and applying. Trigger mode cannot pass through when its Layout
   category is excluded, and malformed or hostile local inputs fail closed.
