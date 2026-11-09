@@ -5,3 +5,8 @@ pip-tools==7.6.2
 # pip-tools imports pip internals. Pin the compatible security patch release
 # so a future pip release cannot break the lock refresh command at runtime.
 pip==26.2.2
+
+# pip-tools depends on setuptools. Keep it an exact root at the advisory-fixed
+# floor (GHSA-xmj3-9gf7-h52w, fixed in 84.1.0) so the refresher's own tooling
+# venv cannot resolve a release below that fixed floor.
+setuptools==84.1.0

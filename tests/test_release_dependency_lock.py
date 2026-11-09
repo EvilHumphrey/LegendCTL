@@ -150,6 +150,8 @@ class ReleaseLockClosureTests(unittest.TestCase):
         self.assertIn("pip-tools==7.6.2", lock_tools["pip-tools"])
         self.assertIn("--hash=sha256:", lock_tools["pip-tools"])
         self.assertIn("pip==26.2.2", lock_tools["pip"])
+        self.assertIn("setuptools==84.1.0", tools_input)
+        self.assertIn("setuptools==84.1.0", lock_tools["setuptools"])
 
     def test_release_lock_versions_match_all_recursive_build_roots(self) -> None:
         lock_versions = _locked_versions(LOCK)
