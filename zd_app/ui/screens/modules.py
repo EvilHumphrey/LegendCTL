@@ -2514,11 +2514,8 @@ def _generate_markdown(
 ) -> Optional[Path]:
     """Test-friendly Markdown generation wrapper."""
 
-    try:
-        bundle.base_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        logger.exception("modules.export: failed to ensure base_dir")
-        return None
+    from zd_app.storage._output_guards import guarded_output_directory
+
     try:
         markdown = bundle.generate_markdown(
             include_archived=bool(state.export_include_archived),
@@ -2529,13 +2526,14 @@ def _generate_markdown(
     except Exception:  # noqa: BLE001 — surface as generate_failed
         logger.exception("modules.export: generate_markdown raised")
         return None
-    target = _bundle_target_path(bundle, ".md")
+    target_name = _bundle_target_path(bundle, ".md").name
     try:
-        target.write_text(markdown, encoding="utf-8")
-    except OSError:
-        logger.exception(
-            "modules.export: failed to write %r", str(target)
-        )
+        with guarded_output_directory(
+            bundle.base_dir, bundle.base_dir, allow_fallback=False
+        ) as output:
+            target = output.write_text(target_name, markdown)
+    except (OSError, ValueError):
+        logger.exception("modules.export: failed to write %s", target_name)
         return None
     bundle.emit_generated_event(
         output_filename=target.name,
@@ -2579,14 +2577,17 @@ def _generate_zip(
 
 
 def _try_open_explorer(path: Path) -> None:
-    """Best-effort File Explorer open. Mirrors the crash-review pattern."""
+    """Best-effort File Explorer open inside a pinned local directory."""
 
     if not hasattr(os, "startfile"):
         return
+    from zd_app.storage._output_guards import guarded_output_directory
+
     try:
-        os.startfile(str(path))  # type: ignore[attr-defined]
-    except OSError:
-        logger.exception("modules.export: failed to open File Explorer at %r", str(path))
+        with guarded_output_directory(path, path, allow_fallback=False) as directory:
+            os.startfile(str(directory.path))  # type: ignore[attr-defined]
+    except (OSError, ValueError):
+        logger.exception("modules.export: failed to open File Explorer at %s", path)
 
 
 __all__ = [

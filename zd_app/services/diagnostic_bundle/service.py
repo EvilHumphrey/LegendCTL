@@ -179,13 +179,12 @@ class DiagnosticBundleService:
             self._base_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
             logger.exception(
-                "DiagnosticBundleService: failed to create base_dir %r",
-                str(self._base_dir),
+                "DiagnosticBundleService: failed to create base_dir %s",
+                self._base_dir,
             )
-        logger.info(
-            "DiagnosticBundleService constructed: service_id=%s base_dir=%r",
-            id(self),
-            str(self._base_dir),
+        logger.debug(
+            "DiagnosticBundleService ready: base_dir=%s",
+            self._base_dir,
         )
 
     # ------------------------------------------------------------------
@@ -266,14 +265,21 @@ class DiagnosticBundleService:
             # Final share-safety choke. Source-specific sanitizers remain useful
             # for previews, but no raw/new member may bypass this boundary.
             members = self._validated_bundle_members(raw_members)
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            with zipfile.ZipFile(
-                target_path,
-                mode="w",
-                compression=zipfile.ZIP_DEFLATED,
-            ) as zf:
-                for member in members:
-                    zf.writestr(member.path, member.text)
+            from zd_app.storage._output_guards import guarded_output_directory
+
+            with guarded_output_directory(
+                target_path.parent,
+                target_path.parent,
+                allow_fallback=False,
+            ) as output:
+                with output.open_binary_truncate(target_path.name) as stream:
+                    with zipfile.ZipFile(
+                        stream,
+                        mode="w",
+                        compression=zipfile.ZIP_DEFLATED,
+                    ) as zf:
+                        for member in members:
+                            zf.writestr(member.path, member.text)
         except (
             OSError,
             TypeError,
@@ -282,8 +288,8 @@ class DiagnosticBundleService:
             zipfile.BadZipFile,
         ):
             logger.exception(
-                "DiagnosticBundleService: ZIP write failed at %r",
-                str(target_path),
+                "DiagnosticBundleService: ZIP write failed at %s",
+                target_path,
             )
             return None
 

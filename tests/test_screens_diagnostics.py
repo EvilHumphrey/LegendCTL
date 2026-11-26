@@ -23,7 +23,7 @@ from zd_app.ui.screens import diagnostics
 # the developer_panels_visible gate. The Developer tab only mounts when the
 # toggle is on.
 _DEV_ONLY_TAGS = (
-    "diag_raw_hid_enabled",
+    "diag_raw_hid_log",
 )
 # Tags rendered regardless of toggle state.
 _ALWAYS_PRESENT_TAGS = (
@@ -372,7 +372,7 @@ class DiagnosticsPhase1RelocationTests(unittest.TestCase):
         dpg.create_context()
         try:
             _build_in_fresh_context(shell)
-            self.assertTrue(dpg.does_item_exist("diag_raw_hid_enabled"))
+            self.assertFalse(dpg.does_item_exist("diag_raw_hid_enabled"))
             self.assertTrue(dpg.does_item_exist("diag_raw_hid_log"))
         finally:
             dpg.destroy_context()
@@ -431,8 +431,9 @@ class DiagnosticsTabStructureTests(unittest.TestCase):
             # The Developer tab holds the Raw-HID card (the transport/replay
             # research panels are not part of this build).
             self.assertTrue(
-                dpg.does_item_exist("diag_raw_hid_enabled"), "missing dev tag diag_raw_hid_enabled"
+                dpg.does_item_exist("diag_raw_hid_log"), "missing dev tag diag_raw_hid_log"
             )
+            self.assertFalse(dpg.does_item_exist("diag_raw_hid_enabled"))
         finally:
             dpg.destroy_context()
 

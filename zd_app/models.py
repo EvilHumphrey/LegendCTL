@@ -425,7 +425,9 @@ class AppSettings:
         last_reviewed = payload.get("last_reviewed_crash_timestamp")
         return cls(
             language=_normalize_language_code(payload.get("language", "en")),
-            logging_verbosity=payload.get("logging_verbosity", "Normal"),
+            logging_verbosity=_normalize_logging_verbosity(
+                payload.get("logging_verbosity", "Normal")
+            ),
             auto_read_on_connect=payload.get("auto_read_on_connect", True),
             diagnostics_bundle_dir=payload.get("diagnostics_bundle_dir", "zd_data/diagnostics"),
             show_legacy_screens=bool(payload.get("show_legacy_screens", False)),
@@ -433,6 +435,15 @@ class AppSettings:
             last_reviewed_crash_timestamp=last_reviewed if isinstance(last_reviewed, str) else None,
             first_run_acknowledged=bool(payload.get("first_run_acknowledged", False)),
         )
+
+
+VALID_LOGGING_VERBOSITIES: tuple[str, ...] = ("Off", "Quiet", "Normal", "Verbose")
+
+
+def _normalize_logging_verbosity(value: object) -> str:
+    if isinstance(value, str) and value in VALID_LOGGING_VERBOSITIES:
+        return value
+    return "Normal"
 
 
 def _normalize_language_code(value: str | None) -> str:

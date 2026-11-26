@@ -147,13 +147,12 @@ class ModulePassportService:
             (self._base_dir / ARCHIVE_DIRNAME).mkdir(parents=True, exist_ok=True)
         except OSError:
             logger.exception(
-                "ModulePassportService: failed to create base_dir %r",
-                str(self._base_dir),
+                "ModulePassportService: failed to create base_dir %s",
+                self._base_dir,
             )
-        logger.info(
-            "ModulePassportService constructed: service_id=%s base_dir=%r",
-            id(self),
-            str(self._base_dir),
+        logger.debug(
+            "ModulePassportService ready: base_dir=%s",
+            self._base_dir,
         )
 
     # ------------------------------------------------------------------

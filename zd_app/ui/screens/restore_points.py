@@ -1564,20 +1564,17 @@ def _on_export_rp(shell, rp_id: str) -> None:
         shell.rebuild_current_screen()
         return
     try:
+        from zd_app.storage._output_guards import guarded_output_directory
+
         export_dir = _restore_points_export_dir(shell)
-        target = export_dir / f"{rp_id}.json"
-        # Defense-in-depth containment: the resolved target must stay directly
-        # inside the export dir. ``rp_id`` is already constrained to a safe stem
-        # by restore_point_from_dict's id validation, so this never fires for a
-        # real restore point — but it turns any future gap (or an id sourced
-        # from elsewhere) into a refusal instead of an out-of-tree write.
-        if target.resolve().parent != export_dir.resolve():
-            raise ValueError(f"export target escapes export dir: {rp_id!r}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            json.dumps(restore_point_to_dict(rp), indent=2),
-            encoding="utf-8",
-        )
+        filename = f"{rp_id}.json"
+        payload_text = json.dumps(restore_point_to_dict(rp), indent=2)
+        with guarded_output_directory(
+            export_dir, export_dir, allow_fallback=False
+        ) as output:
+            with output.open_text_truncate(filename) as handle:
+                handle.write(payload_text)
+            target = output.path / filename
         state.status_text = t("restore_points.result.export_success", path=str(target))
         state.status_kind = "info"
     except (OSError, ValueError) as exc:
@@ -1747,17 +1744,22 @@ def _on_save_result_to_diagnostics(shell) -> None:
         ],
     }
     try:
-        target = _restore_points_export_dir(shell) / (
-            f"restore_result_{time.strftime('%Y-%m-%d_%H%M%S')}.json"
-        )
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        from zd_app.services.path_scrub import sanitize_shareable_json
+        from zd_app.storage._output_guards import guarded_output_directory
+
+        export_dir = _restore_points_export_dir(shell)
+        filename = f"restore_result_{time.strftime('%Y-%m-%d_%H%M%S')}.json"
+        safe_payload = sanitize_shareable_json(payload)
+        with guarded_output_directory(
+            export_dir, export_dir, allow_fallback=False
+        ) as output:
+            target = output.write_text(filename, json.dumps(safe_payload, indent=2))
         state.status_text = t(
             "restore_points.result.save_to_diagnostics_success",
             path=str(target),
         )
         state.status_kind = "info"
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         logger.exception("Restore-result diagnostics save failed")
         state.status_text = t(
             "restore_points.result.save_to_diagnostics_failure",
@@ -1821,10 +1823,7 @@ def _safe_load(service, rp_id: str) -> Optional[RestorePoint]:
     # log on every click. The failure paths below stay at INFO so any future
     # regression of the load-by-id contract surfaces with a traceback in
     # zd_wrapper.log without needing to flip a debug flag first.
-    logger.debug(
-        "restore-points safe-load: rp_id=%r service_id=%s store_id=%s",
-        rp_id, id(service), id(getattr(service, "_store", None)),
-    )
+    logger.debug("restore-points safe-load: rp_id=%s", rp_id)
     try:
         return service._store.load(rp_id)  # type: ignore[attr-defined]
     except Exception as exc:  # noqa: BLE001

@@ -29,6 +29,24 @@ for networking and driver/virtual-device imports and shows the evidence it found
 the result out — or [verify it yourself with TCPView or PowerShell](verifying-no-network.md)
 in a couple of minutes.
 
+### Does LegendCTL write local logs? Can I turn logging off?
+Yes — operational file logging (`%APPDATA%\ZDUltimateLegend\logs\zd_wrapper.log`,
+5 MB with 3 rotated backups) is **optional** and controlled under **Settings →
+Logging Verbosity**: **Off**, **Quiet** (warnings/errors), **Normal** (default),
+or **Verbose** (debug detail). Setting it to **Off** stops file logging
+immediately and prevents the logger from creating a `logs/` folder on normal
+launches (one-time legacy data-directory migration can still copy a pre-existing
+`logs/` folder before settings load). The formatter scrubs home-directory paths
+and Windows device-instance IDs, and routine log lines omit profile names —
+still review `zd_wrapper.log` before sharing it publicly, because storage error
+messages can include profile-derived filenames. Nothing is ever sent over the
+network. If you file a bug report after setting logging to **Off**, temporarily
+switch to **Normal** or **Verbose** to capture a log while reproducing the
+issue. Separate local-only safety records — the **Wear Ledger** (`wear_ledger/`,
+keeps up to 10 rotated archives) and local **Crash Reports** (`crashes/`, keeps
+up to 50 reviewed pairs) — remain local on your PC for recovery and never leave
+your machine.
+
 ### Is it open source? Can I read/build it myself?
 Yes — MIT licensed, the full source is on GitHub, and the README has a
 [Build from source](https://github.com/EvilHumphrey/LegendCTL/blob/main/README.md#build-from-source) section. The "deliberately

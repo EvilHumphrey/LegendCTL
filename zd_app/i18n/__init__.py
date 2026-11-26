@@ -91,6 +91,7 @@ _REVIEWED_AMBIGUOUS: dict[str, frozenset[str]] = {
             "restore_field.lighting.off",
             "restore_field.lighting_mode.off",
             "controller.choice.lighting_mode.off",
+            "settings.logging_verbosity.off",
         }
     ),
     # Lighting-zone 右侧灯 is context-distinct from directional/deadzone Right.

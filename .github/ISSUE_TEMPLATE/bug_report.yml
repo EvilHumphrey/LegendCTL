@@ -64,11 +64,14 @@ body:
       label: Raw app log (strongly recommended)
       description: |
         If you're comfortable sharing it, attach
-        `%APPDATA%\ZDUltimateLegend\logs\zd_wrapper.log`. It is required for
-        untested / unsupported-device reports. A Diagnostic Bundle exported from the
-        in-app **Diagnostics** screen is useful optional context, but it excludes the
-        raw app log and does not replace it. Drag the log (and, optionally, the bundle)
-        into this box to attach them.
+        `%APPDATA%\ZDUltimateLegend\logs\zd_wrapper.log` (if you set
+        **Settings -> Logging Verbosity** to **Off**, switch it back to
+        **Normal** or **Verbose** and reproduce the issue first; review the file
+        before posting because error lines can include profile filenames). It is required for
+        untested / unsupported-device reports. A Diagnostic Bundle exported
+        from the in-app **Diagnostics** screen is useful optional context, but it excludes the
+        raw app log and does not replace it. Drag the log (and, optionally, the bundle) into
+        this box to attach them.
     validations:
       required: false
   - type: textarea

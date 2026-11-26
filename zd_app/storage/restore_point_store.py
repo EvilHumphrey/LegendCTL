@@ -98,9 +98,9 @@ class RestorePointStore:
         # bug behind the "service unavailable" / "not found" wrapper
         # symptom. The id + base_dir tuple lets us correlate _safe_load
         # invocations against which store instance they hit.
-        logger.info(
-            "RestorePointStore constructed: store_id=%s base_dir=%r",
-            id(self), str(self.base_dir),
+        logger.debug(
+            "RestorePointStore ready: base_dir=%s",
+            self.base_dir,
         )
 
     # -- write --------------------------------------------------------------

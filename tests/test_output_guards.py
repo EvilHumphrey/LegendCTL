@@ -323,8 +323,8 @@ class OutputGuardFilesystemTests(unittest.TestCase):
                 output = root / "output"
                 output.mkdir()
 
-                def select_then_swap(*args):
-                    result = select(*args)
+                def select_then_swap(*args, **kwargs):
+                    result = select(*args, **kwargs)
                     output.rename(root / "original")
                     _winapi.CreateJunction(str(target), str(output))
                     return result

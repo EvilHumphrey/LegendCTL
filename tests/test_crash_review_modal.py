@@ -118,7 +118,7 @@ class CrashReviewModalTests(unittest.TestCase):
         finally:
             dpg.destroy_context()
 
-    def test_github_and_send_buttons_disabled(self) -> None:
+    def test_github_button_disabled_and_no_upload_button(self) -> None:
         self._seed_crash("20260509T150000Z.txt")
         dpg.create_context()
         try:
@@ -127,9 +127,7 @@ class CrashReviewModalTests(unittest.TestCase):
             self.assertFalse(
                 dpg.get_item_configuration("crash_review_github_button")["enabled"]
             )
-            self.assertFalse(
-                dpg.get_item_configuration("crash_review_send_button")["enabled"]
-            )
+            self.assertFalse(dpg.does_item_exist("crash_review_send_button"))
         finally:
             dpg.destroy_context()
 

@@ -235,12 +235,9 @@ class RestorePointService:
         # bug behind the "service unavailable" / "not found" wrapper
         # symptom. Correlates with RestorePointStore's construction log
         # and the _safe_load identity print in the screen module.
-        logger.info(
-            "RestorePointService constructed: service_id=%s store_id=%s "
-            "base_dir=%r",
-            id(self),
-            id(self._store),
-            str(getattr(self._store, "base_dir", None)),
+        logger.debug(
+            "RestorePointService ready: base_dir=%s",
+            getattr(self._store, "base_dir", None),
         )
 
     # -- read-only -----------------------------------------------------------

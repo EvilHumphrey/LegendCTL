@@ -19,6 +19,17 @@ not aspirational promises:
   builds also use that fallback when `APPDATA` is unavailable. `ZDUL_DATA_DIR`
   overrides either default. Settings, wrapper profiles, restore points, and
   wear-ledger records use JSON/JSONL; logs and reports also use text formats.
+  Operational rotating file logging (`logs/zd_wrapper.log`, 5 MB × 3 backups;
+  home-directory paths and device-instance IDs scrubbed, avoiding profile names
+  on routine log lines — review the raw log before posting publicly, as error
+  paths can still mention profile-derived filenames) is **optional** via
+  **Settings → Logging Verbosity** (`Off` / `Quiet` / `Normal` / `Verbose`):
+  setting `Off` stops `zd_wrapper.log` and prevents the logger from creating
+  `logs/` on normal launches (one-time legacy data-directory migration may still
+  copy an existing `logs/` folder before settings load). Local safety and
+  recovery records — the Wear Ledger (`wear_ledger/`, keeps up to 10 rotated
+  archives) and local crash reports (`crashes/`, oldest reviewed pairs pruned
+  beyond 50) — remain local-only and are never transmitted.
   The Last Applied feature stores a local 32-byte binary key,
   `controller_identity_key_v1.bin`, in the data root to derive
   installation-scoped controller-identity digests.

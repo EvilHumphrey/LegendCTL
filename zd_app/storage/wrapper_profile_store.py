@@ -135,7 +135,7 @@ class WrapperProfileStore:
                 json.JSONDecodeError,
                 KeyError,
             ) as exc:
-                logger.warning("Failed to load profile %s: %s", path.name, exc)
+                logger.warning("Failed to load profile file (%s)", type(exc).__name__)
                 skipped.append(path)
         profiles.sort(key=lambda profile: profile.last_modified_at, reverse=True)
         return profiles, skipped

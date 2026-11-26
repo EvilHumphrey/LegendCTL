@@ -8,6 +8,7 @@ from pathlib import Path
 import dearpygui.dearpygui as dpg
 
 from zd_app.i18n import DEFAULT_LOCALE, SUPPORTED_LOCALES, t
+from zd_app.models import VALID_LOGGING_VERBOSITIES
 from zd_app.storage._output_guards import expand_output_path, lexical_output_path
 from zd_app.storage.settings_store import _default_user_data_dir
 from zd_app.ui.components import card
@@ -27,8 +28,9 @@ _CONTENT_MAX_WIDTH = 720
 # Canonical logging-verbosity values, in display order. The settings.json
 # stores the canonical value (e.g. "Normal"); the combo shows the localized
 # label via t(LOGGING_VERBOSITY_KEY_FOR[value]).
-LOGGING_VERBOSITY_VALUES: tuple[str, ...] = ("Quiet", "Normal", "Verbose")
+LOGGING_VERBOSITY_VALUES: tuple[str, ...] = VALID_LOGGING_VERBOSITIES
 LOGGING_VERBOSITY_KEY_FOR: dict[str, str] = {
+    "Off": "settings.logging_verbosity.off",
     "Quiet": "settings.logging_verbosity.quiet",
     "Normal": "settings.logging_verbosity.normal",
     "Verbose": "settings.logging_verbosity.verbose",

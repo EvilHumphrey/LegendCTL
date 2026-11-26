@@ -1317,11 +1317,6 @@ def _build_developer_tab(shell) -> None:
 def _build_raw_hid_section(shell) -> None:
     with dpg.child_window(border=True, auto_resize_y=True, autosize_y=False):
         section_title(t("diagnostics.raw_hid.title"))
-        dpg.add_checkbox(
-            label=t("diagnostics.raw_hid.enable"),
-            tag="diag_raw_hid_enabled",
-            default_value=False,
-        )
         frames = getattr(shell.device_service, "raw_hid_frames", None)
         if not isinstance(frames, (list, tuple)):
             frames = []

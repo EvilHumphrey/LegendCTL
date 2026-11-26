@@ -304,11 +304,16 @@ def build_trust_self_check(
                 )
                 manifest_applies = payload_verification.clean
 
-    if manifest_applies or network_findings or scan_verified:
+    if network_findings:
+        network_claim = t("trust_self_check.network.claim_findings")
+    elif manifest_applies or scan_verified:
         network_claim = t("trust_self_check.network.claim")
     else:
         network_claim = t("trust_self_check.scan.unverified_claim.network")
-    if manifest_applies or footprint_findings or scan_verified:
+    if footprint_findings:
+        driver_claim = t("trust_self_check.drivers.claim_findings")
+        driver_boundary = t("trust_self_check.drivers.boundary")
+    elif manifest_applies or scan_verified:
         driver_claim = t("trust_self_check.drivers.claim")
         driver_boundary = t("trust_self_check.drivers.boundary")
     else:
@@ -316,22 +321,23 @@ def build_trust_self_check(
         driver_boundary = boundary
 
     manifest_boundary = t("trust_self_check.manifest.boundary")
-    if manifest_applies and manifest is not None and payload_verification is not None:
+    if network_findings:
+        network_evidence = _network_evidence(
+            network_findings,
+            handoffs,
+            scan_integrity=scan_integrity,
+        )
+        network_boundary = boundary
+    elif manifest_applies and manifest is not None and payload_verification is not None:
         network_evidence = _manifest_network_evidence(manifest, payload_verification)
-        driver_evidence = _manifest_driver_evidence(manifest, payload_verification)
         network_boundary = manifest_boundary
-        driver_boundary = manifest_boundary
     elif payload_verification is not None:
         # The source record can still be described as recorded data, but a
         # mismatch or missing payload file cannot support today's clean claim.
-        warning = _payload_warning_evidence(payload_verification)
-        network_evidence = warning
-        driver_evidence = warning
+        network_evidence = _payload_warning_evidence(payload_verification)
         network_boundary = manifest_boundary
-        driver_boundary = manifest_boundary
     elif manifest_reason is not None:
         network_evidence = _unverified_evidence(scan_integrity, reason=manifest_reason)
-        driver_evidence = _unverified_evidence(scan_integrity, reason=manifest_reason)
         network_boundary = boundary
     else:
         network_evidence = _network_evidence(
@@ -339,11 +345,26 @@ def build_trust_self_check(
             handoffs,
             scan_integrity=scan_integrity,
         )
+        network_boundary = boundary
+
+    if footprint_findings:
         driver_evidence = _driver_evidence(
             footprint_findings,
             scan_integrity=scan_integrity,
         )
-        network_boundary = boundary
+    elif manifest_applies and manifest is not None and payload_verification is not None:
+        driver_evidence = _manifest_driver_evidence(manifest, payload_verification)
+        driver_boundary = manifest_boundary
+    elif payload_verification is not None:
+        driver_evidence = _payload_warning_evidence(payload_verification)
+        driver_boundary = manifest_boundary
+    elif manifest_reason is not None:
+        driver_evidence = _unverified_evidence(scan_integrity, reason=manifest_reason)
+    else:
+        driver_evidence = _driver_evidence(
+            footprint_findings,
+            scan_integrity=scan_integrity,
+        )
 
     build_evidence = t(
         "trust_self_check.build.evidence",
