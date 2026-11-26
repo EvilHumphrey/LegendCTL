@@ -41,6 +41,14 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 
+[InstallDelete]
+; Clear stale PyInstaller runtime artifacts (such as an older python3XX.dll or
+; removed dependency files from a previous minor/dependency release) before
+; extracting the fresh _internal payload on upgrade. The Check predicate
+; enforces the same admin and Program Files destination policy during preflight
+; enumeration (before PrepareToInstall) as well as installation.
+Type: filesandordirs; Name: "{app}\_internal"; Check: LegendInstallPolicyAllowed
+
 [Files]
 ; Bundle the entire PyInstaller-built folder.
 Source: "..\..\dist\ZDUltimateLegend-v{#GetEnv("ZDUL_VERSION")}\*"; \
@@ -65,6 +73,17 @@ Filename: "{app}\ZD Ultimate Legend.exe"; \
 
 [Code]
 #include "install_directory_policy.iss"
+
+function LegendInstallPolicyAllowed: Boolean;
+var
+  ManagedDir: String;
+begin
+  ManagedDir := ExpandConstant('{autopf}\ZDUltimateLegend');
+  Result :=
+    IsAdminInstallMode and
+    LegendInstallDirectoryAllowed(ExpandConstant('{app}'), ManagedDir) and
+    LegendPreviousInstallAllowed(ManagedDir);
+end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
