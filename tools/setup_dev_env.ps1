@@ -124,18 +124,34 @@ function Remove-WheelhouseSafely {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location -LiteralPath $repoRoot
-$py312 = Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"
+$versionFile = Join-Path $repoRoot ".python-version"
+Assert-OrdinaryFileEntry -LiteralPath $versionFile
+$pinnedVersion = ([IO.File]::ReadAllText($versionFile)).Trim()
+if ($pinnedVersion -notmatch '^(\d+)\.(\d+)\.(\d+)$') {
+    throw "Invalid .python-version value (expected MAJOR.MINOR.PATCH): $pinnedVersion"
+}
+$pyCompact = "$($Matches[1])$($Matches[2])"
+$pyPinned = Join-Path $env:LOCALAPPDATA "Programs\Python\Python$pyCompact\python.exe"
 $venvDir = Join-Path $repoRoot ".venv-zd"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
 $releaseLock = Join-Path $repoRoot "requirements-release.lock"
 $lockMarker = Join-Path $venvDir ".legendctl-release-lock.sha256"
+$pythonVersionMarker = Join-Path $venvDir ".legendctl-python-version"
 $setupLock = Join-Path $repoRoot ".venv-zd.setup-lock"
 $incompleteMarker = Join-Path $repoRoot ".venv-zd.setup-incomplete"
 
 if ($Recreate) {
     Throw-ManualRecoveryRequired -Reason "-Recreate is no longer supported because automatic replacement was unsafe."
 }
-if (-not [IO.File]::Exists($py312)) { Write-Error "Python 3.12 not found at expected path: $py312" }
+if (-not [IO.File]::Exists($pyPinned)) { Write-Error "Python $pinnedVersion not found at expected path: $pyPinned" }
+$actualVersion = (& $pyPinned -I -S -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>&1)
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Failed to probe Python version at ${pyPinned}: $actualVersion"
+}
+$actualVersion = ($actualVersion | Out-String).Trim()
+if ($actualVersion -ne $pinnedVersion) {
+    Write-Error "Python at $pyPinned is $actualVersion, which does not match .python-version ($pinnedVersion)."
+}
 $setupLockStream = $null
 $incompleteToken = [Guid]::NewGuid().ToString("N")
 $wheelhouse = $null
@@ -166,12 +182,17 @@ try {
             Assert-NoReparseTree -LiteralPath $venvDir
             Assert-OrdinaryFileEntry -LiteralPath $venvPython
             Assert-OrdinaryFileEntry -LiteralPath $lockMarker
+            Assert-OrdinaryFileEntry -LiteralPath $pythonVersionMarker
             $recordedHash = ([IO.File]::ReadAllText($lockMarker)).Trim()
+            $recordedPythonVersion = ([IO.File]::ReadAllText($pythonVersionMarker)).Trim()
         } catch {
             Throw-ManualRecoveryRequired -Reason "The existing .venv-zd is incomplete or unsafe to execute: $($_.Exception.Message)"
         }
         if ($recordedHash -ne $lockHash) {
             Throw-ManualRecoveryRequired -Reason "The existing .venv-zd does not match requirements-release.lock."
+        }
+        if ($recordedPythonVersion -ne $pinnedVersion) {
+            Throw-ManualRecoveryRequired -Reason "The existing .venv-zd Python version ($recordedPythonVersion) does not match .python-version ($pinnedVersion)."
         }
         $venvAlreadyReady = $true
     }
@@ -188,8 +209,8 @@ try {
             $incompleteStream.Dispose()
         }
 
-        Write-Host "Creating venv at .venv-zd via Python 3.12..." -ForegroundColor Cyan
-        Invoke-NativeCommand -Label "py312 -m venv .venv-zd" -ScriptBlock { & $py312 -m venv $venvDir }
+        Write-Host "Creating venv at .venv-zd via Python $pinnedVersion..." -ForegroundColor Cyan
+        Invoke-NativeCommand -Label "python -m venv .venv-zd" -ScriptBlock { & $pyPinned -I -S -m venv $venvDir }
         Assert-NoReparseTree -LiteralPath $venvDir
         Assert-OrdinaryFileEntry -LiteralPath $venvPython
 
@@ -203,7 +224,7 @@ try {
 
         Write-Host "Downloading the hash-locked release wheelhouse..." -ForegroundColor Cyan
         Invoke-NativeCommand -Label "pip download (requirements-release.lock)" -ScriptBlock {
-            & $py312 -m pip --isolated download --disable-pip-version-check --only-binary=:all: --no-deps `
+            & $pyPinned -m pip --isolated download --disable-pip-version-check --only-binary=:all: --no-deps `
                 --require-hashes --dest $wheelhouse -r $releaseLock
         }
         Write-Host "Installing the release toolchain offline..." -ForegroundColor Cyan
@@ -224,6 +245,14 @@ try {
             $markerStream.Flush($true)
         } finally {
             $markerStream.Dispose()
+        }
+        $pyMarkerStream = [IO.File]::Open($pythonVersionMarker, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $pyMarkerBytes = [Text.Encoding]::ASCII.GetBytes($pinnedVersion)
+            $pyMarkerStream.Write($pyMarkerBytes, 0, $pyMarkerBytes.Length)
+            $pyMarkerStream.Flush($true)
+        } finally {
+            $pyMarkerStream.Dispose()
         }
         Remove-WheelhouseSafely -Wheelhouse $wheelhouse -RepositoryRoot $repoRoot
         $wheelhouse = $null

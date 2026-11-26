@@ -28,7 +28,59 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test_windows:
+    name: Test suite (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up pinned Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version-file: '.python-version'
+
+      - name: Download and install the hash-locked test closure
+        shell: pwsh
+        run: |
+          python -m venv .venv-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path .test-wheelhouse | Out-Null
+          .\.venv-test\Scripts\python.exe -m pip download --disable-pip-version-check --only-binary=:all: --no-deps `
+            --require-hashes --dest .test-wheelhouse -r requirements-release.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv-test\Scripts\python.exe -m pip install --disable-pip-version-check --no-index --find-links .test-wheelhouse `
+            --only-binary=:all: --no-deps --require-hashes -r requirements-release.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv-test\Scripts\python.exe -m pip check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run test suite (constraint gates included)
+        shell: pwsh
+        run: |
+          # DearPyGui occasionally exits with code 139 / 0xC0000005 during
+          # C-level teardown after unittest prints a complete OK summary.
+          # The shared exit-code evaluator accepts only a complete terminal OK
+          # summary meeting the minimum test count, never an early crash.
+          $ErrorActionPreference = 'Continue'
+          .\.venv-test\Scripts\python.exe -m unittest discover -s tests 2>&1 | Tee-Object -FilePath test_output_windows.txt
+          $code = $LASTEXITCODE
+          & .\.github\scripts\evaluate-unittest-result.ps1 `
+            -LogPath test_output_windows.txt `
+            -ProcessExitCode $code `
+            -MinimumTestCount 3000
+          exit $LASTEXITCODE
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: test-output-windows
+          path: test_output_windows.txt
+          retention-days: 14
+
   test:
+    # Kept temporarily during the ruleset handoff to "Test suite (Windows)".
     name: Test suite (Windows · Python 3.12)
     runs-on: windows-latest
     steps:
@@ -39,25 +91,20 @@ jobs:
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
-          cache: pip
 
-      - name: Install runtime dependencies
+      - name: Install hash-verified runtime dependency
+        shell: pwsh
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          @"
+          dearpygui==2.3.1 --hash=sha256:26ed9197cdb30099c665bd1b23724e0dba60ad06b71344ecca7e52748c21874b
+          "@ | Set-Content -LiteralPath .ci-runtime-py312.lock -Encoding ascii
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps --require-hashes -r .ci-runtime-py312.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item -LiteralPath .ci-runtime-py312.lock
 
       - name: Run test suite (constraint gates included)
         shell: pwsh
         run: |
-          # tests/__init__.py installs a shared Dear PyGui context shim so
-          # `unittest discover` runs clean in a single process. Historically a
-          # DPG teardown segfault could still surface as process exit code 139
-          # AFTER every test passed and the summary printed. So we decide
-          # The shared evaluator requires a real `Ran ...` + `OK` summary and
-          # combines it with the process exit code. Only exit 0 and the
-          # documented post-summary DPG teardown artifact (139 or Windows'
-          # signed/unsigned 0xC0000005 form) are allowed.
-          # unittest writes to stderr, hence 2>&1.
           $ErrorActionPreference = 'Continue'
           python -m unittest discover -s tests 2>&1 | Tee-Object -FilePath test_output.txt
           $code = $LASTEXITCODE
@@ -82,10 +129,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Set up Python 3.12
+      - name: Set up pinned Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: '3.12'
+          python-version-file: '.python-version'
 
       - name: Create isolated audit environment
         shell: pwsh
@@ -93,7 +140,7 @@ jobs:
           python -m venv .venv-audit
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Download and install the hash-locked audit closure
+      - name: Download and install the hash-locked release audit closure
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path .audit-wheelhouse | Out-Null
@@ -106,14 +153,25 @@ jobs:
           .\.venv-audit\Scripts\python.exe -m pip check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Audit installed environment for known CVEs
-        # requirements-build.txt itself asks for this before tagging a release;
-        # this makes it continuous. Dependabot (see .github/dependabot.yml) keeps
-        # the pins fresh between audits.
-        #
-        # Audit the same isolated closure that passed pip check; audit failures
-        # remain blocking and require review before dependency changes.
+      - name: Verify hash-locked lock-refresher tooling closure
+        shell: pwsh
+        run: |
+          python -m venv .venv-lock-tools
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path .lock-tools-wheelhouse | Out-Null
+          .\.venv-lock-tools\Scripts\python.exe -m pip download --disable-pip-version-check --only-binary=:all: --no-deps `
+            --require-hashes --dest .lock-tools-wheelhouse -r requirements-lock-tools.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv-lock-tools\Scripts\python.exe -m pip install --disable-pip-version-check --no-index --find-links .lock-tools-wheelhouse `
+            --only-binary=:all: --no-deps --require-hashes -r requirements-lock-tools.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv-lock-tools\Scripts\python.exe -m pip check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Audit release and lock-refresher closures for known CVEs
         shell: pwsh
         run: |
           .\.venv-audit\Scripts\python.exe -m pip_audit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv-audit\Scripts\python.exe -m pip_audit -r requirements-lock-tools.lock --no-deps --disable-pip
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

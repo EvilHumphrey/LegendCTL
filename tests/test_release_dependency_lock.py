@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -23,10 +24,24 @@ LOCK_TOOLS_INPUT = ROOT / "requirements-lock-tools.in"
 BUILD_INPUT = ROOT / "requirements-build.txt"
 RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release-build.yml"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+WEEKLY_AUDIT_WORKFLOW = ROOT / ".github" / "workflows" / "weekly-dependency-audit.yml"
+PYTHON_VERSION_FILE = ROOT / ".python-version"
 SETUP = ROOT / "tools" / "setup_dev_env.ps1"
 BUILD = ROOT / "tools" / "build_release.ps1"
 REFRESH = ROOT / "tools" / "refresh_release_lock.ps1"
-PY312 = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / "Python312" / "python.exe"
+_PINNED_PYTHON_VERSION = (
+    PYTHON_VERSION_FILE.read_text(encoding="utf-8").strip()
+    if PYTHON_VERSION_FILE.is_file()
+    else ""
+)
+_PINNED_COMPACT = "".join(_PINNED_PYTHON_VERSION.split(".")[:2])
+PY_PINNED = (
+    Path(os.environ.get("LOCALAPPDATA", ""))
+    / "Programs"
+    / "Python"
+    / f"Python{_PINNED_COMPACT}"
+    / "python.exe"
+)
 
 
 def _locked_sections(path: Path) -> dict[str, str]:
@@ -138,20 +153,21 @@ class ReleaseLockClosureTests(unittest.TestCase):
         self.assertIn("urllib3==2.8.0", release_lock["urllib3"])
         self.assertIn("pip==26.2.2", release_input)
         self.assertIn("pip==26.2.2", release_lock["pip"])
-        self.assertIn("filelock==4.2.1", release_input)
-        self.assertIn("filelock==4.2.1", release_lock["filelock"])
-        self.assertIn("setuptools==84.1.0", release_input)
-        self.assertIn("setuptools==84.1.0", release_lock["setuptools"])
-        self.assertIn("msgpack==1.2.3", release_input)
-        self.assertIn("msgpack==1.2.3", release_lock["msgpack"])
-        self.assertIn("pip-tools==7.6.2", tools_input)
+        self.assertIn("filelock==4.2.9", release_input)
+        self.assertIn("filelock==4.2.9", release_lock["filelock"])
+        self.assertIn("setuptools==84.2.1", release_input)
+        self.assertIn("setuptools==84.2.1", release_lock["setuptools"])
+        self.assertIn("msgpack==1.2.4", release_input)
+        self.assertIn("msgpack==1.2.4", release_lock["msgpack"])
+        self.assertIn("pip-tools==7.7.0", tools_input)
         self.assertIn("pip==26.2.2", tools_input)
         self.assertIn("pip-tools", lock_tools)
-        self.assertIn("pip-tools==7.6.2", lock_tools["pip-tools"])
+        self.assertIn("pip-tools==7.7.0", lock_tools["pip-tools"])
         self.assertIn("--hash=sha256:", lock_tools["pip-tools"])
         self.assertIn("pip==26.2.2", lock_tools["pip"])
-        self.assertIn("setuptools==84.1.0", tools_input)
-        self.assertIn("setuptools==84.1.0", lock_tools["setuptools"])
+        self.assertIn("setuptools==84.2.1", tools_input)
+        self.assertIn("setuptools==84.2.1", lock_tools["setuptools"])
+        self.assertEqual(_PINNED_PYTHON_VERSION, "3.14.10")
 
     def test_release_lock_versions_match_all_recursive_build_roots(self) -> None:
         lock_versions = _locked_versions(LOCK)
@@ -207,6 +223,7 @@ class ReleaseOfflineInstallationTests(unittest.TestCase):
     def test_refresher_bootstraps_from_its_own_hash_lock_and_verifies_the_new_lock(self) -> None:
         refresh = REFRESH.read_text(encoding="utf-8")
         self.assertIn("requirements-lock-tools.lock", refresh)
+        self.assertIn("does not match .python-version", refresh)
         self.assertIn("Where-Object { $_.Name -like 'PIP_*' }", refresh)
         self.assertIn("--no-index --find-links $toolWheelhouse", refresh)
         self.assertEqual(refresh.count("-m pip --isolated download --disable-pip-version-check"), 2)
@@ -221,11 +238,38 @@ class ReleaseOfflineInstallationTests(unittest.TestCase):
         self.assertIn("--pip-args='--isolated --only-binary=:all:'", header)
         self.assertIn("--only-binary :all:", LOCK.read_text(encoding="utf-8"))
 
-    @unittest.skipUnless(PY312.is_file(), "requires the supported local Python 3.12 refresh runtime")
+    def test_ci_and_weekly_audit_cover_both_release_and_lock_tools_closures(self) -> None:
+        for workflow_path in (CI_WORKFLOW, WEEKLY_AUDIT_WORKFLOW):
+            with self.subTest(workflow=workflow_path.name):
+                body = workflow_path.read_text(encoding="utf-8")
+                self.assertIn("python-version-file: '.python-version'", body)
+                self.assertIn("requirements-release.lock", body)
+                self.assertIn("requirements-lock-tools.lock", body)
+                self.assertIn("-m pip_audit -r requirements-lock-tools.lock --no-deps --disable-pip", body)
+        ci_body = CI_WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn("pip install --upgrade pip", ci_body)
+
+    @unittest.skipUnless(PY_PINNED.is_file(), "requires the supported local pinned Python refresh runtime")
     def test_refresher_ignores_hostile_pip_environment(self) -> None:
         """The real refresh path must ignore hostile pip env/config, not just name flags."""
         with tempfile.TemporaryDirectory() as temp_dir:
-            config = Path(temp_dir) / "hostile-pip.conf"
+            temp_root = Path(temp_dir)
+            repo_copy = temp_root / "repo"
+            tools_copy = repo_copy / "tools"
+            tools_copy.mkdir(parents=True)
+            shutil.copy2(REFRESH, tools_copy / "refresh_release_lock.ps1")
+            for filename in (
+                ".python-version",
+                "requirements.txt",
+                "requirements-build.txt",
+                "requirements-release.in",
+                "requirements-lock-tools.lock",
+                "requirements-release.lock",
+            ):
+                src = ROOT / filename
+                if src.is_file():
+                    shutil.copy2(src, repo_copy / filename)
+            config = temp_root / "hostile-pip.conf"
             config.write_text(
                 "[global]\nindex-url = http://127.0.0.1:9/simple\nno-index = true\n",
                 encoding="utf-8",
@@ -237,8 +281,15 @@ class ReleaseOfflineInstallationTests(unittest.TestCase):
                 "PIP_NO_CACHE_DIR": "1",
             }
             completed = subprocess.run(
-                ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(REFRESH)],
-                cwd=ROOT,
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(tools_copy / "refresh_release_lock.ps1"),
+                ],
+                cwd=repo_copy,
                 env=environment,
                 capture_output=True,
                 text=True,

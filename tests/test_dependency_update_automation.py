@@ -65,7 +65,8 @@ class DependencyUpdateAutomationTests(unittest.TestCase):
         self.assertNotIn("tests/", workflow)
 
     def test_audits_install_and_check_only_the_isolated_hash_locked_environment(self) -> None:
-        interpreter = r".\.venv-audit\Scripts\python.exe"
+        audit_interpreter = r".\.venv-audit\Scripts\python.exe"
+        tools_interpreter = r".\.venv-lock-tools\Scripts\python.exe"
         for path in (CI_WORKFLOW, WEEKLY_AUDIT_WORKFLOW):
             with self.subTest(workflow=path.name):
                 # Inspect only the audit job; the independent product-test job
@@ -86,20 +87,38 @@ class DependencyUpdateAutomationTests(unittest.TestCase):
                             commands.append(line)
                             self.assertLess(index + 1, len(lines), line)
                             self.assertEqual(lines[index + 1], "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", line)
-                self.assertEqual(len(commands), 5, commands)
+                self.assertEqual(len(commands), 10, commands)
                 self.assertEqual(commands[0], "python -m venv .venv-audit")
-                for command in commands[1:]:
-                    self.assertTrue(command.startswith(interpreter + " -m "), command)
-                download, install, check, audit = commands[1:]
-                self.assertIn(" -m pip download ", download)
-                self.assertIn(" -m pip install ", install)
-                for command in (download, install):
+                for command in commands[1:4]:
+                    self.assertTrue(command.startswith(audit_interpreter + " -m "), command)
+                rel_download, rel_install, rel_check = commands[1:4]
+                self.assertIn(" -m pip download ", rel_download)
+                self.assertIn(" -m pip install ", rel_install)
+                for command in (rel_download, rel_install):
                     for flag in ("--only-binary=:all:", "--no-deps", "--require-hashes", "-r requirements-release.lock"):
                         self.assertIn(flag, command)
-                self.assertIn("--dest .audit-wheelhouse", download)
-                self.assertIn("--no-index --find-links .audit-wheelhouse", install)
-                self.assertEqual(check, interpreter + " -m pip check")
-                self.assertEqual(audit, interpreter + " -m pip_audit")
+                self.assertIn("--dest .audit-wheelhouse", rel_download)
+                self.assertIn("--no-index --find-links .audit-wheelhouse", rel_install)
+                self.assertEqual(rel_check, audit_interpreter + " -m pip check")
+
+                self.assertEqual(commands[4], "python -m venv .venv-lock-tools")
+                for command in commands[5:8]:
+                    self.assertTrue(command.startswith(tools_interpreter + " -m "), command)
+                tools_download, tools_install, tools_check = commands[5:8]
+                self.assertIn(" -m pip download ", tools_download)
+                self.assertIn(" -m pip install ", tools_install)
+                for command in (tools_download, tools_install):
+                    for flag in ("--only-binary=:all:", "--no-deps", "--require-hashes", "-r requirements-lock-tools.lock"):
+                        self.assertIn(flag, command)
+                self.assertIn("--dest .lock-tools-wheelhouse", tools_download)
+                self.assertIn("--no-index --find-links .lock-tools-wheelhouse", tools_install)
+                self.assertEqual(tools_check, tools_interpreter + " -m pip check")
+
+                self.assertEqual(commands[8], audit_interpreter + " -m pip_audit")
+                self.assertEqual(
+                    commands[9],
+                    audit_interpreter + " -m pip_audit -r requirements-lock-tools.lock --no-deps --disable-pip",
+                )
                 for forbidden in ("--system-site-packages", "--user", "--target", "--ignore-vuln", "continue-on-error"):
                     self.assertNotIn(forbidden, audit_job)
 

@@ -142,6 +142,26 @@ class InnoScriptSyntaxTests(unittest.TestCase):
         self.assertNotIn("TODO(security-H2)", body)
         self.assertRegex(body, re.compile(r"^\s*Flags:[^\n]*runasoriginaluser", re.MULTILINE))
 
+    def test_upgrade_clears_stale_internal_runtime_payload(self) -> None:
+        """Upgrading across Python minor or dependency versions must not leave
+        stale runtime DLLs (e.g. python313.dll) in {app}\\_internal, and the
+        delete entry must be guarded by the install policy during preflight."""
+        body = _read_iss()
+        section = re.search(
+            r"(?ms)^\[InstallDelete\]\s*\r?\n(?P<body>.*?)(?=^\[|\Z)",
+            body,
+        )
+        self.assertIsNotNone(section, "[InstallDelete] section missing")
+        assert section is not None
+        self.assertRegex(
+            section.group("body"),
+            re.compile(
+                r'^\s*Type:\s*filesandordirs;\s*Name:\s*"\{app\}\\_internal";\s*Check:\s*LegendInstallPolicyAllowed\s*$',
+                re.MULTILINE,
+            ),
+        )
+        self.assertIn("function LegendInstallPolicyAllowed: Boolean;", body)
+
 
 class BuildReleaseScriptTests(unittest.TestCase):
     """Light static checks on the build_release.ps1 native-command changes."""

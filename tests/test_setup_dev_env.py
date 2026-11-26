@@ -27,7 +27,7 @@ def _read(path: Path) -> str:
 class SetupScriptContentTests(unittest.TestCase):
     def test_preserves_hash_locked_offline_install_contract(self) -> None:
         body = _read(_SETUP_PATH)
-        self.assertRegex(body, re.compile(r"&\s*\$py312\s+-m\s+venv\b"))
+        self.assertRegex(body, re.compile(r"&\s*\$pyPinned\s+-I\s+-S\s+-m\s+venv\b"))
         self.assertIn("pip --isolated download", body)
         self.assertIn("--only-binary=:all: --no-deps", body)
         self.assertIn("--require-hashes --dest $wheelhouse -r $releaseLock", body)
@@ -38,7 +38,8 @@ class SetupScriptContentTests(unittest.TestCase):
 
     def test_uses_canonical_python_and_sanitizes_pip_environment(self) -> None:
         body = _read(_SETUP_PATH)
-        self.assertIn('"Programs\\Python\\Python312\\python.exe"', body)
+        self.assertIn(".python-version", body)
+        self.assertIn('"Programs\\Python\\Python$pyCompact\\python.exe"', body)
         self.assertNotIn("LEGENDCTL_SETUP_TEST_SEAM", body)
         self.assertNotIn("LEGENDCTL_SETUP_PYTHON", body)
         self.assertIn('Where-Object { $_.Name -like "PIP_*" }', body)
@@ -88,10 +89,12 @@ class SetupScriptExecutableTests(unittest.TestCase):
             shutil.copy2(_REPO_ROOT / "tools" / name, tools / name)
         self.lock = self.root / "requirements-release.lock"
         self.lock.write_bytes(b"")
+        self.active_version = ".".join(str(part) for part in sys.version_info[:3])
+        (self.root / ".python-version").write_text(f"{self.active_version}\n", encoding="utf-8")
         self.local_app_data = Path(self._temp.name) / "local-app-data"
         python_parent = self.local_app_data / "Programs" / "Python"
         python_parent.mkdir(parents=True)
-        self.python_link = python_parent / "Python312"
+        self.python_link = python_parent / f"Python{sys.version_info.major}{sys.version_info.minor}"
         base_python = Path(getattr(sys, "_base_executable", sys.executable)).resolve()
         self._make_junction(self.python_link, base_python.parent)
 
@@ -149,6 +152,16 @@ class SetupScriptExecutableTests(unittest.TestCase):
         second = self._run()
         self.assertEqual(second.returncode, 0, second.stdout)
         self.assertIn("Nothing to do", second.stdout)
+
+    def test_patch_version_mismatch_is_refused_before_creating_venv(self) -> None:
+        mismatched = (
+            f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro + 1}"
+        )
+        (self.root / ".python-version").write_text(f"{mismatched}\n", encoding="utf-8")
+        result = self._run()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("does not match .python-version", result.stdout)
+        self.assertFalse((self.root / ".venv-zd").exists())
 
     def test_delayed_contender_rechecks_completed_environment_under_lock(self) -> None:
         script = self.root / "tools" / "setup_dev_env.ps1"
