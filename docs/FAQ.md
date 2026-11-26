@@ -26,7 +26,7 @@ socket. You don't have to take that on faith:
 open the in-app **Trust Self-Check** (Diagnostics), which scans the shipped code
 for networking and driver/virtual-device imports and shows the evidence it found
 (it inspects the app's own footprint, not system-wide services), then copies
-the result out — or [verify it yourself with Resource Monitor](verifying-no-network.md)
+the result out — or [verify it yourself with TCPView or PowerShell](verifying-no-network.md)
 in a couple of minutes.
 
 ### Is it open source? Can I read/build it myself?
