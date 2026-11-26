@@ -68,10 +68,15 @@ short version is **trust you can verify**:
 - **No macros, turbo, or automation.** It configures your controller; it never
   plays for you. That's a deliberate constraint enforced by tests, not a missing
   feature.
-- **A safety net by default.** Device-touching changes — applying device
-  settings, deadzone tuning — capture a **Restore Point** first where one can
-  be taken, wrapper events are written to an append-only local ledger, and
+- **A safety net by default, with optional file logging.** Device-touching
+  changes — applying device settings, deadzone tuning — capture a **Restore
+  Point** first where one can be taken, wrapper events are written to a local
+  Wear Ledger (append-only active log, keeps up to 10 rotated archives), and
   there are two [Recovery](#recovery--if-your-controller-feels-off) paths back.
+  Rotating operational logs (`logs/zd_wrapper.log`, home-path and
+  device-instance scrubbed) are configurable in **Settings → Logging
+  Verbosity** (`Off` / `Quiet` / `Normal` / `Verbose`), so you can disable
+  operational file logging whenever you prefer.
 
 That's the whole pitch: a small, auditable, no-surprises tool for your controller
 — open where closed software is opaque, local by design, and honest about what it

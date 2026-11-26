@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import stat
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,15 +34,49 @@ from zd_app.services.wear_ledger.models import (
     SCHEMA_VERSION,
     WearLedgerEvent,
 )
+from zd_app.storage._import_guards import list_guarded_directory
+from zd_app.storage._output_guards import (
+    GuardedOutputDirectory,
+    UnsafeOutputPathError,
+    guarded_output_directory,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
 DEFAULT_ROTATION_BYTES = 5 * 1024 * 1024  # 5MB rotation threshold.
+DEFAULT_MAX_ROTATED_ARCHIVES = 10
+MAX_READ_LINE_BYTES = 64 * 1024
+# 64 MiB covers the full active + 10 rotated archive retention window (~55 MB)
+# with headroom while still capping memory against corrupted files.
+MAX_READ_TOTAL_BYTES = 64 * 1024 * 1024
+_MAX_LEDGER_DIRECTORY_ENTRIES = 1024
 ACTIVE_FILENAME = "events.jsonl"
 ROTATED_PREFIX = "events-"
 ROTATED_SUFFIX = ".jsonl"
+_ROTATED_ARCHIVE_RE = re.compile(r"^events-(\d{8}_\d{6})(?:_(\d+))?\.jsonl$")
+
+
+def _archive_sort_key(name: str) -> tuple[str, int, str]:
+    match = _ROTATED_ARCHIVE_RE.fullmatch(name)
+    if match is None:
+        return ("", -1, name)
+    stamp = match.group(1)
+    suffix = int(match.group(2)) if match.group(2) is not None else 0
+    return (stamp, suffix, name)
+
+
+def _is_ordinary_regular_file(path: Path) -> bool:
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    if getattr(info, "st_file_attributes", 0) & 0x400:
+        return False
+    return True
 
 
 def _scrub_details(value: Any) -> Any:
@@ -88,6 +124,7 @@ class WearLedgerService:
         base_dir: Path,
         utc_now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         rotation_bytes: int = DEFAULT_ROTATION_BYTES,
+        max_rotated_archives: int = DEFAULT_MAX_ROTATED_ARCHIVES,
     ) -> None:
         self._base_dir = Path(base_dir)
         self._utc_now = utc_now
@@ -96,22 +133,29 @@ class WearLedgerService:
         # negative ``rotation_bytes`` configuration can't thrash the disk
         # rotating after every write.
         self._rotation_bytes = max(256, int(rotation_bytes))
+        self._max_rotated_archives = max(1, int(max_rotated_archives))
+        self._last_stamp_counter: dict[str, int] = {}
         # This is deliberately process-local. LegendCTL is a single-window GUI
         # app, so one process serializes normal ledger writes. Separate GUI
         # processes could still race a rotation; that is an accepted best-effort
         # limitation for this non-authoritative wear log.
         self._write_lock = threading.Lock()
         try:
-            self._base_dir.mkdir(parents=True, exist_ok=True)
-        except OSError:
+            with guarded_output_directory(
+                self._base_dir, self._base_dir, allow_fallback=False
+            ):
+                pass
+        except (OSError, ValueError):
             # Construction never raises — if the directory can't be created,
             # subsequent writes will fail and log, and reads return [].
             logger.exception(
-                "WearLedgerService: failed to create base_dir %r", str(self._base_dir)
+                "WearLedgerService: failed to create base_dir %s", self._base_dir
             )
-        logger.info(
-            "WearLedgerService constructed: service_id=%s base_dir=%r rotation_bytes=%d",
-            id(self), str(self._base_dir), self._rotation_bytes,
+        logger.debug(
+            "WearLedgerService ready: base_dir=%s rotation_bytes=%d max_archives=%d",
+            self._base_dir,
+            self._rotation_bytes,
+            self._max_rotated_archives,
         )
 
     # ------------------------------------------------------------------
@@ -189,49 +233,99 @@ class WearLedgerService:
         # second writer must not append through a handle selected before the
         # first writer rotated the active file.
         with self._write_lock:
-            self._base_dir.mkdir(parents=True, exist_ok=True)
-            active = self.active_path
-            existing_size = 0
-            try:
-                existing_size = active.stat().st_size
-            except FileNotFoundError:
-                pass
-            if existing_size > 0 and existing_size + len(encoded) > self._rotation_bytes:
-                self._rotate()
-            with open(active, "ab") as handle:
-                handle.write(encoded)
+            with guarded_output_directory(
+                self._base_dir,
+                self._base_dir,
+                allow_fallback=False,
+                allow_rename=True,
+            ) as output:
+                existing_size = 0
+                try:
+                    with output.open_binary_read(ACTIVE_FILENAME) as existing:
+                        existing_size = os.fstat(existing.fileno()).st_size
+                except FileNotFoundError:
+                    existing_size = 0
+                if existing_size > 0 and existing_size + len(encoded) > self._rotation_bytes:
+                    self._rotate(output)
+                with output.open_binary_append(ACTIVE_FILENAME) as handle:
+                    handle.write(encoded)
 
-    def _rotate(self) -> None:
-        """Rename the active file to a stamped archive name.
+    def _rotate(self, output: GuardedOutputDirectory) -> None:
+        """Atomically rename the active file to a stamped archive and prune old ones.
 
-        On Windows, ``os.replace`` is atomic for same-volume renames; a
-        target collision (very-fast rotation within the same second) is
-        resolved by appending a suffix counter.
-
-        Call only while ``_write_lock`` is held by :meth:`_write_line`. That
-        lock is process-local: this rotation relies on LegendCTL's single-GUI-
-        process assumption, and separate processes can still race here. The
-        wear ledger is non-authoritative, so that is an accepted best-effort
-        limitation rather than an interprocess-lock contract.
+        Call only while ``_write_lock`` is held by :meth:`_write_line` and
+        ``output`` is an active pinned directory with ``allow_rename=True``.
+        Same-second rotations monotonically advance the numeric suffix so
+        pruning older archives can never cause a newer archive to reuse a
+        lower-sorting name and be selected for deletion ahead of older ones.
         """
 
-        active = self.active_path
-        if not active.exists():
-            return
         stamp = _rotated_stamp(self._utc_now())
-        target = self._base_dir / f"{ROTATED_PREFIX}{stamp}{ROTATED_SUFFIX}"
-        counter = 1
-        while target.exists():
-            target = self._base_dir / f"{ROTATED_PREFIX}{stamp}_{counter}{ROTATED_SUFFIX}"
-            counter += 1
+        existing_max = self._last_stamp_counter.get(stamp, -1)
         try:
-            os.replace(active, target)
-            logger.info("WearLedgerService rotated: %s -> %s", active.name, target.name)
-        except OSError:
-            logger.exception(
-                "WearLedgerService rotation failed: active=%r target=%r",
-                str(active), str(target),
+            entries = list_guarded_directory(
+                output.path, max_entries=_MAX_LEDGER_DIRECTORY_ENTRIES
             )
+        except (OSError, ValueError):
+            entries = []
+        for entry in entries:
+            m = _ROTATED_ARCHIVE_RE.fullmatch(entry.name)
+            if m is not None and m.group(1) == stamp:
+                num = int(m.group(2)) if m.group(2) is not None else 0
+                if num > existing_max:
+                    existing_max = num
+        next_counter = existing_max + 1
+        while True:
+            if next_counter == 0:
+                target_name = f"{ROTATED_PREFIX}{stamp}{ROTATED_SUFFIX}"
+            else:
+                target_name = f"{ROTATED_PREFIX}{stamp}_{next_counter}{ROTATED_SUFFIX}"
+            try:
+                os.lstat(output.path / target_name)
+                next_counter += 1
+                continue
+            except FileNotFoundError:
+                break
+        try:
+            output.rename_noreplace(ACTIVE_FILENAME, target_name)
+            self._last_stamp_counter[stamp] = next_counter
+            if len(self._last_stamp_counter) > 16:
+                oldest = sorted(self._last_stamp_counter.keys())[0]
+                if oldest != stamp:
+                    self._last_stamp_counter.pop(oldest, None)
+            logger.info("WearLedgerService rotated: %s -> %s", ACTIVE_FILENAME, target_name)
+            self._prune_rotated_archives(output)
+        except (OSError, ValueError):
+            logger.exception(
+                "WearLedgerService rotation failed: active=%s target=%s",
+                ACTIVE_FILENAME,
+                target_name,
+            )
+
+    def _prune_rotated_archives(self, output: GuardedOutputDirectory) -> None:
+        try:
+            entries = list_guarded_directory(
+                output.path, max_entries=_MAX_LEDGER_DIRECTORY_ENTRIES
+            )
+        except (OSError, ValueError):
+            return
+        rotated = sorted(
+            (
+                entry.name
+                for entry in entries
+                if entry.name.startswith(ROTATED_PREFIX)
+                and entry.name.endswith(ROTATED_SUFFIX)
+            ),
+            key=_archive_sort_key,
+        )
+        excess = len(rotated) - self._max_rotated_archives
+        if excess <= 0:
+            return
+        for stale_name in rotated[:excess]:
+            try:
+                output.unlink_file(stale_name)
+            except (OSError, ValueError):
+                logger.warning("WearLedgerService: could not prune archive %s", stale_name)
 
     # ------------------------------------------------------------------
     # Read
@@ -250,6 +344,8 @@ class WearLedgerService:
         ``event_types`` filters by exact ``event_type`` membership.
         ``since``/``until`` filter by timestamp (inclusive on both ends).
         ``limit`` caps the returned list size after filtering.
+        Reads newest files first through pinned no-reparse single-link file
+        handles with per-line and total byte caps.
         """
 
         type_filter: Optional[frozenset[str]] = (
@@ -258,40 +354,58 @@ class WearLedgerService:
         since_str = _format_ts(since) if since is not None else None
         until_str = _format_ts(until) if until is not None else None
 
+        if not self._base_dir.exists():
+            return []
+
         events: list[WearLedgerEvent] = []
-        for path in self._all_event_files():
-            try:
-                with open(path, "rb") as handle:
-                    for raw_line in handle:
-                        line = raw_line.decode("utf-8", errors="replace").strip()
-                        if not line:
-                            continue
-                        try:
-                            payload = json.loads(line)
-                        except (json.JSONDecodeError, RecursionError):
-                            # Skip corrupted lines rather than aborting the
-                            # entire read — partial recovery beats blank
-                            # screen after a crash mid-write.
-                            continue
-                        try:
-                            event = WearLedgerEvent.from_dict(payload)
-                        except (ValueError, TypeError, AttributeError):
-                            # AttributeError: a JSONL line that parses to a
-                            # non-object root (``5`` / ``"x"`` / ``[]`` / ``null``)
-                            # reaches ``.get`` in the codec. Skip that line like
-                            # any other corrupted one rather than aborting the read.
-                            continue
-                        if type_filter is not None and event.event_type not in type_filter:
-                            continue
-                        if since_str is not None and event.ts < since_str:
-                            continue
-                        if until_str is not None and event.ts > until_str:
-                            continue
-                        events.append(event)
-            except OSError:
-                logger.exception(
-                    "WearLedgerService.read_events: failed to read %r", str(path)
-                )
+        bytes_read = 0
+        try:
+            with guarded_output_directory(
+                self._base_dir, self._base_dir, allow_fallback=False
+            ) as output:
+                for path in self._all_event_files():
+                    if bytes_read >= MAX_READ_TOTAL_BYTES:
+                        break
+                    try:
+                        with output.open_binary_read(path.name) as handle:
+                            while bytes_read < MAX_READ_TOTAL_BYTES:
+                                raw_line = handle.readline(MAX_READ_LINE_BYTES + 1)
+                                if not raw_line:
+                                    break
+                                bytes_read += len(raw_line)
+                                if len(raw_line) > MAX_READ_LINE_BYTES and not raw_line.endswith(b"\n"):
+                                    while bytes_read < MAX_READ_TOTAL_BYTES:
+                                        chunk = handle.readline(MAX_READ_LINE_BYTES)
+                                        if not chunk:
+                                            break
+                                        bytes_read += len(chunk)
+                                        if chunk.endswith(b"\n"):
+                                            break
+                                    continue
+                                line = raw_line.decode("utf-8", errors="replace").strip()
+                                if not line:
+                                    continue
+                                try:
+                                    payload = json.loads(line)
+                                except (json.JSONDecodeError, RecursionError):
+                                    continue
+                                try:
+                                    event = WearLedgerEvent.from_dict(payload)
+                                except (ValueError, TypeError, AttributeError):
+                                    continue
+                                if type_filter is not None and event.event_type not in type_filter:
+                                    continue
+                                if since_str is not None and event.ts < since_str:
+                                    continue
+                                if until_str is not None and event.ts > until_str:
+                                    continue
+                                events.append(event)
+                    except (OSError, ValueError):
+                        logger.exception(
+                            "WearLedgerService.read_events: failed to read %s", path.name
+                        )
+        except (OSError, ValueError):
+            return []
 
         events.sort(key=lambda e: e.ts, reverse=True)
         if limit is not None and limit >= 0:
@@ -299,20 +413,24 @@ class WearLedgerService:
         return events
 
     def _all_event_files(self) -> list[Path]:
-        """Return active + rotated files in stable order (newest active last)."""
+        """Return active + rotated files newest-first (active first, archives desc)."""
 
-        if not self._base_dir.exists():
+        try:
+            entries = list_guarded_directory(
+                self._base_dir, max_entries=_MAX_LEDGER_DIRECTORY_ENTRIES
+            )
+        except (OSError, ValueError):
             return []
         files: list[Path] = []
-        active = self.active_path
-        if active.exists():
-            files.append(active)
-        # Rotated archives — sorted alphabetically, which equals
-        # chronologically because the stamp is YYYYMMDD_HHMMSS.
-        rotated = sorted(
-            self._base_dir.glob(f"{ROTATED_PREFIX}*{ROTATED_SUFFIX}"),
-            key=lambda p: p.name,
-        )
+        rotated: list[Path] = []
+        for entry in entries:
+            if not _is_ordinary_regular_file(entry):
+                continue
+            if entry.name == ACTIVE_FILENAME:
+                files.append(entry)
+            elif entry.name.startswith(ROTATED_PREFIX) and entry.name.endswith(ROTATED_SUFFIX):
+                rotated.append(entry)
+        rotated.sort(key=lambda p: _archive_sort_key(p.name), reverse=True)
         files.extend(rotated)
         return files
 
@@ -321,23 +439,50 @@ class WearLedgerService:
     # ------------------------------------------------------------------
 
     def count_events(self) -> int:
-        """Total events across all files. Best-effort; returns 0 on failure."""
+        """Total events across all files (bounded guarded read). Returns 0 on failure."""
 
+        if not self._base_dir.exists():
+            return 0
         total = 0
-        for path in self._all_event_files():
-            try:
-                with open(path, "rb") as handle:
-                    for raw_line in handle:
-                        if raw_line.strip():
-                            total += 1
-            except OSError:
-                continue
+        bytes_read = 0
+        try:
+            with guarded_output_directory(
+                self._base_dir, self._base_dir, allow_fallback=False
+            ) as output:
+                for path in self._all_event_files():
+                    if bytes_read >= MAX_READ_TOTAL_BYTES:
+                        break
+                    try:
+                        with output.open_binary_read(path.name) as handle:
+                            while bytes_read < MAX_READ_TOTAL_BYTES:
+                                raw_line = handle.readline(MAX_READ_LINE_BYTES + 1)
+                                if not raw_line:
+                                    break
+                                bytes_read += len(raw_line)
+                                if len(raw_line) > MAX_READ_LINE_BYTES and not raw_line.endswith(b"\n"):
+                                    while bytes_read < MAX_READ_TOTAL_BYTES:
+                                        chunk = handle.readline(MAX_READ_LINE_BYTES)
+                                        if not chunk:
+                                            break
+                                        bytes_read += len(chunk)
+                                        if chunk.endswith(b"\n"):
+                                            break
+                                    continue
+                                if raw_line.strip():
+                                    total += 1
+                    except (OSError, ValueError):
+                        continue
+        except (OSError, ValueError):
+            return 0
         return total
 
 
 __all__ = [
     "ACTIVE_FILENAME",
+    "DEFAULT_MAX_ROTATED_ARCHIVES",
     "DEFAULT_ROTATION_BYTES",
+    "MAX_READ_LINE_BYTES",
+    "MAX_READ_TOTAL_BYTES",
     "ROTATED_PREFIX",
     "ROTATED_SUFFIX",
     "WearLedgerService",

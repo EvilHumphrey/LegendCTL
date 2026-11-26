@@ -119,21 +119,21 @@ class TestLoggingVerbosityCombo(unittest.TestCase):
             i18n.t(preferences_screen.LOGGING_VERBOSITY_KEY_FOR[v])
             for v in preferences_screen.LOGGING_VERBOSITY_VALUES
         ]
-        self.assertEqual(labels, ["安静", "正常", "详细"])
+        self.assertEqual(labels, ["关闭", "安静", "正常", "详细"])
 
     def test_combo_options_localize_to_en(self) -> None:
         labels = [
             i18n.t(preferences_screen.LOGGING_VERBOSITY_KEY_FOR[v])
             for v in preferences_screen.LOGGING_VERBOSITY_VALUES
         ]
-        self.assertEqual(labels, ["Quiet", "Normal", "Verbose"])
+        self.assertEqual(labels, ["Off", "Quiet", "Normal", "Verbose"])
 
     def test_canonical_values_remain_latin(self) -> None:
         # The settings.json stores the canonical (Latin) value; only the
         # combo's display label localizes.
         self.assertEqual(
             preferences_screen.LOGGING_VERBOSITY_VALUES,
-            ("Quiet", "Normal", "Verbose"),
+            ("Off", "Quiet", "Normal", "Verbose"),
         )
 
 

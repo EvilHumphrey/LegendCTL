@@ -4241,8 +4241,7 @@ class AppShell:
                 # overclaim. (An empty snapshot with zero attempts and zero
                 # failures is a real, if vacuous, apply and still records.)
                 logger.debug(
-                    "Skipping last-applied record for %r — apply attempted nothing",
-                    profile_name,
+                    "Skipping last-applied record — apply attempted nothing"
                 )
                 return
             stable_identifier = (
@@ -4264,8 +4263,7 @@ class AppShell:
             )
         except Exception:
             logger.exception(
-                "Last-applied record write failed for %r — apply result unaffected",
-                profile_name,
+                "Last-applied record write failed — apply result unaffected"
             )
 
     def _update_last_applied_after_retry_safe(
@@ -4942,9 +4940,8 @@ class AppShell:
         # combo do not snap to the post-write read; the user's live-write value
         # is what they expect to see after "Apply profile only".
         logger.debug(
-            "_apply_wrapper_profile_snapshot: name=%r include_device=%s "
+            "_apply_wrapper_profile_snapshot: include_device=%s "
             "snapshot.step_size=%s snapshot.polling_rate=%s",
-            name,
             include_device,
             snapshot.step_size,
             snapshot.polling_rate,
@@ -5431,10 +5428,15 @@ class AppShell:
                 dpg.delete_item("crash_review_modal")
 
         def _on_save() -> None:
+            from zd_app.storage._output_guards import guarded_output_directory
+
             try:
                 if hasattr(os, "startfile"):
-                    os.startfile(str(crashes_dir))  # type: ignore[attr-defined]
-            except OSError:
+                    with guarded_output_directory(
+                        crashes_dir, user_data_dir, allow_fallback=False
+                    ) as directory:
+                        os.startfile(str(directory.path))  # type: ignore[attr-defined]
+            except (OSError, ValueError):
                 logger.exception("crash review: could not open crashes dir")
             _mark_all_reviewed()
 
@@ -5485,14 +5487,6 @@ class AppShell:
                 )
                 with dpg.tooltip(github_btn):
                     dpg.add_text(t("crash.review.github_disabled"), wrap=320)
-                send_btn = dpg.add_button(
-                    label=t("crash.review.send_button"),
-                    width=180,
-                    enabled=False,
-                    tag="crash_review_send_button",
-                )
-                with dpg.tooltip(send_btn):
-                    dpg.add_text(t("crash.review.send_disabled"), wrap=320)
                 dpg.add_button(
                     label=t("crash.review.dismiss_button"),
                     width=110,
@@ -6237,7 +6231,11 @@ class AppShell:
             render_log_message(self._apply_status_message),
             self._apply_status_success,
         )
-        logger.info("_update_apply_status setting widget to: %s", self._apply_status_text)
+        logger.debug(
+            "_update_apply_status updated: success=%s key=%s",
+            self._apply_status_success,
+            getattr(self._apply_status_message, "key", None),
+        )
         self._set_if_exists("settings_v2_status_text", self._apply_status_text)
         self._set_if_exists("footer_status_text", self._apply_status_text)
 
@@ -7253,7 +7251,7 @@ class AppShell:
             return None
         except Exception:  # noqa: BLE001 - a nudge must never crash the write path
             logger.exception(
-                "step_size save-nudge: could not load active profile %r", name
+                "step_size save-nudge: could not load active profile"
             )
             return None
         stored = getattr(getattr(profile, "snapshot", None), "step_size", None)
@@ -7400,8 +7398,8 @@ class AppShell:
             pending = throttle.peek_pending()
             if pending:
                 logger.debug(
-                    "Slider trailing writes deferred behind in-flight HID job: %r",
-                    pending,
+                    "Slider trailing writes deferred behind in-flight HID job: count=%d",
+                    len(pending),
                 )
             return
         now = time.monotonic()
@@ -9444,9 +9442,14 @@ class AppShell:
 
         if not hasattr(os, "startfile"):
             return
+        from zd_app.storage._output_guards import guarded_output_directory
+
         try:
-            os.startfile(str(path.parent))  # type: ignore[attr-defined]
-        except OSError:
+            with guarded_output_directory(
+                path.parent, path.parent, allow_fallback=False
+            ) as directory:
+                os.startfile(str(directory.path))  # type: ignore[attr-defined]
+        except (OSError, ValueError):
             logger.exception("Diagnostics rich bundle: failed to open folder")
 
     def open_diagnostics_bundle_folder(self) -> None:
@@ -9479,8 +9482,22 @@ class AppShell:
             self.refresh_current_screen()
 
     def update_setting(self, key: str, value) -> None:
-        setattr(self.settings, key, value)
-        self.settings_store.save(self.settings)
+        if key == "logging_verbosity":
+            from zd_app.services.logging_setup import (
+                apply_logging_verbosity,
+                normalize_logging_verbosity,
+            )
+
+            value = normalize_logging_verbosity(value)
+            setattr(self.settings, key, value)
+            # Apply the live logging change even if saving preferences fails
+            # (e.g. disk full), so switching Logging Verbosity to Off always
+            # stops file writes immediately.
+            self._guarded_settings_save("update logging verbosity")
+            apply_logging_verbosity(self.settings.logging_verbosity)
+        else:
+            setattr(self.settings, key, value)
+            self.settings_store.save(self.settings)
         self._log_setting_updated(key)
         self.refresh_shell()
 
@@ -9511,8 +9528,11 @@ class AppShell:
         self._log_setting_updated("language")
 
     def restore_app_defaults(self) -> None:
+        from zd_app.services.logging_setup import apply_logging_verbosity
+
         self.settings = AppSettings()
         self._guarded_settings_save("restore defaults")
+        apply_logging_verbosity(self.settings.logging_verbosity)
         self._locale_router.set_locale(self.settings.language)
         self.device_service.log_i18n_event("log.settings.restored_defaults")
         # LocaleRouter no-ops when the locale is already current, but Restore

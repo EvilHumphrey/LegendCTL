@@ -317,6 +317,7 @@ class WearLedgerRotationTests(unittest.TestCase):
             base_dir=self.base,
             utc_now=lambda: datetime(2026, 5, 26, 12, 0, 0, tzinfo=timezone.utc),
             rotation_bytes=768,
+            max_rotated_archives=64,
         )
         workers = 2
         events_per_worker = 24

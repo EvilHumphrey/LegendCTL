@@ -681,7 +681,7 @@ def _on_export_markdown(shell, service: HealthReportService) -> None:
     try:
         path = _save_report(shell, report, suffix=".md", content=to_markdown(report))
         dpg.set_value(TAG_EXPORT_STATUS, t("health_report.summary.export.success", path=str(path)))
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         logger.exception("Health Report Markdown export failed")
         dpg.set_value(TAG_EXPORT_STATUS, t("health_report.summary.export.failure", reason=str(exc)))
 
@@ -693,7 +693,7 @@ def _on_export_json(shell, service: HealthReportService) -> None:
     try:
         path = _save_report(shell, report, suffix=".json", content=to_json(report))
         dpg.set_value(TAG_EXPORT_STATUS, t("health_report.summary.export.success", path=str(path)))
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         logger.exception("Health Report JSON export failed")
         dpg.set_value(TAG_EXPORT_STATUS, t("health_report.summary.export.failure", reason=str(exc)))
 
@@ -711,12 +711,12 @@ def _on_copy_summary(shell, service: HealthReportService) -> None:
 
 
 def _save_report(shell, report, *, suffix: str, content: str) -> Path:
+    from zd_app.storage._output_guards import guarded_output_directory
+
     base_dir = _user_health_report_dir(shell)
-    base_dir.mkdir(parents=True, exist_ok=True)
     filename = f"zd_health_report_{time.strftime('%Y-%m-%d_%H%M%S')}{suffix}"
-    target = base_dir / filename
-    target.write_text(content, encoding="utf-8")
-    return target
+    with guarded_output_directory(base_dir, base_dir, allow_fallback=False) as output:
+        return output.write_text(filename, content)
 
 
 def _user_health_report_dir(shell) -> Path:

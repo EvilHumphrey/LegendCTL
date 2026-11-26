@@ -295,7 +295,8 @@ class WrapperProfileStoreTests(unittest.TestCase):
 
             self.assertEqual([profile.name for profile in profiles], ["Good"])
             self.assertEqual(skipped, [bad_path])
-            self.assertIn("Failed to load profile bad.json", logs.output[0])
+            self.assertIn("Failed to load profile file (JSONDecodeError)", logs.output[0])
+            self.assertNotIn("bad.json", logs.output[0])
 
     def test_list_profiles_returns_skipped_for_schema_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

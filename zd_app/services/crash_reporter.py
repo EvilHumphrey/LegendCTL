@@ -72,6 +72,7 @@ _MINIDUMP_OPT_IN = False
 _CRASHES_README_FILENAME = "_README.txt"
 _CRASH_REPORT_NAME = re.compile(r"^(\d{8}T\d{6}Z)(?:_([1-9]\d{0,3}))?\.txt$")
 _MAX_CRASH_DIRECTORY_ENTRIES = 1024
+_MAX_REVIEWED_CRASH_PAIRS = 50
 MAX_CRASH_REPORT_PREVIEW_BYTES = 256 * 1024
 
 
@@ -194,6 +195,7 @@ def install_crash_handlers(user_data_dir: Path) -> None:
         logger.debug("Native Windows crash hook deferred (see comment).")
 
     _installed = True
+    _prune_reviewed_crash_pairs(crashes_dir, user_data_dir=user_data_dir)
     logger.info("Crash handlers installed; reports go to %s", crashes_dir)
 
 
@@ -296,6 +298,86 @@ def mark_crashes_reviewed(user_data_dir: Path, files: list[Path]) -> None:
                     logger.warning("Could not write reviewed marker for %s: %s", f, exc)
     except (OSError, ValueError) as exc:
         logger.warning("Could not open crash directory for review markers: %s", exc)
+    _prune_reviewed_crash_pairs(crashes_dir, user_data_dir=Path(user_data_dir))
+
+
+def _is_regular_non_reparse(path: Path) -> bool:
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    if getattr(info, "st_file_attributes", 0) & 0x400:
+        return False
+    return True
+
+
+def _prune_reviewed_crash_pairs(
+    crashes_dir: Path,
+    *,
+    user_data_dir: Path | None = None,
+    keep: int = _MAX_REVIEWED_CRASH_PAIRS,
+) -> int:
+    """Delete oldest reviewed ``<ts>.txt`` + ``<ts>.txt.reviewed`` pairs beyond ``keep``.
+
+    Never touches unread reports, ``_faulthandler.log``, or ``_README.txt``.
+    Unlinks the report first via a pinned handle-bound delete and only unlinks
+    the ``.reviewed`` marker if the report itself is gone, so a failed delete
+    never causes a reviewed crash to resurface as unread.
+    """
+
+    keep = max(0, int(keep))
+    crashes_dir = Path(crashes_dir)
+    allowed_root = Path(user_data_dir) if user_data_dir is not None else crashes_dir
+    try:
+        entries = list_guarded_directory(
+            crashes_dir, max_entries=_MAX_CRASH_DIRECTORY_ENTRIES
+        )
+    except (OSError, ValueError):
+        return 0
+
+    by_name = {entry.name: entry for entry in entries}
+    reviewed_pairs: list[tuple[str, str]] = []
+    for entry in entries:
+        if _CRASH_REPORT_NAME.fullmatch(entry.name) is None:
+            continue
+        marker_name = entry.name + ".reviewed"
+        marker = by_name.get(marker_name)
+        if marker is None:
+            continue
+        if not _is_regular_non_reparse(entry) or not _is_regular_non_reparse(marker):
+            continue
+        reviewed_pairs.append((entry.name, marker_name))
+
+    reviewed_pairs.sort(key=lambda pair: pair[0])
+    excess = len(reviewed_pairs) - keep
+    if excess <= 0:
+        return 0
+
+    pruned = 0
+    try:
+        with guarded_output_directory(
+            crashes_dir, allowed_root, allow_fallback=False
+        ) as output:
+            for report_name, marker_name in reviewed_pairs[:excess]:
+                try:
+                    output.unlink_file(report_name)
+                except FileNotFoundError:
+                    pass
+                except (OSError, ValueError):
+                    logger.warning("Could not prune reviewed crash report %s", report_name)
+                    continue
+                try:
+                    output.unlink_file(marker_name)
+                except FileNotFoundError:
+                    pass
+                except (OSError, ValueError):
+                    logger.warning("Could not prune reviewed crash marker %s", marker_name)
+                pruned += 1
+    except (OSError, ValueError):
+        return pruned
+    return pruned
 
 
 # ---------------------------------------------------------------------------

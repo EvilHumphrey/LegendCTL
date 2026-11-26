@@ -24,7 +24,6 @@ controller.
 from __future__ import annotations
 
 import logging
-import logging.handlers
 import os
 import sys
 import threading
@@ -35,7 +34,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from zd_app.services import crash_reporter
 from zd_app.services.device_service import DeviceService
 from zd_app.services.diagnostics_service import DiagnosticsService
-from zd_app.services.path_scrub import PathScrubbingFormatter
+from zd_app.services.logging_setup import (
+    LOG_FORMAT,
+    apply_logging_verbosity,
+    begin_startup_logging,
+    shutdown_file_logging,
+)
 from zd_app.services.profile_service import ProfileService
 from zd_app.services.settings_service import SettingsService, SetPollingRateOutcome
 from zd_app.services.diagnostic_bundle import DiagnosticBundleService
@@ -79,47 +83,25 @@ def _settings_service_watchdog(
 def main() -> int:
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        format=LOG_FORMAT,
     )
-
-    # Install crash handlers BEFORE any further startup work — DPG init,
-    # SettingsService start, and thread spawns can all surface the kinds of
-    # failures the reporter exists to capture.
-    user_data_dir = initialize_user_data_dir()
-    crash_reporter.install_crash_handlers(user_data_dir)
-
-    # File-based INFO log. PyInstaller --windowed builds discard stderr, so
-    # the basicConfig stream handler above goes nowhere visible in production.
-    # Rotate at 5 MB, keep 3 backups — enough headroom for ops triage without
-    # filling the user-data dir.
+    # Buffer early startup records in memory until settings_store.load()
+    # tells us whether file logging is enabled (Off/Quiet/Normal/Verbose).
+    # When Off, logs/ is never created and nothing is written to zd_wrapper.log.
+    settings_service: SettingsService | None = None
     try:
-        log_dir = user_data_dir / "logs"
-        log_dir.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.handlers.RotatingFileHandler(
-            log_dir / "zd_wrapper.log",
-            maxBytes=5 * 1024 * 1024,
-            backupCount=3,
-            encoding="utf-8",
-        )
-        file_handler.setLevel(logging.INFO)
-        # Scrub absolute home paths (username included) from every line written
-        # to the rotating app log — SUPPORT.md asks users to attach this file to
-        # bug reports, and startup / service-constructor lines log absolute
-        # paths. One handler-level formatter catches all sources, including
-        # logger.exception() tracebacks.
-        file_handler.setFormatter(
-            PathScrubbingFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-        )
-        logging.getLogger().addHandler(file_handler)
-        logger.info("File logger attached at %s", log_dir / "zd_wrapper.log")
-    except OSError:
-        logger.exception("Failed to attach file logger; continuing with stderr-only logging")
+        begin_startup_logging()
+        # Install crash handlers BEFORE any further startup work — DPG init,
+        # SettingsService start, and thread spawns can all surface the kinds of
+        # failures the reporter exists to capture.
+        user_data_dir = initialize_user_data_dir()
+        crash_reporter.install_crash_handlers(user_data_dir)
 
-    settings_store = SettingsStore()
-    settings_store.load()  # Load the on-disk settings (empty AppSettings if first run).
+        settings_store = SettingsStore()
+        settings = settings_store.load()  # Load the on-disk settings (empty AppSettings if first run).
+        apply_logging_verbosity(settings.logging_verbosity, user_data_dir=user_data_dir)
 
-    settings_service = SettingsService()
-    try:
+        settings_service = SettingsService()
         settings_start = settings_service.start()
         settings_service_for_ui = settings_service
         if settings_start != SetPollingRateOutcome.OK:
@@ -185,7 +167,9 @@ def main() -> int:
             if watchdog is not None:
                 watchdog.join(timeout=3.0)
     finally:
-        settings_service.stop()
+        if settings_service is not None:
+            settings_service.stop()
+        shutdown_file_logging()
 
 
 if __name__ == "__main__":

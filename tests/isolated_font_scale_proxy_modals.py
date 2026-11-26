@@ -69,7 +69,6 @@ class IsolatedFontScaleProxyModalTest(unittest.TestCase):
                 "crash_review_preview",
                 "crash_review_save_button",
                 "crash_review_github_button",
-                "crash_review_send_button",
                 "crash_review_dismiss_button",
             ),
             case=cell,

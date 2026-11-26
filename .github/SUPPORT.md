@@ -48,18 +48,36 @@ Please fill it in completely:
 
 ### Where the log is
 
-LegendCTL writes a local log to:
+By default (**Settings → Logging Verbosity = Normal**), LegendCTL writes a
+local rotating log (5 MB, 3 backups; home paths and device-instance IDs
+scrubbed) to:
 
 ```
 %APPDATA%\ZDUltimateLegend\logs\zd_wrapper.log
 ```
 
-Attach the most recent log to your Issue. You can also generate a
-path-sanitized **Diagnostic Bundle** from the in-app **Diagnostics** screen and
-attach it alongside — it packages the diagnostic report (module passports,
-recent Health Reports, and a privacy-conservative wear-ledger summary) with
-local paths stripped. The bundle does **not** contain the app log, so attach
-`zd_wrapper.log` separately if you're comfortable sharing it.
+Operational file logging is **optional**: you can switch **Settings → Logging
+Verbosity** between **Off** (stops writing `zd_wrapper.log` and keeps the
+logger from creating `logs/` on normal launches — note that one-time legacy
+data-directory migration can still copy a pre-existing `logs/` folder before
+settings load), **Quiet** (warnings and errors), **Normal** (default), and
+**Verbose** (debug detail). If you turned logging **Off**, switch back to
+**Normal** or **Verbose** while reproducing an issue so you have a log to
+attach.
+
+Review `zd_wrapper.log` before attaching it to a public Issue (error paths can
+still include profile-derived filenames or exception text). You can also
+generate a path-sanitized **Diagnostic Bundle** from the in-app **Diagnostics**
+screen and attach it alongside — it packages the diagnostic report (module
+passports, recent Health Reports, and a privacy-conservative wear-ledger
+summary) with local paths stripped. The bundle does **not** contain the app
+log, so attach `zd_wrapper.log` separately if you're comfortable sharing it.
+
+> **Local safety records:** The local **Wear Ledger** (`wear_ledger/`, keeps up
+> to 10 rotated archives) and local **Crash Reports** (`crashes/`, keeps up to
+> 50 reviewed report pairs) are safety and recovery records stored only on your
+> machine — never transmitted anywhere — and remain active even when operational
+> file logging is set to **Off**.
 
 ## Reports for untested / unsupported devices
 
