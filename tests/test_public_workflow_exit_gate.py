@@ -20,7 +20,7 @@ EVALUATOR = REPO_ROOT / ".github" / "scripts" / "evaluate-unittest-result.ps1"
 class PublicWorkflowExitGateTests(unittest.TestCase):
     def test_both_workflows_use_the_shared_evaluator(self) -> None:
         expected_counts = {
-            "ci.yml": 2,
+            "ci.yml": 1,
             "release-build.yml": 1,
         }
         for workflow in WORKFLOWS:

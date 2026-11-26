@@ -79,49 +79,6 @@ jobs:
           path: test_output_windows.txt
           retention-days: 14
 
-  test:
-    # Kept temporarily during the ruleset handoff to "Test suite (Windows)".
-    name: Test suite (Windows · Python 3.12)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: '3.12'
-
-      - name: Install hash-verified runtime dependency
-        shell: pwsh
-        run: |
-          @"
-          dearpygui==2.3.1 --hash=sha256:26ed9197cdb30099c665bd1b23724e0dba60ad06b71344ecca7e52748c21874b
-          "@ | Set-Content -LiteralPath .ci-runtime-py312.lock -Encoding ascii
-          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps --require-hashes -r .ci-runtime-py312.lock
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Remove-Item -LiteralPath .ci-runtime-py312.lock
-
-      - name: Run test suite (constraint gates included)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-          python -m unittest discover -s tests 2>&1 | Tee-Object -FilePath test_output.txt
-          $code = $LASTEXITCODE
-          & .\.github\scripts\evaluate-unittest-result.ps1 `
-            -LogPath test_output.txt `
-            -ProcessExitCode $code `
-            -MinimumTestCount 3000
-          exit $LASTEXITCODE
-
-      - name: Upload test log
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
-        with:
-          name: test-output
-          path: test_output.txt
-          retention-days: 14
-
   audit:
     name: Dependency CVE audit (pip-audit)
     runs-on: windows-latest
