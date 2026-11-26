@@ -17,18 +17,18 @@ concurrency:
 jobs:
   audit:
     name: Weekly dependency CVE audit (pip-audit)
-    # The release lock includes LegendCTL's Windows build closure, so audit it
-    # on the same platform. This job intentionally runs no product/UI tests.
+    # The release and lock-refresher locks include LegendCTL's Windows build
+    # closures, so audit both on the same platform. Runs no product/UI tests.
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Set up Python 3.12
+      - name: Set up pinned Python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: '3.12'
+          python-version-file: '.python-version'
 
       - name: Create isolated audit environment
         shell: pwsh
@@ -36,29 +36,38 @@ jobs:
           python -m venv .venv-audit
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Download the hash-locked audit closure
+      - name: Download and install the hash-locked release audit closure
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path .audit-wheelhouse | Out-Null
           .\.venv-audit\Scripts\python.exe -m pip download --disable-pip-version-check --only-binary=:all: --no-deps `
             --require-hashes --dest .audit-wheelhouse -r requirements-release.lock
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Install the audit closure offline
-        shell: pwsh
-        run: |
           .\.venv-audit\Scripts\python.exe -m pip install --disable-pip-version-check --no-index --find-links .audit-wheelhouse `
             --only-binary=:all: --no-deps --require-hashes -r requirements-release.lock
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      - name: Check installed dependency compatibility
-        shell: pwsh
-        run: |
           .\.venv-audit\Scripts\python.exe -m pip check
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Audit installed environment for known CVEs
+      - name: Verify hash-locked lock-refresher tooling closure
+        shell: pwsh
+        run: |
+          python -m venv .venv-lock-tools
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path .lock-tools-wheelhouse | Out-Null
+          .\.venv-lock-tools\Scripts\python.exe -m pip download --disable-pip-version-check --only-binary=:all: --no-deps `
+            --require-hashes --dest .lock-tools-wheelhouse -r requirements-lock-tools.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv-lock-tools\Scripts\python.exe -m pip install --disable-pip-version-check --no-index --find-links .lock-tools-wheelhouse `
+            --only-binary=:all: --no-deps --require-hashes -r requirements-lock-tools.lock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv-lock-tools\Scripts\python.exe -m pip check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Audit release and lock-refresher closures for known CVEs
         shell: pwsh
         run: |
           .\.venv-audit\Scripts\python.exe -m pip_audit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\.venv-audit\Scripts\python.exe -m pip_audit -r requirements-lock-tools.lock --no-deps --disable-pip
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

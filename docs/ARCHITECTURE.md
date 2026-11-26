@@ -129,8 +129,9 @@ always-on Tier-1 font-pressure matrix is different: every cell launches a fresh
 subprocess with a real DearPyGui context and viewport; `ZD_RENDER_MATRIX=full` adds the
 broader Tier-2 cell set. Other real-DPG behaviors, including the modal law, also have
 isolated subprocess gates and manual bench tools under `tools/`. Suite conventions:
-system Python 3.12 with `dearpygui` installed (the release CI additionally runs the full
-suite on Python 3.13 — the runtime the release binaries ship with — before building); exit
+64-bit Python matching `.python-version` (currently `3.14.10`) with `dearpygui`
+installed (CI and release builds run the full suite on that same pinned runtime
+before building); exit
 code 139 (or Windows' signed/unsigned `0xC0000005` form after a complete `OK`
 summary) on teardown is a known DPG artifact, not a failure. Skip totals vary by
 environment: Tier-2 cells skip unless the full matrix is requested, and registered
@@ -144,7 +145,7 @@ build on violation.
 `tools\build_release.ps1` → PyInstaller portable folder + ZIP + (when Inno Setup 6 is
 present) an installer EXE, plus `SHA256SUMS.txt`; `tools\install_local.ps1` mirrors the
 freshest build to `local-install\` and refreshes Desktop/Start-Menu shortcuts. Official
-release assets (v2.5.0+) are CI-built on Python 3.13 from the release tag and carry
+release assets are CI-built on the pinned Python in `.python-version` from the release tag and carry
 build-provenance attestations (`gh attestation verify`); there is no AuthentiCode code
 signing yet, and every release publishes hashes. No auto-update, no telemetry —
 matching the constraint architecture.

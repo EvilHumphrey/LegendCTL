@@ -22,6 +22,6 @@ pip==26.2.2
 # Keep release locking and extraction above their advisory-fixed floors.
 # These are transitive build-tool dependencies, but pinning them here prevents
 # a future resolver change from selecting a known-vulnerable release.
-filelock==4.2.1
-setuptools==84.1.0
-msgpack==1.2.3
+filelock==4.2.9
+setuptools==84.2.1
+msgpack==1.2.4

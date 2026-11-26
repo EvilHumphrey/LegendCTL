@@ -19,12 +19,17 @@ EVALUATOR = REPO_ROOT / ".github" / "scripts" / "evaluate-unittest-result.ps1"
 
 class PublicWorkflowExitGateTests(unittest.TestCase):
     def test_both_workflows_use_the_shared_evaluator(self) -> None:
+        expected_counts = {
+            "ci.yml": 2,
+            "release-build.yml": 1,
+        }
         for workflow in WORKFLOWS:
             with self.subTest(workflow=workflow.name):
                 text = workflow.read_text(encoding="utf-8")
-                self.assertEqual(text.count("evaluate-unittest-result.ps1"), 1)
+                expected = expected_counts[workflow.name]
+                self.assertEqual(text.count("evaluate-unittest-result.ps1"), expected)
                 self.assertNotIn("elseif ($log -match", text)
-                self.assertIn("-MinimumTestCount 3000", text)
+                self.assertEqual(text.count("-MinimumTestCount 3000"), expected)
 
     def test_evaluator_matrix(self) -> None:
         pwsh = shutil.which("pwsh")

@@ -1,12 +1,12 @@
 # Tooling used only to deterministically regenerate requirements-release.lock.
 # Kept in its own lock so the refresher's resolver is version and hash checked.
-pip-tools==7.6.2
+pip-tools==7.7.0
 
 # pip-tools imports pip internals. Pin the compatible security patch release
 # so a future pip release cannot break the lock refresh command at runtime.
 pip==26.2.2
 
 # pip-tools depends on setuptools. Keep it an exact root at the advisory-fixed
-# floor (GHSA-xmj3-9gf7-h52w, fixed in 84.1.0) so the refresher's own tooling
-# venv cannot resolve a release below that fixed floor.
-setuptools==84.1.0
+# floor (GHSA-xmj3-9gf7-h52w, fixed in 84.1.0; bumped to 84.2.1) so the
+# refresher's own tooling venv cannot resolve a release below that fixed floor.
+setuptools==84.2.1

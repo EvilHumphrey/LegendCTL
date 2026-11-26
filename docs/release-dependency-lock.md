@@ -18,7 +18,8 @@ interpreter. Runner-preinstalled packages such as `pipx` stay outside the audite
 closure; they cannot introduce unrelated compatibility failures or be downgraded
 by the locked install. Any install, compatibility, or audit failure stops the job.
 
-Local release builds retain the supported Python 3.12 workflow:
+Local release builds use the exact Python version pinned in `.python-version`
+(currently `3.14.10`, expected at `%LOCALAPPDATA%\Programs\Python\Python314\python.exe`):
 
 ```powershell
 .\tools\setup_dev_env.ps1
@@ -33,9 +34,8 @@ After refreshing the lock, close processes using `.venv-zd`, inspect it, and
 move the known ordinary directory outside the checkout before rerunning setup.
 Setup never deletes or repairs an existing environment, and `-Recreate` is no
 longer supported. Do not delete or move a path that may be a redirect until its
-target and ownership are understood. Hosted releases make a new venv per run.
-Hosted releases remain on the exact Python 3.13.14 pin in
-`.github/workflows/release-build.yml`.
+target and ownership are understood. Hosted releases make a new venv per run
+and read the exact Python pin from `.python-version` (`.github/workflows/release-build.yml`).
 
 ## Refreshing after a reviewed dependency change
 

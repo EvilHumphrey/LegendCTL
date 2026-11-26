@@ -39,9 +39,26 @@ function Invoke-NativeCommand {
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $repoRoot
 
-$py312 = Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"
-if (-not (Test-Path -LiteralPath $py312)) {
-    throw "Python 3.12 is required at $py312 to refresh the release lock."
+$versionFile = Join-Path $repoRoot ".python-version"
+if (-not (Test-Path -LiteralPath $versionFile -PathType Leaf)) {
+    throw "Missing .python-version at $versionFile."
+}
+$pinnedVersion = ([IO.File]::ReadAllText($versionFile)).Trim()
+if ($pinnedVersion -notmatch '^(\d+)\.(\d+)\.(\d+)$') {
+    throw "Invalid .python-version value (expected MAJOR.MINOR.PATCH): $pinnedVersion"
+}
+$pyCompact = "$($Matches[1])$($Matches[2])"
+$pyPinned = Join-Path $env:LOCALAPPDATA "Programs\Python\Python$pyCompact\python.exe"
+if (-not (Test-Path -LiteralPath $pyPinned)) {
+    throw "Python $pinnedVersion is required at $pyPinned to refresh the release lock."
+}
+$actualVersion = (& $pyPinned -I -S -c "import sys; print('.'.join(map(str, sys.version_info[:3])))" 2>&1)
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to probe Python version at ${pyPinned}: $actualVersion"
+}
+$actualVersion = ($actualVersion | Out-String).Trim()
+if ($actualVersion -ne $pinnedVersion) {
+    throw "Python at $pyPinned is $actualVersion, which does not match .python-version ($pinnedVersion)."
 }
 
 $temporaryRoot = Join-Path $repoRoot (".release-lock-refresh-" + [Guid]::NewGuid().ToString("N"))
@@ -65,11 +82,11 @@ try {
 
     # Bootstrap only from the committed, hash-locked tooling closure.
     Invoke-NativeCommand -Label "download hash-locked pip-tools wheelhouse" -ScriptBlock {
-        & $py312 -m pip --isolated download --disable-pip-version-check --only-binary=:all: --no-deps `
+        & $pyPinned -m pip --isolated download --disable-pip-version-check --only-binary=:all: --no-deps `
             --require-hashes --dest $toolWheelhouse -r requirements-lock-tools.lock
     }
     Invoke-NativeCommand -Label "create lock tooling venv" -ScriptBlock {
-        & $py312 -m venv $toolVenv
+        & $pyPinned -I -S -m venv $toolVenv
     }
     Invoke-NativeCommand -Label "install hash-locked pip-tools offline" -ScriptBlock {
         & $toolPython -m pip install --disable-pip-version-check --no-index --find-links $toolWheelhouse `
@@ -106,7 +123,7 @@ try {
     # SHA-256 entries. --no-deps prevents a hidden second resolver from adding
     # a package that is absent from the reviewed lock.
     Invoke-NativeCommand -Label "verify release lock wheel closure" -ScriptBlock {
-        & $py312 -m pip --isolated download --disable-pip-version-check --only-binary=:all: --no-deps `
+        & $pyPinned -m pip --isolated download --disable-pip-version-check --only-binary=:all: --no-deps `
             --require-hashes --dest $releaseWheelhouse -r requirements-release.lock
     }
 
